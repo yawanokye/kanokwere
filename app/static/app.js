@@ -40,7 +40,10 @@ async function api(path, options = {}) {
   if (contentType.includes("application/json")) payload = await response.json();
   if (!response.ok) {
     const message = payload?.detail || payload?.message || `Request failed with status ${response.status}.`;
-    throw new Error(typeof message === "string" ? message : JSON.stringify(message));
+    const error = new Error(typeof message === "string" ? message : JSON.stringify(message));
+    error.status = response.status;
+    error.payload = payload;
+    throw error;
   }
   return payload;
 }
@@ -89,6 +92,9 @@ $("#upload-form").addEventListener("submit", async (event) => {
     const formData = new FormData(event.currentTarget);
     const result = await api("/api/documents", { method: "POST", body: formData });
     state.documentId = result.document_id;
+    pollStartedAt = Date.now();
+    setProcessingSpinner(true);
+    setGenerationActions(false);
     localStorage.setItem("kanokwere_document_id", state.documentId);
     showPanel("prepare", 2);
     pollDocumentStatus();
@@ -101,11 +107,32 @@ $("#upload-form").addEventListener("submit", async (event) => {
 });
 
 let pollHandle = null;
+let pollStartedAt = null;
+const POLL_LIMIT_MS = 9 * 60 * 1000;
+
+function setGenerationActions(visible, allowRetry = true) {
+  const retryButton = $("#retry-generation-button");
+  const restartButton = $("#restart-upload-button");
+  if (retryButton) retryButton.classList.toggle("hidden", !visible || !allowRetry);
+  if (restartButton) restartButton.classList.toggle("hidden", !visible);
+}
+
+function setProcessingSpinner(running) {
+  const spinner = $("#panel-prepare .spinner");
+  if (!spinner) return;
+  spinner.style.animation = running ? "" : "none";
+  spinner.style.animationPlayState = running ? "running" : "paused";
+  spinner.style.opacity = running ? "1" : "0";
+  spinner.style.visibility = running ? "visible" : "hidden";
+}
+
 async function pollDocumentStatus() {
   clearTimeout(pollHandle);
   if (!state.documentId) return;
+  if (!pollStartedAt) pollStartedAt = Date.now();
   try {
     const result = await api(`/api/documents/${state.documentId}/status`);
+    const elapsedMs = Date.now() - pollStartedAt;
     $("#processing-questions").textContent = result.question_count;
     $("#processing-mode").textContent = result.generation_mode === "pending" ? "Pending" : result.generation_mode;
     const widths = { queued: 12, generating: 55, ready: 100, failed: 100 };
@@ -126,18 +153,97 @@ async function pollDocumentStatus() {
           "warning"
         );
       }
+      setGenerationActions(false);
       setTimeout(() => showPanel("ready", 2), 450);
       return;
     }
     if (result.status === "failed") {
       setMessage($("#prepare-error"), result.error || "Question generation failed.", "error");
+      setGenerationActions(true);
+      return;
+    }
+    if (elapsedMs >= POLL_LIMIT_MS) {
+      setMessage(
+        $("#prepare-error"),
+        "Question generation is taking too long and polling has stopped. Retry generation or upload the document again.",
+        "error"
+      );
+      setGenerationActions(true);
       return;
     }
     pollHandle = setTimeout(pollDocumentStatus, 1800);
   } catch (error) {
+    clearTimeout(pollHandle);
+    pollHandle = null;
+    setProcessingSpinner(false);
+
+    const documentMissing = error.status === 404 || /document not found/i.test(error.message || "");
+    if (documentMissing) {
+      clearTimeout(pollHandle);
+      pollHandle = null;
+      localStorage.removeItem("kanokwere_document_id");
+      sessionStorage.removeItem("kanokwere_assessment_id");
+      sessionStorage.removeItem("kanokwere_session_token");
+      state.documentId = null;
+      state.assessmentId = null;
+      state.token = null;
+      pollStartedAt = null;
+      setProcessingSpinner(false);
+      $("#processing-status").textContent = "The saved submission is no longer available.";
+      $("#processing-mode").textContent = "Stopped";
+      $("#processing-progress").style.width = "0%";
+      setMessage($("#prepare-error"));
+      showPanel("upload", 1);
+      setMessage(
+        $("#upload-message"),
+        "The previous submission no longer exists on the server. Please upload the document again.",
+        "error"
+      );
+      return;
+    }
+
     setMessage($("#prepare-error"), error.message, "error");
+    setGenerationActions(true);
   }
 }
+
+const retryGenerationButton = $("#retry-generation-button");
+if (retryGenerationButton) retryGenerationButton.addEventListener("click", async () => {
+  const button = $("#retry-generation-button");
+  button.disabled = true;
+  setMessage($("#prepare-error"), "Restarting question generation…");
+  try {
+    await api(`/api/documents/${state.documentId}/retry`, { method: "POST" });
+    pollStartedAt = Date.now();
+    setProcessingSpinner(true);
+    setGenerationActions(false);
+    $("#processing-questions").textContent = "0";
+    $("#processing-mode").textContent = "Pending";
+    $("#processing-progress").style.width = "12%";
+    $("#processing-status").textContent = "Question generation has restarted.";
+    setMessage($("#prepare-error"));
+    pollDocumentStatus();
+  } catch (error) {
+    setMessage($("#prepare-error"), error.message, "error");
+    setGenerationActions(true);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+const restartUploadButton = $("#restart-upload-button");
+if (restartUploadButton) restartUploadButton.addEventListener("click", () => {
+  clearTimeout(pollHandle);
+  pollStartedAt = null;
+  state.documentId = null;
+  localStorage.removeItem("kanokwere_document_id");
+  $("#upload-form").reset();
+  $("#file-label").textContent = "Choose a PDF, DOCX, or TXT file";
+  setMessage($("#prepare-error"));
+  setProcessingSpinner(true);
+  setGenerationActions(false);
+  showPanel("upload", 1);
+});
 
 $("#consent-checkbox").addEventListener("change", (event) => {
   $("#start-button").disabled = !event.target.checked;
@@ -286,6 +392,7 @@ $("#new-assessment-button").addEventListener("click", () => {
   state.assessmentId = null;
   state.token = null;
   state.currentPosition = null;
+  pollStartedAt = null;
   localStorage.removeItem("kanokwere_document_id");
   $("#upload-form").reset();
   $("#file-label").textContent = "Choose a PDF, DOCX, or TXT file";
