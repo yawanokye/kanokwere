@@ -60,6 +60,9 @@ def start_assessment(db: Session, document_id: str) -> tuple[Assessment, str]:
     db.flush()
 
     questions = list(document.questions)
+    for question in questions:
+        question.time_limit_seconds = settings.question_time_seconds
+    db.flush()
     random.SystemRandom().shuffle(questions)
     for position, question in enumerate(questions, start=1):
         options = json.loads(question.options_json)
@@ -111,7 +114,7 @@ def _mark_timeout(item: AssessmentItem) -> None:
     item.selected_index = None
     item.is_correct = False
     item.timed_out = True
-    item.response_ms = item.question.time_limit_seconds * 1000
+    item.response_ms = settings.question_time_seconds * 1000
 
 
 def _complete(db: Session, assessment: Assessment) -> None:
@@ -148,7 +151,7 @@ def current_question(db: Session, assessment: Assessment) -> dict[str, object]:
             db.refresh(item)
 
         elapsed_ms = _time_elapsed_ms(item)
-        limit_ms = item.question.time_limit_seconds * 1000
+        limit_ms = settings.question_time_seconds * 1000
         if elapsed_ms >= limit_ms:
             _mark_timeout(item)
             assessment.current_position += 1
@@ -162,7 +165,7 @@ def current_question(db: Session, assessment: Assessment) -> dict[str, object]:
             "stem": item.question.stem,
             "options": json.loads(item.shuffled_options_json),
             "difficulty": item.question.difficulty,
-            "time_limit_seconds": item.question.time_limit_seconds,
+            "time_limit_seconds": settings.question_time_seconds,
             "remaining_ms": max(0, limit_ms - elapsed_ms),
         }
 
@@ -183,7 +186,7 @@ def submit_answer(
         raise HTTPException(status_code=409, detail="This question has already been answered.")
 
     elapsed_ms = _time_elapsed_ms(item)
-    limit_ms = item.question.time_limit_seconds * 1000
+    limit_ms = settings.question_time_seconds * 1000
     if elapsed_ms >= limit_ms:
         _mark_timeout(item)
     else:

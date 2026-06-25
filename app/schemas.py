@@ -10,7 +10,7 @@ class GeneratedQuestion(BaseModel):
     options: list[str] = Field(min_length=4, max_length=4)
     correct_option_index: int = Field(ge=0, le=3)
     difficulty: Literal["recall", "understanding", "application"]
-    seconds: int = Field(ge=10, le=15)
+    seconds: int = Field(ge=30, le=30)
     source_quote: str = Field(min_length=8, max_length=500)
     source_location: str = Field(min_length=2, max_length=255)
     explanation: str = Field(min_length=8, max_length=700)

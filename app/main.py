@@ -227,7 +227,7 @@ def begin_assessment(
         "question_count": 20,
         "pass_threshold": settings.pass_threshold,
         "instructions": (
-            "Questions appear one at a time. Each question allows 10 to 15 seconds. "
+            f"Questions appear one at a time. Each question allows {settings.question_time_seconds} seconds. "
             "You cannot return to an earlier question."
         ),
     }
@@ -343,6 +343,7 @@ def admin_assessment_detail(
                 "timed_out": item.timed_out,
                 "response_ms": item.response_ms,
                 "difficulty": item.question.difficulty,
+                "time_limit_seconds": settings.question_time_seconds,
                 "source_location": item.question.source_location,
                 "source_quote": item.question.source_quote,
                 "explanation": item.question.explanation,

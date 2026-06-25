@@ -37,6 +37,7 @@ class Settings:
     max_upload_mb: int = int(os.getenv("MAX_UPLOAD_MB", "15"))
     max_context_chars: int = int(os.getenv("MAX_CONTEXT_CHARS", "80000"))
     pass_threshold: int = int(os.getenv("PASS_THRESHOLD", "80"))
+    question_time_seconds: int = int(os.getenv("QUESTION_TIME_SECONDS", "30"))
     delete_original_after_processing: bool = _as_bool(
         os.getenv("DELETE_ORIGINAL_AFTER_PROCESSING"), True
     )
