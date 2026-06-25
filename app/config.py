@@ -1,0 +1,50 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
+UPLOAD_DIR = BASE_DIR / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _as_bool(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+@dataclass(frozen=True)
+class Settings:
+    app_name: str = os.getenv("APP_NAME", "Kanokwere")
+    environment: str = os.getenv("ENVIRONMENT", "development")
+    database_url: str = os.getenv(
+        "DATABASE_URL",
+        f"sqlite:///{(BASE_DIR / 'kanokwere.db').as_posix()}",
+    )
+    openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
+    openai_model: str = os.getenv("OPENAI_MODEL", "gpt-5.5")
+    admin_key: str = os.getenv("ADMIN_KEY", "change-me-before-production")
+    max_upload_mb: int = int(os.getenv("MAX_UPLOAD_MB", "15"))
+    max_context_chars: int = int(os.getenv("MAX_CONTEXT_CHARS", "80000"))
+    pass_threshold: int = int(os.getenv("PASS_THRESHOLD", "80"))
+    delete_original_after_processing: bool = _as_bool(
+        os.getenv("DELETE_ORIGINAL_AFTER_PROCESSING"), True
+    )
+    allow_demo_questions: bool = _as_bool(
+        os.getenv("ALLOW_DEMO_QUESTIONS"), True
+    )
+    session_token_ttl_minutes: int = int(
+        os.getenv("SESSION_TOKEN_TTL_MINUTES", "30")
+    )
+    max_attempts_per_document: int = int(
+        os.getenv("MAX_ATTEMPTS_PER_DOCUMENT", "1")
+    )
+
+
+settings = Settings()
