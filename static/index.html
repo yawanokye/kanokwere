@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Kanokwere verifies students' knowledge of work submitted under their names.">
+  <title>Kanokwere | Know Your Work</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#" data-view-link="home" aria-label="Kanokwere home">
+      <span class="brand-mark">K</span>
+      <span>
+        <strong>Kanokwere</strong>
+        <small>Know your work. Prove your work.</small>
+      </span>
+    </a>
+    <nav aria-label="Main navigation">
+      <button class="nav-button active" data-view-link="home">Student</button>
+      <button class="nav-button" data-view-link="admin">Lecturer</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="view-home" class="view active">
+      <div class="hero">
+        <div class="hero-copy">
+          <span class="eyebrow">Document ownership assessment</span>
+          <h1>Can students explain the work submitted under their names?</h1>
+          <p>Upload a document, answer 20 document-specific questions, and receive an ownership confidence score. The standard threshold is 80%.</p>
+          <div class="hero-stats" aria-label="Assessment summary">
+            <div><strong>20</strong><span>questions</span></div>
+            <div><strong>10–15s</strong><span>per question</span></div>
+            <div><strong>80%</strong><span>threshold</span></div>
+          </div>
+        </div>
+        <aside class="principle-card">
+          <h2>Fair assessment rules</h2>
+          <ul>
+            <li>Questions come from the uploaded document only.</li>
+            <li>Each answer is supported by a retained source passage.</li>
+            <li>A low score triggers further verification, not an automatic misconduct finding.</li>
+          </ul>
+        </aside>
+      </div>
+
+      <div class="workflow-shell">
+        <ol class="steps" aria-label="Progress">
+          <li class="step active" data-step="1"><span>1</span>Upload</li>
+          <li class="step" data-step="2"><span>2</span>Prepare</li>
+          <li class="step" data-step="3"><span>3</span>Assessment</li>
+          <li class="step" data-step="4"><span>4</span>Result</li>
+        </ol>
+
+        <section id="panel-upload" class="panel active" aria-labelledby="upload-heading">
+          <div class="panel-heading">
+            <div>
+              <span class="eyebrow">Step 1</span>
+              <h2 id="upload-heading">Submit the student’s work</h2>
+            </div>
+            <span class="privacy-chip">Original file not retained</span>
+          </div>
+          <form id="upload-form" class="form-grid">
+            <label>
+              Student name
+              <input name="student_name" type="text" maxlength="180" required autocomplete="name" placeholder="e.g. Ama Mensah">
+            </label>
+            <label>
+              Student ID
+              <input name="student_id" type="text" maxlength="100" required placeholder="e.g. ED/PSY/24/0012">
+            </label>
+            <label class="full-width">
+              Document title
+              <input name="title" type="text" maxlength="300" required placeholder="Enter the assignment, project, dissertation, or thesis title">
+            </label>
+            <label class="file-drop full-width" id="file-drop">
+              <input name="file" id="file-input" type="file" accept=".pdf,.docx,.txt" required>
+              <span class="file-icon">↑</span>
+              <strong id="file-label">Choose a PDF, DOCX, or TXT file</strong>
+              <small>Maximum size: 15 MB. Scanned PDFs must contain selectable text.</small>
+            </label>
+            <div class="full-width form-actions">
+              <p class="form-note">The extracted text is stored for assessment and reporting. The original uploaded file is processed in memory and discarded.</p>
+              <button class="primary-button" type="submit">Generate ownership assessment</button>
+            </div>
+          </form>
+          <div id="upload-message" class="message" role="status" aria-live="polite"></div>
+        </section>
+
+        <section id="panel-prepare" class="panel" aria-labelledby="prepare-heading">
+          <div class="processing-card">
+            <div class="spinner" aria-hidden="true"></div>
+            <span class="eyebrow">Step 2</span>
+            <h2 id="prepare-heading">Preparing the assessment</h2>
+            <p id="processing-status">Reading the document and generating 20 grounded questions.</p>
+            <div class="progress-track"><span id="processing-progress"></span></div>
+            <div class="processing-grid">
+              <div><span id="processing-questions">0</span><small>validated questions</small></div>
+              <div><span id="processing-mode">Pending</span><small>generation mode</small></div>
+            </div>
+          </div>
+          <div id="prepare-error" class="message error" role="alert"></div>
+        </section>
+
+        <section id="panel-ready" class="panel" aria-labelledby="ready-heading">
+          <div class="panel-heading">
+            <div>
+              <span class="eyebrow">Ready</span>
+              <h2 id="ready-heading">Assessment instructions</h2>
+            </div>
+            <span class="threshold-badge">Pass threshold: 80%</span>
+          </div>
+          <div class="instruction-grid">
+            <article><strong>One question at a time</strong><p>You cannot return to a previous question after answering or timing out.</p></article>
+            <article><strong>10 to 15 seconds</strong><p>The time allowed depends on the question’s level of difficulty.</p></article>
+            <article><strong>20 questions</strong><p>At least 16 correct answers are required to meet the 80% threshold.</p></article>
+            <article><strong>Focus monitoring</strong><p>Leaving the test screen is logged for lecturer review but does not automatically change the score.</p></article>
+          </div>
+          <label class="consent-row">
+            <input id="consent-checkbox" type="checkbox">
+            <span>I understand the assessment rules and I am ready to begin.</span>
+          </label>
+          <div id="mode-warning" class="message warning"></div>
+          <div class="form-actions align-right">
+            <button id="start-button" class="primary-button" type="button" disabled>Start assessment</button>
+          </div>
+        </section>
+
+        <section id="panel-test" class="panel test-panel" aria-labelledby="question-heading">
+          <div class="test-header">
+            <div>
+              <span id="question-progress-text" class="eyebrow">Question 1 of 20</span>
+              <div class="question-progress"><span id="question-progress-bar"></span></div>
+            </div>
+            <div class="timer" id="timer" aria-label="Time remaining">
+              <strong id="timer-value">15.0</strong>
+              <small>seconds</small>
+            </div>
+          </div>
+          <div class="difficulty-row">
+            <span id="difficulty-badge" class="difficulty-badge">Understanding</span>
+            <span>Choose the best answer.</span>
+          </div>
+          <h2 id="question-heading" class="question-text">Loading question…</h2>
+          <div id="options" class="options" role="radiogroup" aria-labelledby="question-heading"></div>
+          <div id="test-message" class="message" role="status" aria-live="polite"></div>
+        </section>
+
+        <section id="panel-result" class="panel" aria-labelledby="result-heading">
+          <div class="result-layout">
+            <div class="score-ring" id="score-ring">
+              <strong id="score-value">0%</strong>
+              <span>ownership score</span>
+            </div>
+            <div class="result-copy">
+              <span class="eyebrow">Assessment complete</span>
+              <h2 id="result-heading">Result</h2>
+              <p id="result-decision" class="decision-text"></p>
+              <div class="result-metrics">
+                <div><strong id="correct-count">0/20</strong><span>correct</span></div>
+                <div><strong id="timeout-count">0</strong><span>timed out</span></div>
+                <div><strong id="focus-count">0</strong><span>focus losses</span></div>
+              </div>
+              <p id="result-disclaimer" class="muted"></p>
+              <button id="new-assessment-button" class="secondary-button" type="button">Assess another document</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <section id="view-admin" class="view">
+      <div class="admin-header">
+        <div>
+          <span class="eyebrow">Lecturer workspace</span>
+          <h1>Submission review</h1>
+          <p>Review scores, timed-out responses, focus losses, and the exact document passages supporting each question.</p>
+        </div>
+        <div class="admin-key-card">
+          <label>
+            Administrator key
+            <input id="admin-key" type="password" autocomplete="current-password" placeholder="Enter ADMIN_KEY">
+          </label>
+          <button id="load-submissions" class="primary-button" type="button">Load submissions</button>
+        </div>
+      </div>
+      <div id="admin-message" class="message" role="status"></div>
+      <section class="admin-table-card">
+        <div class="table-heading">
+          <h2>Recent submissions</h2>
+          <button id="refresh-submissions" class="text-button" type="button">Refresh</button>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Student</th>
+                <th>Document</th>
+                <th>Status</th>
+                <th>Score</th>
+                <th>Decision</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="submissions-body">
+              <tr><td colspan="6" class="empty-state">Enter the administrator key to load submissions.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section id="review-panel" class="review-panel hidden">
+        <div class="review-heading">
+          <div>
+            <span class="eyebrow">Question-level evidence</span>
+            <h2 id="review-title">Assessment review</h2>
+          </div>
+          <button id="close-review" class="secondary-button" type="button">Close</button>
+        </div>
+        <div id="review-summary" class="review-summary"></div>
+        <div id="review-questions" class="review-questions"></div>
+      </section>
+    </section>
+  </main>
+
+  <footer>
+    <strong>Kanokwere</strong>
+    <span>Ownership confidence supports academic judgement. It does not replace due process.</span>
+  </footer>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
