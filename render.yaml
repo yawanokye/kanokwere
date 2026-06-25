@@ -14,6 +14,16 @@ services:
         sync: false
       - key: OPENAI_MODEL
         value: gpt-5.5
+      - key: OPENAI_TIMEOUT_SECONDS
+        value: "180"
+      - key: OPENAI_MAX_RETRIES
+        value: "0"
+      - key: GENERATION_ATTEMPTS
+        value: "2"
+      - key: GENERATION_STALE_MINUTES
+        value: "8"
+      - key: MAX_CONTEXT_CHARS
+        value: "60000"
       - key: ADMIN_KEY
         generateValue: true
       - key: ALLOW_DEMO_QUESTIONS
