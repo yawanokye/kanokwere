@@ -288,8 +288,8 @@ function startQuestionTimer(remainingMs) {
   const render = () => {
     const left = Math.max(0, remainingMs - (performance.now() - started));
     value.textContent = (left / 1000).toFixed(1);
-    timer.classList.toggle("warning", left <= 5000 && left > 2500);
-    timer.classList.toggle("danger", left <= 2500);
+    timer.classList.toggle("warning", left <= 10000 && left > 5000);
+    timer.classList.toggle("danger", left <= 5000);
     if (left <= 0) {
       clearQuestionTimer();
       disableOptions();
