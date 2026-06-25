@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: kanokwere
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: kanokwere-db
+          property: connectionString
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-5.5
+      - key: ADMIN_KEY
+        generateValue: true
+      - key: ALLOW_DEMO_QUESTIONS
+        value: "false"
+      - key: PASS_THRESHOLD
+        value: "80"
+      - key: MAX_UPLOAD_MB
+        value: "15"
+      - key: SESSION_TOKEN_TTL_MINUTES
+        value: "30"
+      - key: MAX_ATTEMPTS_PER_DOCUMENT
+        value: "1"
+
+databases:
+  - name: kanokwere-db
+    databaseName: kanokwere
+    user: kanokwere
