@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import difflib
 import json
 import random
 import re
+import unicodedata
 from collections import Counter
 
 from fastapi import HTTPException
@@ -28,7 +30,70 @@ Do not reveal that an AI generated the questions."""
 
 
 def _normalise(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip().casefold()
+    value = unicodedata.normalize("NFKC", value)
+    value = value.replace("\u00ad", "")
+    value = value.replace("“", '"').replace("”", '"').replace("’", "'").replace("‘", "'")
+    value = value.replace("–", "-").replace("—", "-")
+    value = re.sub(r"(?<=\w)-\s*\n\s*(?=\w)", "", value)
+    value = re.sub(r"\s+", " ", value)
+    return value.strip().casefold()
+
+
+def _source_candidates(source_text: str) -> list[str]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    blocks = [block.strip() for block in source_text.split("\n\n") if block.strip()]
+    for block in blocks:
+        cleaned_block = re.sub(r"^\[[^\]]+\]\s*", "", block).strip()
+        parts = [cleaned_block]
+        parts.extend(line.strip() for line in cleaned_block.splitlines() if line.strip())
+        parts.extend(re.split(r"(?<=[.!?])\s+", cleaned_block))
+
+        sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", cleaned_block) if part.strip()]
+        for size in (2, 3):
+            for index in range(0, max(0, len(sentences) - size + 1)):
+                parts.append(" ".join(sentences[index : index + size]))
+
+        for part in parts:
+            part = re.sub(r"\s+", " ", part).strip()
+            if not 8 <= len(part) <= 500:
+                continue
+            key = _normalise(part)
+            if key and key not in seen:
+                seen.add(key)
+                candidates.append(part)
+    return candidates
+
+
+def _repair_source_quote(source_quote: str, candidates: list[str]) -> str | None:
+    quote_key = _normalise(source_quote)
+    if not quote_key:
+        return None
+
+    containing = [
+        candidate
+        for candidate in candidates
+        if quote_key in _normalise(candidate) or _normalise(candidate) in quote_key
+    ]
+    if containing:
+        return min(containing, key=len)
+
+    best_candidate: str | None = None
+    best_score = 0.0
+    quote_words = max(1, len(quote_key.split()))
+    for candidate in candidates:
+        candidate_key = _normalise(candidate)
+        candidate_words = max(1, len(candidate_key.split()))
+        length_ratio = min(quote_words, candidate_words) / max(quote_words, candidate_words)
+        if length_ratio < 0.55:
+            continue
+        score = difflib.SequenceMatcher(None, quote_key, candidate_key).ratio()
+        if score > best_score:
+            best_score = score
+            best_candidate = candidate
+
+    return best_candidate if best_score >= 0.88 else None
 
 
 def _validate_bank(bank: GeneratedQuestionBank, source_text: str) -> list[str]:
@@ -46,12 +111,17 @@ def _validate_bank(bank: GeneratedQuestionBank, source_text: str) -> list[str]:
         errors.append(f"Difficulty distribution was {dict(counts)}, expected {required}.")
 
     normal_source = _normalise(source_text)
+    candidates = _source_candidates(source_text)
     for number, item in enumerate(bank.questions, start=1):
         expected_seconds = {"recall": 10, "understanding": 12, "application": 15}[item.difficulty]
         if item.seconds != expected_seconds:
             errors.append(f"Question {number} has an invalid time limit.")
         if _normalise(item.source_quote) not in normal_source:
-            errors.append(f"Question {number} has a source quote not found verbatim in the document.")
+            repaired = _repair_source_quote(item.source_quote, candidates)
+            if repaired is not None:
+                item.source_quote = repaired
+            else:
+                errors.append(f"Question {number} has a source quote not found in the document.")
         if not 0 <= item.correct_option_index <= 3:
             errors.append(f"Question {number} has an invalid correct option index.")
     return errors
@@ -62,7 +132,7 @@ def _generate_with_openai(text: str, title: str) -> GeneratedQuestionBank:
     context = build_context(text)
     last_errors: list[str] = []
 
-    for attempt in range(2):
+    for attempt in range(3):
         correction = ""
         if last_errors:
             correction = "\nThe previous draft failed validation. Correct these issues:\n- " + "\n- ".join(last_errors[:20])
