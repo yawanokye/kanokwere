@@ -8,7 +8,7 @@ import unicodedata
 from collections import Counter
 
 from fastapi import HTTPException
-from openai import OpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI, RateLimitError
 
 from .config import settings
 from .document_service import build_context
@@ -128,30 +128,60 @@ def _validate_bank(bank: GeneratedQuestionBank, source_text: str) -> list[str]:
 
 
 def _generate_with_openai(text: str, title: str) -> GeneratedQuestionBank:
-    client = OpenAI(api_key=settings.openai_api_key)
+    client = OpenAI(
+        api_key=settings.openai_api_key,
+        timeout=settings.openai_timeout_seconds,
+        max_retries=settings.openai_max_retries,
+    )
     context = build_context(text)
     last_errors: list[str] = []
 
-    for attempt in range(3):
+    for attempt in range(max(1, settings.generation_attempts)):
         correction = ""
         if last_errors:
             correction = "\nThe previous draft failed validation. Correct these issues:\n- " + "\n- ".join(last_errors[:20])
 
-        response = client.responses.parse(
-            model=settings.openai_model,
-            store=False,
-            input=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        f"Document title: {title}\n\nDOCUMENT START\n{context}\nDOCUMENT END"
-                        f"{correction}"
-                    ),
-                },
-            ],
-            text_format=GeneratedQuestionBank,
-        )
+        try:
+            response = client.responses.parse(
+                model=settings.openai_model,
+                store=False,
+                input=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Document title: {title}\n\nDOCUMENT START\n{context}\nDOCUMENT END"
+                            f"{correction}"
+                        ),
+                    },
+                ],
+                text_format=GeneratedQuestionBank,
+            )
+        except APITimeoutError as exc:
+            raise HTTPException(
+                status_code=504,
+                detail=(
+                    "Question generation exceeded the configured OpenAI timeout. "
+                    "Retry the document or reduce MAX_CONTEXT_CHARS."
+                ),
+            ) from exc
+        except RateLimitError as exc:
+            raise HTTPException(
+                status_code=429,
+                detail="OpenAI rate or usage limit reached. Check API billing and retry shortly.",
+            ) from exc
+        except APIConnectionError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="Kanokwere could not connect to OpenAI. Retry shortly.",
+            ) from exc
+        except APIStatusError as exc:
+            request_id = getattr(exc, "request_id", None)
+            suffix = f" Request ID: {request_id}." if request_id else ""
+            raise HTTPException(
+                status_code=502,
+                detail=f"OpenAI rejected the question-generation request.{suffix}",
+            ) from exc
         bank = response.output_parsed
         if bank is None:
             last_errors = ["The model did not return a parsed question bank."]

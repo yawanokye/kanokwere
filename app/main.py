@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -27,9 +29,26 @@ from .schemas import AnswerRequest, FocusEventRequest, StartAssessmentRequest
 from .security import bearer_token, require_admin
 
 
+logger = logging.getLogger("kanokwere.generation")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
+    # Background tasks are not durable across service restarts. Mark any
+    # interrupted generation clearly so the browser does not poll forever.
+    with SessionLocal() as db:
+        interrupted = db.scalars(
+            select(Document).where(Document.status.in_(["queued", "generating"]))
+        ).all()
+        for document in interrupted:
+            document.status = "failed"
+            document.processing_error = (
+                "Question generation was interrupted by a service restart. "
+                "Use Retry generation or upload the document again."
+            )
+        if interrupted:
+            db.commit()
     yield
 
 
@@ -76,6 +95,7 @@ def _generate_questions_job(document_id: str) -> None:
         document = db.get(Document, document_id)
         if not document:
             return
+        logger.info("Question generation started for document %s", document_id)
         document.status = "generating"
         document.processing_error = None
         db.commit()
@@ -87,7 +107,9 @@ def _generate_questions_job(document_id: str) -> None:
         document.generation_mode = mode
         document.status = "ready"
         db.commit()
+        logger.info("Question generation completed for document %s", document_id)
     except Exception as exc:
+        logger.exception("Question generation failed for document %s", document_id)
         db.rollback()
         document = db.get(Document, document_id)
         if document:
@@ -137,6 +159,20 @@ def document_status(document_id: str, db: Session = Depends(get_db)) -> dict[str
     document = db.get(Document, document_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found.")
+
+    created_at = document.created_at
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    elapsed_seconds = max(0, int((datetime.now(timezone.utc) - created_at).total_seconds()))
+    stale_seconds = max(1, settings.generation_stale_minutes) * 60
+    if document.status in {"queued", "generating"} and elapsed_seconds >= stale_seconds:
+        document.status = "failed"
+        document.processing_error = (
+            f"Question generation exceeded {settings.generation_stale_minutes} minutes and was stopped. "
+            "Retry generation. If it happens again, reduce MAX_CONTEXT_CHARS or check OpenAI billing and logs."
+        )
+        db.commit()
+
     question_count = db.scalar(
         select(func.count()).select_from(Question).where(Question.document_id == document.id)
     )
@@ -146,6 +182,37 @@ def document_status(document_id: str, db: Session = Depends(get_db)) -> dict[str
         "question_count": int(question_count or 0),
         "generation_mode": document.generation_mode,
         "error": document.processing_error,
+        "elapsed_seconds": elapsed_seconds,
+        "stale_after_seconds": stale_seconds,
+    }
+
+
+@app.post("/api/documents/{document_id}/retry", status_code=202)
+def retry_document_generation(
+    document_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    document = db.get(Document, document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    if document.status not in {"failed"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Only a failed or timed-out generation can be retried.",
+        )
+
+    db.execute(delete(Question).where(Question.document_id == document.id))
+    document.status = "queued"
+    document.generation_mode = "pending"
+    document.processing_error = None
+    document.created_at = datetime.now(timezone.utc)
+    db.commit()
+    background_tasks.add_task(_generate_questions_job, document.id)
+    return {
+        "document_id": document.id,
+        "status": document.status,
+        "message": "Question generation restarted.",
     }
 
 
