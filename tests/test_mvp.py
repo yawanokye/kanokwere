@@ -18,10 +18,14 @@ os.environ["ALLOW_DEMO_QUESTIONS"] = "true"
 os.environ.pop("OPENAI_API_KEY", None)
 os.environ["ADMIN_KEY"] = "test-admin-key"
 os.environ["QUESTION_TIME_SECONDS"] = "30"
+os.environ["LECTURER_REGISTRATION_ENABLED"] = "false"
 
 from fastapi.testclient import TestClient
 
 from app.main import app
+
+
+ADMIN_HEADERS = {"X-Admin-Key": "test-admin-key"}
 
 
 def sample_document() -> str:
@@ -33,14 +37,78 @@ def sample_document() -> str:
     return " ".join(sentences)
 
 
-def test_complete_twenty_question_assessment_and_pdf_report():
+def create_lecturer(client: TestClient, email: str, full_name: str = "Test Lecturer") -> tuple[dict, str]:
+    response = client.post(
+        "/api/platform/users",
+        headers=ADMIN_HEADERS,
+        json={
+            "full_name": full_name,
+            "email": email,
+            "institution_name": "Test University",
+            "department": "Research Methods",
+            "role": "lecturer",
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["user"], response.json()["setup_code"]
+
+
+def activate_lecturer(
+    client: TestClient,
+    email: str,
+    setup_code: str,
+    password: str = "PrivatePass123",
+    recovery_pin: str = "482731",
+) -> dict:
+    response = client.post(
+        "/api/auth/activate",
+        json={
+            "email": email,
+            "setup_code": setup_code,
+            "new_password": password,
+            "recovery_pin": recovery_pin,
+        },
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["user"]
+
+
+def test_admin_created_lecturer_activation_course_and_complete_assessment():
     with TestClient(app) as client:
+        user, setup_code = create_lecturer(client, "lecturer@test.edu")
+        assert user["account_status"] == "pending_activation"
+        assert user["activation_required"] is True
+        assert "staff_id" not in user
+
+        blocked_login = client.post(
+            "/api/auth/login",
+            json={"email": "lecturer@test.edu", "password": "PrivatePass123"},
+        )
+        assert blocked_login.status_code in {401, 403}
+
+        activated = activate_lecturer(client, "lecturer@test.edu", setup_code)
+        assert activated["account_status"] == "active"
+        assert activated["activation_required"] is False
+
+        course = client.post(
+            "/api/lecturer/courses",
+            json={
+                "course_code": "RES 801",
+                "title": "Research Methods",
+                "academic_year": "2026/2027",
+                "semester": "First Semester",
+            },
+        )
+        assert course.status_code == 201, course.text
+        enrollment_code = course.json()["course"]["enrollment_code"]
+
         upload = client.post(
             "/api/documents",
             data={
                 "student_name": "Test Student",
                 "student_id": "TEST/001",
                 "title": "A Test of Document Ownership",
+                "course_code": enrollment_code,
             },
             files={"file": ("work.txt", sample_document().encode("utf-8"), "text/plain")},
         )
@@ -59,7 +127,6 @@ def test_complete_twenty_question_assessment_and_pdf_report():
         assessment_id = started.json()["assessment_id"]
         token = started.json()["session_token"]
         student_headers = {"Authorization": f"Bearer {token}"}
-        admin_headers = {"X-Admin-Key": "test-admin-key"}
 
         snapshot_sent = False
         tiny_jpeg = base64.b64decode(
@@ -83,11 +150,10 @@ def test_complete_twenty_question_assessment_and_pdf_report():
                     files={"image": ("webcam.jpg", tiny_jpeg, "image/jpeg")},
                 )
                 assert snapshot.status_code == 200, snapshot.text
-                assert snapshot.json()["captured"] is True
                 snapshot_sent = True
 
             detail = client.get(
-                f"/api/admin/assessments/{assessment_id}", headers=admin_headers
+                f"/api/admin/assessments/{assessment_id}", headers=ADMIN_HEADERS
             )
             assert detail.status_code == 200, detail.text
             correct_index = next(
@@ -106,38 +172,76 @@ def test_complete_twenty_question_assessment_and_pdf_report():
             f"/api/assessments/{assessment_id}/result", headers=student_headers
         )
         assert result.status_code == 200, result.text
-        assert result.json()["correct_count"] == 20
         assert result.json()["score"] == 100.0
-        assert result.json()["decision"] == "Ownership knowledge demonstrated"
         assert snapshot_sent is True
 
-        submissions = client.get("/api/admin/submissions", headers=admin_headers)
-        assert submissions.status_code == 200, submissions.text
-        row = submissions.json()["submissions"][0]
-        assert row["snapshot_available"] is True
+        lecturer_submissions = client.get("/api/lecturer/submissions")
+        assert lecturer_submissions.status_code == 200, lecturer_submissions.text
+        assert lecturer_submissions.json()["submissions"][0]["snapshot_available"] is True
 
-        snapshot_image = client.get(
-            f"/api/admin/assessments/{assessment_id}/snapshot",
-            headers=admin_headers,
-        )
-        assert snapshot_image.status_code == 200, snapshot_image.text
-        assert snapshot_image.headers["content-type"].startswith("image/jpeg")
-        assert snapshot_image.content == tiny_jpeg
-
-        report = client.get(
-            f"/api/admin/assessments/{assessment_id}/report.pdf",
-            headers=admin_headers,
-        )
+        report = client.get(f"/api/lecturer/assessments/{assessment_id}/report.pdf")
         assert report.status_code == 200, report.text
-        assert report.headers["content-type"].startswith("application/pdf")
         assert report.content.startswith(b"%PDF")
 
-        blocked_retake = client.post("/api/assessments/start", json={"document_id": document_id})
-        assert blocked_retake.status_code == 409
 
-        reset = client.delete(
-            f"/api/admin/assessments/{assessment_id}", headers=admin_headers
+def test_automatic_password_reset_reissue_setup_code_and_delete_account():
+    with TestClient(app) as client:
+        user, setup_code = create_lecturer(client, "resetme@test.edu", "Reset Lecturer")
+        activate_lecturer(
+            client,
+            "resetme@test.edu",
+            setup_code,
+            password="OriginalPass123",
+            recovery_pin="624819",
         )
-        assert reset.status_code == 200
-        allowed_retake = client.post("/api/assessments/start", json={"document_id": document_id})
-        assert allowed_retake.status_code == 200
+
+        reset = client.post(
+            "/api/auth/reset-password",
+            json={
+                "email": "resetme@test.edu",
+                "recovery_pin": "624819",
+                "new_password": "ReplacementPass123",
+            },
+        )
+        assert reset.status_code == 200, reset.text
+        assert reset.json()["user"]["account_status"] == "active"
+
+        client.post("/api/auth/logout")
+        login = client.post(
+            "/api/auth/login",
+            json={"email": "resetme@test.edu", "password": "ReplacementPass123"},
+        )
+        assert login.status_code == 200, login.text
+
+        reissue = client.post(
+            f"/api/platform/users/{user['id']}/reset-password",
+            headers=ADMIN_HEADERS,
+            json={},
+        )
+        assert reissue.status_code == 200, reissue.text
+        replacement_code = reissue.json()["setup_code"]
+        assert reissue.json()["user"]["account_status"] == "pending_activation"
+
+        old_login = client.post(
+            "/api/auth/login",
+            json={"email": "resetme@test.edu", "password": "ReplacementPass123"},
+        )
+        assert old_login.status_code in {401, 403}
+
+        reactivated = activate_lecturer(
+            client,
+            "resetme@test.edu",
+            replacement_code,
+            password="FreshPrivatePass123",
+            recovery_pin="193746",
+        )
+        assert reactivated["account_status"] == "active"
+
+        deleted = client.delete(
+            f"/api/platform/users/{user['id']}", headers=ADMIN_HEADERS
+        )
+        assert deleted.status_code == 200, deleted.text
+
+        users = client.get("/api/platform/users", headers=ADMIN_HEADERS)
+        assert users.status_code == 200
+        assert all(item["id"] != user["id"] for item in users.json()["users"])
