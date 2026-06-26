@@ -96,6 +96,103 @@ def _repair_source_quote(source_quote: str, candidates: list[str]) -> str | None
     return best_candidate if best_score >= 0.88 else None
 
 
+_DIFFICULTY_TARGETS = Counter({"recall": 6, "understanding": 8, "application": 6})
+
+_DIFFICULTY_CUES: dict[str, tuple[str, ...]] = {
+    "recall": (
+        "according to", "what", "which", "who", "where", "when", "identify",
+        "state", "name", "reported", "listed", "defined", "number", "percentage",
+    ),
+    "understanding": (
+        "why", "how", "explain", "interpret", "meaning", "relationship",
+        "difference", "suggest", "indicate", "reason", "best describes",
+        "main idea", "conclusion",
+    ),
+    "application": (
+        "if", "suppose", "scenario", "case", "would", "should", "apply",
+        "recommend", "implication", "decision", "action", "most appropriate",
+        "best response", "based on the findings", "in practice", "use the",
+    ),
+}
+
+
+def _difficulty_affinity(item: GeneratedQuestion, target: str, position: int) -> float:
+    text = _normalise(f"{item.stem} {item.explanation}")
+    score = 0.0
+    for cue in _DIFFICULTY_CUES[target]:
+        cue_key = _normalise(cue)
+        if re.search(rf"\b{re.escape(cue_key)}\b", text):
+            score += 2.0 if " " in cue_key else 1.0
+
+    # The generator normally orders questions from simpler to more demanding.
+    # This small positional preference helps choose the most plausible item when
+    # several questions have the same textual score.
+    if target == "recall":
+        score += max(0.0, (20 - position) / 40)
+    elif target == "application":
+        score += position / 40
+    return score
+
+
+def _repair_difficulty_distribution(bank: GeneratedQuestionBank) -> int:
+    """Relabel only surplus difficulty items to meet the required 6/8/6 split.
+
+    Structured generation occasionally returns a sound 20-question bank with one
+    difficulty label misplaced. Rejecting the whole bank wastes a completed API
+    request. This repair preserves every stem, option, answer and source passage,
+    and changes only the minimum number of difficulty labels required.
+    """
+
+    counts = Counter(item.difficulty for item in bank.questions)
+    changes = 0
+
+    while counts != _DIFFICULTY_TARGETS:
+        missing = [
+            difficulty
+            for difficulty, required_count in _DIFFICULTY_TARGETS.items()
+            if counts[difficulty] < required_count
+        ]
+        donors = [
+            difficulty
+            for difficulty, required_count in _DIFFICULTY_TARGETS.items()
+            if counts[difficulty] > required_count
+        ]
+        if not missing or not donors:
+            break
+
+        target = max(
+            missing,
+            key=lambda difficulty: _DIFFICULTY_TARGETS[difficulty] - counts[difficulty],
+        )
+        donor = max(
+            donors,
+            key=lambda difficulty: counts[difficulty] - _DIFFICULTY_TARGETS[difficulty],
+        )
+
+        candidates = [
+            (index, item)
+            for index, item in enumerate(bank.questions, start=1)
+            if item.difficulty == donor
+        ]
+        if not candidates:
+            break
+
+        _, selected = max(
+            candidates,
+            key=lambda pair: (
+                _difficulty_affinity(pair[1], target, pair[0])
+                - _difficulty_affinity(pair[1], donor, pair[0]),
+                pair[0] if target == "application" else -pair[0],
+            ),
+        )
+        selected.difficulty = target
+        counts[donor] -= 1
+        counts[target] += 1
+        changes += 1
+
+    return changes
+
+
 def _validate_bank(bank: GeneratedQuestionBank, source_text: str) -> list[str]:
     errors: list[str] = []
     if len(bank.questions) != 20:
@@ -105,9 +202,10 @@ def _validate_bank(bank: GeneratedQuestionBank, source_text: str) -> list[str]:
     if len(stems) != len(set(stems)):
         errors.append("Question stems must be unique.")
 
+    _repair_difficulty_distribution(bank)
     counts = Counter(item.difficulty for item in bank.questions)
-    required = {"recall": 6, "understanding": 8, "application": 6}
-    if counts != required:
+    required = dict(_DIFFICULTY_TARGETS)
+    if counts != _DIFFICULTY_TARGETS:
         errors.append(f"Difficulty distribution was {dict(counts)}, expected {required}.")
 
     normal_source = _normalise(source_text)
