@@ -2,154 +2,151 @@
 
 **Know your work. Prove your work.**
 
-Kanokwere is a document-ownership assessment application. A student uploads a PDF, DOCX, or TXT document. The app generates 20 questions grounded in that document, administers them one at a time with a server-enforced 30-second limit for every question, and calculates an ownership confidence score. The default threshold is 80%, which requires at least 16 correct answers.
+Kanokwere generates 20 questions from a student's uploaded document and administers a timed ownership-confidence assessment. Every question has 30 seconds. The default threshold is 80%, which requires at least 16 correct answers.
 
-## Included in this MVP
+## Multi-lecturer controls
+
+This release replaces the shared lecturer `ADMIN_KEY` workflow with individual lecturer accounts and course-based access.
+
+- Lecturers register using an institutional email, institution, department, and staff ID.
+- New accounts remain pending until approved by the platform administrator.
+- The first approved account for an institution can be assigned the `institution_admin` role.
+- Lecturers sign in using secure HTTP-only cookies.
+- Each lecturer creates courses and receives a unique student enrolment code.
+- Students enter the enrolment code when uploading their work.
+- A lecturer sees only submissions linked to courses assigned to that account.
+- Course owners can add approved co-lecturers or view-only collaborators.
+- Institution administrators can access all courses belonging to their institution.
+- Reviews, webcam photos, PDF reports, resets, and deletions are protected by server-side course access checks.
+- Security-sensitive actions are written to the audit log.
+- The original `ADMIN_KEY` remains only for platform-level lecturer approval and emergency administration.
+
+## Assessment features
 
 - PDF, DOCX, and TXT upload
-- 15 MB default upload limit
-- Original file processed in memory and not stored
-- Extracted-text readability check
-- AI-generated bank of exactly 20 questions
-- Exact source-passage grounding validation
-- Required mix of 6 recall, 8 understanding, and 6 application questions
-- Randomised question order and answer-option order
+- Original file processed in memory and not retained
+- Exactly 20 grounded questions
+- Six recall, eight understanding, and six application questions
+- Randomised question and answer order
 - Correct answers never sent to the student browser
-- Server-side timing enforcement
+- Server-enforced 30-second timing
 - Focus-loss logging
-- Required webcam access during the assessment, with no video or audio recording
-- One server-scheduled still image captured at a random point and shown to authorised lecturers
-- One assessment attempt per document by default, with lecturer-controlled reset
-- Student result screen
-- Lecturer dashboard protected by an administrator key
+- Webcam active during the assessment with audio disabled
+- No video recording
+- One randomly timed still image stored with the assessment
+- One attempt per document by default
+- Lecturer-controlled reset
 - Question-level evidence review
-- PDF ownership-assessment report
+- PDF report
 - PostgreSQL production support and SQLite local support
-- Render Blueprint deployment file
 
-## Important interpretation rule
+## Roles
 
-Kanokwere reports whether a student demonstrated knowledge of a submitted document. It does not conclusively prove authorship and must not automatically determine academic misconduct. Scores below the threshold should trigger oral or manual verification and normal institutional due process.
+### Platform administrator
+
+Uses the Render-generated `ADMIN_KEY` to approve or suspend lecturer accounts. This key should not be shared with lecturers.
+
+### Institution administrator
+
+Can access all courses and submissions within the institution and can create courses or add lecturers.
+
+### Lecturer
+
+Can access courses explicitly assigned to the account. A course owner can add co-lecturers.
+
+### Co-lecturer
+
+Can review and manage submissions for the assigned course.
+
+### Viewer
+
+Can review evidence but cannot reset or delete submissions.
+
+## Lecturer onboarding workflow
+
+1. Lecturer opens the **Lecturer** tab and registers.
+2. Platform administrator opens the approval section and enters `ADMIN_KEY`.
+3. Administrator approves the lecturer as either `lecturer` or `institution_admin`.
+4. Lecturer signs in and creates a course.
+5. Kanokwere generates an enrolment code such as `KANO-A7K92Q`.
+6. Lecturer shares the code with the relevant students.
+7. Students use the code when uploading documents.
+8. Submissions appear only in the dashboards of lecturers assigned to that course.
+
+Approval currently serves as manual institutional-email verification. An automated email-verification provider can be added later.
 
 ## Run locally
 
-1. Create and activate a virtual environment.
-
 ```bash
 python -m venv .venv
-```
-
-Windows:
-
-```bash
-.venv\Scripts\activate
-```
-
-macOS or Linux:
-
-```bash
-source .venv/bin/activate
-```
-
-2. Install dependencies.
-
-```bash
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-```
-
-3. Copy `.env.example` to `.env`, then set `OPENAI_API_KEY` and a strong `ADMIN_KEY`.
-
-4. Export the variables or load them through your preferred environment manager. For a quick local run, variables can be set in the shell before starting the app.
-
-5. Start the service.
-
-```bash
+cp .env.example .env
+python -m app.prestart
 uvicorn main:app --reload
 ```
 
-6. Open `http://127.0.0.1:8000`.
+Open `http://127.0.0.1:8000`.
 
-## AI and demo modes
+## Render deployment
 
-Production question generation uses the OpenAI Responses API with structured Pydantic output. Set:
+The supplied `render.yaml` runs:
 
-```text
+```bash
+python -m app.prestart && uvicorn main:app --host 0.0.0.0 --port $PORT
+```
+
+`app.prestart` creates new tables and applies the Alembic schema revision. Existing document and assessment data are retained while the new institution, lecturer, course, session, and audit structures are added.
+
+Required production variables include:
+
+```env
+ENVIRONMENT=production
 OPENAI_API_KEY=your-key
 OPENAI_MODEL=gpt-5.5
-ALLOW_DEMO_QUESTIONS=false
-```
-
-When `ALLOW_DEMO_QUESTIONS=true` and no API key is present, the app can create deterministic fill-in-the-blank questions so the interface and workflow can be tested. Demo questions must not be used for real ownership decisions.
-
-## Deploy on Render
-
-1. Push this folder to a GitHub repository.
-2. In Render, choose **New > Blueprint**.
-3. Select the repository containing `render.yaml`.
-4. Provide the `OPENAI_API_KEY` secret when prompted.
-5. After deployment, copy the generated `ADMIN_KEY` from the web service environment settings and keep it secure.
-
-The Blueprint creates a FastAPI web service and a PostgreSQL database. The health-check path is `/health`.
-
-## Core API routes
-
-```text
-POST   /api/documents
-GET    /api/documents/{document_id}/status
-POST   /api/assessments/start
-GET    /api/assessments/{assessment_id}/question
-POST   /api/assessments/{assessment_id}/answer
-POST   /api/assessments/{assessment_id}/snapshot
-POST   /api/assessments/{assessment_id}/focus-event
-GET    /api/assessments/{assessment_id}/result
-GET    /api/admin/submissions
-GET    /api/admin/assessments/{assessment_id}
-GET    /api/admin/assessments/{assessment_id}/snapshot
-GET    /api/admin/assessments/{assessment_id}/report.pdf
-DELETE /api/admin/assessments/{assessment_id}
-DELETE /api/admin/documents/{document_id}
-```
-
-## Data retained
-
-The MVP does not save the original uploaded file. It stores:
-
-- Student name and identifier
-- Document title and original filename
-- SHA-256 file fingerprint
-- Extracted document text
-- Generated questions and source passages
-- Assessment responses and timing
-- Score, decision, and focus-loss count
-- One compressed webcam still image, its capture time, and capture status
-
-The lecturer dashboard includes permanent deletion of the document record and all linked questions, attempts, webcam still images, and reports.
-
-## Webcam behaviour
-
-The browser requests video-only webcam permission immediately before the assessment starts. Audio is disabled. The application does not use `MediaRecorder` and does not store a video stream. The server selects a random question position and short delay, then requests one JPEG still image. If that random trigger is missed, the browser attempts one final still capture before showing the result. The image is stored in PostgreSQL with the assessment and appears in the **Photo** column of **Recent submissions**. Configure:
-
-```text
+ADMIN_KEY=generated-by-render
+PASS_THRESHOLD=80
+QUESTION_TIME_SECONDS=30
+LECTURER_SESSION_HOURS=12
+LOGIN_MAX_FAILURES=5
+LOGIN_LOCK_MINUTES=15
+LECTURER_REGISTRATION_ENABLED=true
 WEBCAM_REQUIRED=true
-WEBCAM_MAX_IMAGE_KB=700
 ```
 
-Institutional deployment should publish a clear image-retention period and restrict access to authorised lecturers.
+`DATABASE_URL` is supplied automatically by the PostgreSQL database defined in `render.yaml`.
 
-## Production hardening before institutional use
+## Main account and course routes
 
-The MVP intentionally keeps deployment simple. Before wide institutional rollout, add:
+```text
+POST   /api/auth/register
+POST   /api/auth/login
+POST   /api/auth/logout
+GET    /api/auth/me
+POST   /api/auth/change-password
 
-- Institution, lecturer, and student accounts with role-based access control
-- Email verification or university single sign-on
-- Explicit privacy notice, consent text, retention periods, and data-processing agreements
-- Encrypted object storage if original files are ever retained
-- A durable queue and worker for question generation
-- Rate limiting, audit logs, and security monitoring
-- Database migrations using Alembic
-- Accessibility accommodations authorised by lecturers
-- Question-bank moderation and lecturer approval controls
-- Independent legal and institutional ethics review
+GET    /api/platform/pending
+POST   /api/platform/users/{user_id}/approve
+POST   /api/platform/users/{user_id}/suspend
+
+GET    /api/lecturer/courses
+POST   /api/lecturer/courses
+POST   /api/lecturer/courses/{course_id}/collaborators
+POST   /api/lecturer/courses/{course_id}/regenerate-code
+
+GET    /api/lecturer/submissions
+GET    /api/lecturer/assessments/{assessment_id}
+GET    /api/lecturer/assessments/{assessment_id}/snapshot
+GET    /api/lecturer/assessments/{assessment_id}/report.pdf
+DELETE /api/lecturer/assessments/{assessment_id}
+DELETE /api/lecturer/documents/{document_id}
+```
+
+## Data and privacy
+
+Kanokwere stores account details, course assignments, extracted document text, generated questions, assessment responses, timing, scores, audit events, and one webcam still image. It does not retain the original uploaded file or record webcam video or audio.
+
+Institutions should publish retention periods, identify who may access still images, and establish a clear appeal and due-process procedure. The ownership-confidence score is evidence of demonstrated document knowledge. It is not conclusive proof of authorship or misconduct.
 
 ## Tests
 
@@ -157,4 +154,4 @@ The MVP intentionally keeps deployment simple. Before wide institutional rollout
 pytest -q
 ```
 
-The end-to-end test uploads a document, generates a 20-question demo bank, completes all questions, verifies a 100% score, and creates a PDF report.
+The tests cover lecturer registration and approval, secure login, course creation, course-level submission isolation, document assessment, webcam capture, evidence review, and PDF generation.
