@@ -2,7 +2,7 @@
 
 **Know your work. Prove your work.**
 
-Kanokwere is a document-ownership assessment application. A student uploads a PDF, DOCX, or TXT document. The app generates 20 questions grounded in that document, administers them one at a time with server-enforced 10–15 second limits, and calculates an ownership confidence score. The default threshold is 80%, which requires at least 16 correct answers.
+Kanokwere is a document-ownership assessment application. A student uploads a PDF, DOCX, or TXT document. The app generates 20 questions grounded in that document, administers them one at a time with a server-enforced 30-second limit for every question, and calculates an ownership confidence score. The default threshold is 80%, which requires at least 16 correct answers.
 
 ## Included in this MVP
 
@@ -17,6 +17,8 @@ Kanokwere is a document-ownership assessment application. A student uploads a PD
 - Correct answers never sent to the student browser
 - Server-side timing enforcement
 - Focus-loss logging
+- Required webcam access during the assessment, with no video or audio recording
+- One server-scheduled still image captured at a random point and shown to authorised lecturers
 - One assessment attempt per document by default, with lecturer-controlled reset
 - Student result screen
 - Lecturer dashboard protected by an administrator key
@@ -97,10 +99,12 @@ GET    /api/documents/{document_id}/status
 POST   /api/assessments/start
 GET    /api/assessments/{assessment_id}/question
 POST   /api/assessments/{assessment_id}/answer
+POST   /api/assessments/{assessment_id}/snapshot
 POST   /api/assessments/{assessment_id}/focus-event
 GET    /api/assessments/{assessment_id}/result
 GET    /api/admin/submissions
 GET    /api/admin/assessments/{assessment_id}
+GET    /api/admin/assessments/{assessment_id}/snapshot
 GET    /api/admin/assessments/{assessment_id}/report.pdf
 DELETE /api/admin/assessments/{assessment_id}
 DELETE /api/admin/documents/{document_id}
@@ -117,8 +121,20 @@ The MVP does not save the original uploaded file. It stores:
 - Generated questions and source passages
 - Assessment responses and timing
 - Score, decision, and focus-loss count
+- One compressed webcam still image, its capture time, and capture status
 
-The lecturer dashboard includes permanent deletion of the document record and all linked questions, attempts, and reports.
+The lecturer dashboard includes permanent deletion of the document record and all linked questions, attempts, webcam still images, and reports.
+
+## Webcam behaviour
+
+The browser requests video-only webcam permission immediately before the assessment starts. Audio is disabled. The application does not use `MediaRecorder` and does not store a video stream. The server selects a random question position and short delay, then requests one JPEG still image. If that random trigger is missed, the browser attempts one final still capture before showing the result. The image is stored in PostgreSQL with the assessment and appears in the **Photo** column of **Recent submissions**. Configure:
+
+```text
+WEBCAM_REQUIRED=true
+WEBCAM_MAX_IMAGE_KB=700
+```
+
+Institutional deployment should publish a clear image-retention period and restrict access to authorised lecturers.
 
 ## Production hardening before institutional use
 
