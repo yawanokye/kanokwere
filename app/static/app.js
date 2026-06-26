@@ -590,6 +590,11 @@ window.addEventListener("blur", () => {
 async function loadLecturerSession(silent = false) {
   try {
     const result = await api("/api/auth/me");
+    if (!result.authenticated || !result.user) {
+      state.lecturerUser = null;
+      showLecturerAuth();
+      return;
+    }
     state.lecturerUser = result.user;
     showLecturerDashboard(result.user);
     if (!result.user.must_change_password) {
@@ -598,7 +603,7 @@ async function loadLecturerSession(silent = false) {
   } catch (error) {
     state.lecturerUser = null;
     showLecturerAuth();
-    if (!silent && error.status !== 401) setMessage($("#lecturer-auth-message"), error.message, "error");
+    if (!silent) setMessage($("#lecturer-auth-message"), error.message, "error");
   }
 }
 
@@ -646,7 +651,7 @@ $("#lecturer-login-form").addEventListener("submit", async (event) => {
       body: JSON.stringify(formJson(event.currentTarget)),
     });
     state.lecturerUser = result.user;
-    event.currentTarget.reset();
+    event.target?.reset?.();
     setMessage($("#lecturer-auth-message"));
     showLecturerDashboard(result.user);
     if (!result.user.must_change_password) {
@@ -685,7 +690,7 @@ $("#lecturer-activation-form").addEventListener("submit", async (event) => {
       }),
     });
     state.lecturerUser = result.user;
-    event.currentTarget.reset();
+    event.target?.reset?.();
     showLecturerDashboard(result.user);
     setMessage($("#lecturer-message"), "Account activated. You are now signed in.", "success");
     await Promise.all([loadCourses(), loadSubmissions()]);
@@ -717,7 +722,7 @@ $("#lecturer-password-reset-form").addEventListener("submit", async (event) => {
       }),
     });
     state.lecturerUser = result.user;
-    event.currentTarget.reset();
+    event.target?.reset?.();
     showLecturerDashboard(result.user);
     setMessage($("#lecturer-message"), "Password reset successfully. You are now signed in.", "success");
     await Promise.all([loadCourses(), loadSubmissions()]);
@@ -748,7 +753,7 @@ $("#change-password-form").addEventListener("submit", async (event) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ current_password: data.current_password, new_password: data.new_password }),
     });
-    event.currentTarget.reset();
+    event.target?.reset?.();
     state.lecturerUser.must_change_password = false;
     setPasswordChangeMode(false);
     $("#change-password-panel").classList.add("hidden");
@@ -786,7 +791,7 @@ $("#course-create-form").addEventListener("submit", async (event) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(formJson(event.currentTarget)),
     });
-    event.currentTarget.reset();
+    event.target?.reset?.();
     setMessage($("#lecturer-message"), `Course created. Student enrolment code: ${result.course.enrollment_code}`, "success");
     await loadCourses();
   } catch (error) {
@@ -807,7 +812,7 @@ $("#collaborator-form").addEventListener("submit", async (event) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email: data.email, access_level: data.access_level }),
     });
-    event.currentTarget.reset();
+    event.target?.reset?.();
     setMessage($("#lecturer-message"), "Co-lecturer access updated.", "success");
     await loadCourses();
   } catch (error) {
@@ -1174,7 +1179,7 @@ $("#platform-create-user-form").addEventListener("submit", async (event) => {
       headers: platformHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(data),
     });
-    event.currentTarget.reset();
+    event.target?.reset?.();
     showSetupCredentials(result.user, result.setup_code, result.setup_code_expires_at);
     setMessage($("#platform-message"), result.message, "success");
     await loadPlatformUsers();
