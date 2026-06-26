@@ -82,6 +82,7 @@ from .security import (
     bearer_token,
     create_lecturer_session,
     current_user,
+    optional_current_user,
     generate_setup_code,
     hash_password,
     hash_token,
@@ -357,7 +358,9 @@ def logout_lecturer(
 
 
 @app.get("/api/auth/me")
-def lecturer_me(user: User = Depends(current_user)) -> dict[str, object]:
+def lecturer_me(user: User | None = Depends(optional_current_user)) -> dict[str, object | None]:
+    if user is None:
+        return {"authenticated": False, "user": None}
     return {"authenticated": True, "user": _user_payload(user)}
 
 

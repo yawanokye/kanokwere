@@ -98,6 +98,33 @@ def create_lecturer_session(db: Session, user: User) -> str:
     return token
 
 
+def optional_current_user(
+    request: Request,
+    db: Session = Depends(get_db),
+    lecturer_session: str | None = Cookie(default=None, alias=settings.auth_cookie_name),
+) -> User | None:
+    """Return the signed-in lecturer when a valid session exists, otherwise None.
+
+    This dependency is intended only for session-status checks such as
+    ``GET /api/auth/me``. Protected routes must continue to use ``current_user``.
+    """
+    if not lecturer_session:
+        return None
+    session = db.scalar(
+        select(AuthSession)
+        .options(selectinload(AuthSession.user).selectinload(User.institution))
+        .where(AuthSession.token_hash == hash_token(lecturer_session))
+    )
+    if not session or session.revoked_at is not None or _aware(session.expires_at) <= utcnow():
+        return None
+    user = session.user
+    if user.account_status != "active":
+        return None
+    request.state.auth_session = session
+    request.state.current_user = user
+    return user
+
+
 def current_user(
     request: Request,
     db: Session = Depends(get_db),
