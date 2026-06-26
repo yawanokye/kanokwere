@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from .config import settings
-from .models import Assessment, AssessmentItem, Document, Question
+from .models import Assessment, AssessmentItem, Document, Question, WebcamSnapshot
 from .security import make_session_token, verify_token
 
 
@@ -81,6 +81,17 @@ def start_assessment(db: Session, document_id: str) -> tuple[Assessment, str]:
                 correct_shuffled_index=correct_shuffled_index,
             )
         )
+
+    # The exact trigger is kept server-side until the selected question is shown.
+    # A completion fallback is used if the browser misses the random trigger.
+    db.add(
+        WebcamSnapshot(
+            assessment_id=assessment.id,
+            scheduled_position=random.SystemRandom().randint(3, 18),
+            scheduled_offset_ms=random.SystemRandom().randint(1500, 6500),
+            status="pending",
+        )
+    )
     db.commit()
     db.refresh(assessment)
     return assessment, token
@@ -89,7 +100,7 @@ def start_assessment(db: Session, document_id: str) -> tuple[Assessment, str]:
 def get_assessment(db: Session, assessment_id: str, token: str) -> Assessment:
     assessment = db.scalar(
         select(Assessment)
-        .options(selectinload(Assessment.document), selectinload(Assessment.items).selectinload(AssessmentItem.question))
+        .options(selectinload(Assessment.document), selectinload(Assessment.webcam_snapshot), selectinload(Assessment.items).selectinload(AssessmentItem.question))
         .where(Assessment.id == assessment_id)
     )
     if not assessment:
@@ -158,6 +169,14 @@ def current_question(db: Session, assessment: Assessment) -> dict[str, object]:
             db.commit()
             continue
 
+        snapshot = assessment.webcam_snapshot
+        capture_requested = bool(
+            settings.webcam_required
+            and snapshot
+            and snapshot.image_data is None
+            and snapshot.status == "pending"
+            and snapshot.scheduled_position == item.position
+        )
         return {
             "status": "in_progress",
             "position": item.position,
@@ -167,6 +186,8 @@ def current_question(db: Session, assessment: Assessment) -> dict[str, object]:
             "difficulty": item.question.difficulty,
             "time_limit_seconds": settings.question_time_seconds,
             "remaining_ms": max(0, limit_ms - elapsed_ms),
+            "capture_requested": capture_requested,
+            "capture_after_ms": snapshot.scheduled_offset_ms if capture_requested else None,
         }
 
     _complete(db, assessment)

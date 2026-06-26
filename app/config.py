@@ -50,6 +50,8 @@ class Settings:
     max_attempts_per_document: int = int(
         os.getenv("MAX_ATTEMPTS_PER_DOCUMENT", "1")
     )
+    webcam_required: bool = _as_bool(os.getenv("WEBCAM_REQUIRED"), True)
+    webcam_max_image_kb: int = int(os.getenv("WEBCAM_MAX_IMAGE_KB", "700"))
 
 
 settings = Settings()

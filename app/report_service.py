@@ -51,6 +51,16 @@ def build_pdf_report(assessment: Assessment) -> bytes:
         ["Score", f"{assessment.score:.1f}%"],
         ["Decision", assessment.decision or "Not available"],
         ["Focus losses recorded", str(assessment.focus_loss_count)],
+        [
+            "Webcam still image",
+            "Captured" if assessment.webcam_snapshot and assessment.webcam_snapshot.image_data else "Not captured",
+        ],
+        [
+            "Webcam captured at",
+            assessment.webcam_snapshot.captured_at.isoformat()
+            if assessment.webcam_snapshot and assessment.webcam_snapshot.captured_at
+            else "Not available",
+        ],
         ["Completed", assessment.completed_at.isoformat() if assessment.completed_at else "Not available"],
     ]
     table = Table(summary_data, colWidths=[42 * mm, 115 * mm])

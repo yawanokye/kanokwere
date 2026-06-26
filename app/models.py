@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -87,6 +87,11 @@ class Assessment(Base):
         cascade="all, delete-orphan",
         order_by="AssessmentItem.position",
     )
+    webcam_snapshot: Mapped["WebcamSnapshot | None"] = relationship(
+        back_populates="assessment",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
 
 class AssessmentItem(Base):
@@ -111,3 +116,23 @@ class AssessmentItem(Base):
 
     assessment: Mapped[Assessment] = relationship(back_populates="items")
     question: Mapped[Question] = relationship(back_populates="assessment_items")
+
+
+class WebcamSnapshot(Base):
+    __tablename__ = "webcam_snapshots"
+    __table_args__ = (UniqueConstraint("assessment_id", name="uq_webcam_snapshot_assessment"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    assessment_id: Mapped[str] = mapped_column(
+        ForeignKey("assessments.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    scheduled_position: Mapped[int] = mapped_column(Integer, nullable=False)
+    scheduled_offset_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="pending")
+    image_data: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    capture_reason: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    assessment: Mapped[Assessment] = relationship(back_populates="webcam_snapshot")

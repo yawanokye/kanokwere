@@ -22,7 +22,7 @@ from .assessment_service import (
 from .config import BASE_DIR, settings
 from .database import Base, SessionLocal, engine, get_db
 from .document_service import read_and_extract
-from .models import Assessment, AssessmentItem, Document, Question
+from .models import Assessment, AssessmentItem, Document, Question, WebcamSnapshot
 from .question_service import generate_question_bank, question_to_record
 from .report_service import build_pdf_report
 from .schemas import AnswerRequest, FocusEventRequest, StartAssessmentRequest
@@ -52,7 +52,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="Kanokwere", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Kanokwere", version="0.2.0", lifespan=lifespan)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -63,11 +63,11 @@ async def security_headers(request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "same-origin"
-    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Permissions-Policy"] = "camera=(self), microphone=(), geolocation=()"
     response.headers["Cache-Control"] = "no-store" if request.url.path.startswith("/api/") else "no-cache"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; "
-        "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
+        "img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'"
     )
     return response
 
@@ -226,9 +226,11 @@ def begin_assessment(
         "session_token": token,
         "question_count": 20,
         "pass_threshold": settings.pass_threshold,
+        "webcam_required": settings.webcam_required,
         "instructions": (
             f"Questions appear one at a time. Each question allows {settings.question_time_seconds} seconds. "
-            "You cannot return to an earlier question."
+            "You cannot return to an earlier question. The webcam remains active during the assessment. "
+            "No video or audio is recorded, and one still image is captured at a random point."
         ),
     }
 
@@ -254,6 +256,52 @@ def assessment_answer(
     token = bearer_token(authorization)
     assessment = get_assessment(db, assessment_id, token)
     return submit_answer(db, assessment, payload.selected_index)
+
+
+@app.post("/api/assessments/{assessment_id}/snapshot")
+async def assessment_snapshot(
+    assessment_id: str,
+    image: UploadFile = File(...),
+    capture_reason: str = Form(default="random"),
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    token = bearer_token(authorization)
+    assessment = get_assessment(db, assessment_id, token)
+    snapshot = assessment.webcam_snapshot
+    if not snapshot:
+        raise HTTPException(status_code=409, detail="No webcam capture was scheduled for this assessment.")
+    if snapshot.image_data:
+        return {
+            "captured": True,
+            "already_captured": True,
+            "captured_at": snapshot.captured_at.isoformat() if snapshot.captured_at else None,
+        }
+
+    content_type = (image.content_type or "").lower()
+    if content_type not in {"image/jpeg", "image/png"}:
+        raise HTTPException(status_code=415, detail="The webcam snapshot must be a JPEG or PNG image.")
+    payload = await image.read()
+    max_bytes = max(100, settings.webcam_max_image_kb) * 1024
+    if not payload:
+        raise HTTPException(status_code=400, detail="The webcam snapshot was empty.")
+    if len(payload) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"The webcam snapshot exceeds {settings.webcam_max_image_kb} KB.",
+        )
+
+    snapshot.image_data = payload
+    snapshot.mime_type = content_type
+    snapshot.capture_reason = capture_reason[:30]
+    snapshot.captured_at = datetime.now(timezone.utc)
+    snapshot.status = "captured"
+    db.commit()
+    return {
+        "captured": True,
+        "already_captured": False,
+        "captured_at": snapshot.captured_at.isoformat(),
+    }
 
 
 @app.post("/api/assessments/{assessment_id}/focus-event")
@@ -291,6 +339,7 @@ def admin_submissions(db: Session = Depends(get_db)) -> dict[str, object]:
     for document in documents:
         latest = db.scalar(
             select(Assessment)
+            .options(selectinload(Assessment.webcam_snapshot))
             .where(Assessment.document_id == document.id)
             .order_by(Assessment.started_at.desc())
             .limit(1)
@@ -309,6 +358,13 @@ def admin_submissions(db: Session = Depends(get_db)) -> dict[str, object]:
                 "assessment_status": latest.status if latest else None,
                 "score": latest.score if latest else None,
                 "decision": latest.decision if latest else None,
+                "snapshot_available": bool(latest and latest.webcam_snapshot and latest.webcam_snapshot.image_data),
+                "snapshot_status": latest.webcam_snapshot.status if latest and latest.webcam_snapshot else None,
+                "snapshot_captured_at": (
+                    latest.webcam_snapshot.captured_at.isoformat()
+                    if latest and latest.webcam_snapshot and latest.webcam_snapshot.captured_at
+                    else None
+                ),
             }
         )
     return {"submissions": rows}
@@ -322,6 +378,7 @@ def admin_assessment_detail(
         select(Assessment)
         .options(
             selectinload(Assessment.document),
+            selectinload(Assessment.webcam_snapshot),
             selectinload(Assessment.items).selectinload(AssessmentItem.question),
         )
         .where(Assessment.id == assessment_id)
@@ -356,7 +413,32 @@ def admin_assessment_detail(
         "student_id": assessment.document.student_id,
         "document_title": assessment.document.title,
     }
+    snapshot = assessment.webcam_snapshot
+    summary["snapshot_available"] = bool(snapshot and snapshot.image_data)
+    summary["snapshot_status"] = snapshot.status if snapshot else None
+    summary["snapshot_captured_at"] = (
+        snapshot.captured_at.isoformat() if snapshot and snapshot.captured_at else None
+    )
     return {"summary": summary, "questions": details}
+
+
+@app.get("/api/admin/assessments/{assessment_id}/snapshot", dependencies=[Depends(require_admin)])
+def admin_assessment_snapshot(
+    assessment_id: str, db: Session = Depends(get_db)
+) -> Response:
+    snapshot = db.scalar(
+        select(WebcamSnapshot).where(WebcamSnapshot.assessment_id == assessment_id)
+    )
+    if not snapshot or not snapshot.image_data:
+        raise HTTPException(status_code=404, detail="No webcam snapshot is available.")
+    return Response(
+        content=snapshot.image_data,
+        media_type=snapshot.mime_type or "image/jpeg",
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": 'inline; filename="kanokwere-webcam-snapshot.jpg"',
+        },
+    )
 
 
 @app.get("/api/admin/assessments/{assessment_id}/report.pdf", dependencies=[Depends(require_admin)])
@@ -367,6 +449,7 @@ def admin_pdf_report(
         select(Assessment)
         .options(
             selectinload(Assessment.document),
+            selectinload(Assessment.webcam_snapshot),
             selectinload(Assessment.items).selectinload(AssessmentItem.question),
         )
         .where(Assessment.id == assessment_id)
