@@ -5,7 +5,9 @@ const state = {
   testActive: false,
   timerHandle: null,
   currentPosition: null,
-  adminKey: sessionStorage.getItem("kanokwere_admin_key") || "",
+  lecturerUser: null,
+  courses: [],
+  platformKey: sessionStorage.getItem("kanokwere_platform_key") || "",
   cameraStream: null,
   snapshotCaptured: false,
   snapshotPromise: null,
@@ -40,7 +42,7 @@ function showPanel(name, step) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, options);
+  const response = await fetch(path, { credentials: "same-origin", ...options });
   let payload = null;
   const contentType = response.headers.get("content-type") || "";
   if (contentType.includes("application/json")) payload = await response.json();
@@ -574,28 +576,237 @@ window.addEventListener("blur", () => {
   }).catch(() => {});
 });
 
-const adminKeyInput = $("#admin-key");
-adminKeyInput.value = state.adminKey;
-$("#load-submissions").addEventListener("click", loadSubmissions);
-$("#refresh-submissions").addEventListener("click", loadSubmissions);
+async function loadLecturerSession(silent = false) {
+  try {
+    const result = await api("/api/auth/me");
+    state.lecturerUser = result.user;
+    showLecturerDashboard(result.user);
+    await Promise.all([loadCourses(), loadSubmissions()]);
+  } catch (error) {
+    state.lecturerUser = null;
+    showLecturerAuth();
+    if (!silent && error.status !== 401) setMessage($("#lecturer-auth-message"), error.message, "error");
+  }
+}
 
-async function loadSubmissions() {
-  state.adminKey = adminKeyInput.value.trim();
-  if (!state.adminKey) {
-    setMessage($("#admin-message"), "Enter the administrator key.", "warning");
+function showLecturerDashboard(user) {
+  $("#lecturer-auth-panel").classList.add("hidden");
+  $("#lecturer-dashboard").classList.remove("hidden");
+  $("#lecturer-name").textContent = user.full_name;
+  $("#lecturer-profile").textContent = `${user.role.replaceAll("_", " ")} · ${user.department || "Department not set"} · ${user.institution?.name || "Institution"}`;
+}
+
+function showLecturerAuth() {
+  $("#lecturer-auth-panel").classList.remove("hidden");
+  $("#lecturer-dashboard").classList.add("hidden");
+}
+
+function formJson(form) {
+  return Object.fromEntries(new FormData(form).entries());
+}
+
+$("#lecturer-login-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.submitter;
+  button.disabled = true;
+  setMessage($("#lecturer-auth-message"), "Signing in…");
+  try {
+    const result = await api("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(formJson(event.currentTarget)),
+    });
+    state.lecturerUser = result.user;
+    event.currentTarget.reset();
+    setMessage($("#lecturer-auth-message"));
+    showLecturerDashboard(result.user);
+    await Promise.all([loadCourses(), loadSubmissions()]);
+  } catch (error) {
+    setMessage($("#lecturer-auth-message"), error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("#lecturer-register-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.submitter;
+  button.disabled = true;
+  setMessage($("#lecturer-auth-message"), "Submitting registration…");
+  try {
+    const result = await api("/api/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(formJson(event.currentTarget)),
+    });
+    event.currentTarget.reset();
+    setMessage($("#lecturer-auth-message"), result.message, "success");
+  } catch (error) {
+    setMessage($("#lecturer-auth-message"), error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("#lecturer-logout").addEventListener("click", async () => {
+  try {
+    await api("/api/auth/logout", { method: "POST" });
+  } catch (_) {
+    // The cookie may already have expired.
+  }
+  state.lecturerUser = null;
+  state.courses = [];
+  clearSnapshotObjectUrls();
+  showLecturerAuth();
+  setMessage($("#lecturer-auth-message"), "You have signed out.", "success");
+});
+
+$("#course-create-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.submitter;
+  button.disabled = true;
+  setMessage($("#lecturer-message"), "Creating course…");
+  try {
+    const result = await api("/api/lecturer/courses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(formJson(event.currentTarget)),
+    });
+    event.currentTarget.reset();
+    setMessage($("#lecturer-message"), `Course created. Student enrolment code: ${result.course.enrollment_code}`, "success");
+    await loadCourses();
+  } catch (error) {
+    handleLecturerError(error);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("#collaborator-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const data = formJson(event.currentTarget);
+  const button = event.submitter;
+  button.disabled = true;
+  try {
+    await api(`/api/lecturer/courses/${data.course_id}/collaborators`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: data.email, access_level: data.access_level }),
+    });
+    event.currentTarget.reset();
+    setMessage($("#lecturer-message"), "Co-lecturer access updated.", "success");
+    await loadCourses();
+  } catch (error) {
+    handleLecturerError(error);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("#refresh-courses").addEventListener("click", loadCourses);
+$("#refresh-submissions").addEventListener("click", loadSubmissions);
+$("#submission-course-filter").addEventListener("change", loadSubmissions);
+
+async function loadCourses() {
+  try {
+    const result = await api("/api/lecturer/courses");
+    state.courses = result.courses;
+    renderCourses(result.courses);
+    populateCourseSelectors(result.courses);
+  } catch (error) {
+    handleLecturerError(error);
+  }
+}
+
+function populateCourseSelectors(courses) {
+  const collaborator = $("#collaborator-course");
+  const filter = $("#submission-course-filter");
+  const selectedFilter = filter.value;
+  collaborator.replaceChildren(new Option("Select course", ""));
+  filter.replaceChildren(new Option("All my courses", ""));
+  courses.forEach((course) => {
+    const label = `${course.course_code} · ${course.title}`;
+    if (["owner", "institution_admin"].includes(course.my_access_level)) {
+      collaborator.appendChild(new Option(label, course.id));
+    }
+    filter.appendChild(new Option(label, course.id));
+  });
+  if (courses.some((course) => course.id === selectedFilter)) filter.value = selectedFilter;
+}
+
+function renderCourses(courses) {
+  const body = $("#courses-body");
+  body.replaceChildren();
+  if (!courses.length) {
+    body.innerHTML = '<tr><td colspan="6" class="empty-state">Create your first course to receive student submissions.</td></tr>';
     return;
   }
-  sessionStorage.setItem("kanokwere_admin_key", state.adminKey);
-  setMessage($("#admin-message"), "Loading submissions…");
-  try {
-    const result = await api("/api/admin/submissions", {
-      headers: { "X-Admin-Key": state.adminKey },
+  courses.forEach((course) => {
+    const row = document.createElement("tr");
+    row.innerHTML = `
+      <td><strong></strong><small></small></td>
+      <td><strong></strong><small></small></td>
+      <td><code class="enrollment-code"></code></td>
+      <td class="course-lecturers"></td>
+      <td></td>
+      <td><div class="action-row"></div></td>`;
+    row.children[0].querySelector("strong").textContent = course.course_code;
+    row.children[0].querySelector("small").textContent = course.title;
+    row.children[1].querySelector("strong").textContent = course.academic_year;
+    row.children[1].querySelector("small").textContent = course.semester;
+    row.children[2].querySelector("code").textContent = course.enrollment_code;
+    row.children[3].textContent = course.lecturers.map((item) => `${item.full_name} (${item.access_level.replaceAll("_", " ")})`).join(", ");
+    row.children[4].textContent = String(course.submission_count);
+    const actions = row.children[5].querySelector(".action-row");
+    const copy = document.createElement("button");
+    copy.textContent = "Copy code";
+    copy.addEventListener("click", async () => {
+      await navigator.clipboard.writeText(course.enrollment_code);
+      setMessage($("#lecturer-message"), `${course.enrollment_code} copied.`, "success");
     });
-    renderSubmissions(result.submissions);
-    setMessage($("#admin-message"), `${result.submissions.length} submission(s) loaded.`, "success");
+    actions.appendChild(copy);
+    if (["owner", "institution_admin"].includes(course.my_access_level)) {
+      const regenerate = document.createElement("button");
+      regenerate.textContent = "New code";
+      regenerate.addEventListener("click", () => regenerateCourseCode(course));
+      actions.appendChild(regenerate);
+    }
+    body.appendChild(row);
+  });
+}
+
+async function regenerateCourseCode(course) {
+  if (!confirm(`Generate a new enrolment code for ${course.course_code}? The old code will stop working.`)) return;
+  try {
+    const result = await api(`/api/lecturer/courses/${course.id}/regenerate-code`, { method: "POST" });
+    setMessage($("#lecturer-message"), `New code: ${result.enrollment_code}`, "success");
+    await loadCourses();
   } catch (error) {
-    setMessage($("#admin-message"), error.message, "error");
+    handleLecturerError(error);
   }
+}
+
+async function loadSubmissions() {
+  const courseId = $("#submission-course-filter").value;
+  setMessage($("#lecturer-message"), "Loading submissions…");
+  try {
+    const suffix = courseId ? `?course_id=${encodeURIComponent(courseId)}` : "";
+    const result = await api(`/api/lecturer/submissions${suffix}`);
+    renderSubmissions(result.submissions);
+    setMessage($("#lecturer-message"), `${result.submissions.length} submission(s) loaded.`, "success");
+  } catch (error) {
+    handleLecturerError(error);
+  }
+}
+
+function handleLecturerError(error) {
+  if (error.status === 401) {
+    state.lecturerUser = null;
+    showLecturerAuth();
+    setMessage($("#lecturer-auth-message"), "Your session has expired. Sign in again.", "warning");
+    return;
+  }
+  setMessage($("#lecturer-message"), error.message, "error");
 }
 
 function renderSubmissions(rows) {
@@ -603,9 +814,7 @@ function renderSubmissions(rows) {
   const body = $("#submissions-body");
   body.replaceChildren();
   if (!rows.length) {
-    const row = document.createElement("tr");
-    row.innerHTML = '<td colspan="7" class="empty-state">No submissions found.</td>';
-    body.appendChild(row);
+    body.innerHTML = '<tr><td colspan="7" class="empty-state">No submissions found for the selected course.</td></tr>';
     return;
   }
   rows.forEach((item) => {
@@ -622,7 +831,7 @@ function renderSubmissions(rows) {
     row.children[0].querySelector("strong").textContent = item.student_name;
     row.children[0].querySelector("small").textContent = item.student_id;
     row.children[1].querySelector("strong").textContent = item.title;
-    row.children[1].querySelector("small").textContent = `${item.word_count.toLocaleString()} words`;
+    row.children[1].querySelector("small").textContent = `${item.course} · ${item.word_count.toLocaleString()} words`;
     const status = row.children[2].querySelector("span");
     status.textContent = item.assessment_status || item.status;
     status.classList.add(item.assessment_status || item.status);
@@ -662,40 +871,27 @@ function clearSnapshotObjectUrls() {
 
 function renderSnapshotCell(cell, item) {
   cell.replaceChildren();
-  if (!item.assessment_id) {
+  if (!item.assessment_id || !item.snapshot_available) {
     const placeholder = document.createElement("span");
     placeholder.className = "snapshot-placeholder";
-    placeholder.textContent = "No attempt";
+    placeholder.textContent = !item.assessment_id ? "No attempt" : item.assessment_status === "completed" ? "Not captured" : "Awaiting capture";
     cell.appendChild(placeholder);
     return;
   }
-  if (!item.snapshot_available) {
-    const placeholder = document.createElement("span");
-    placeholder.className = "snapshot-placeholder";
-    placeholder.textContent = item.assessment_status === "completed" ? "Not captured" : "Awaiting capture";
-    cell.appendChild(placeholder);
-    return;
-  }
-
   const image = document.createElement("img");
   image.className = "snapshot-thumb";
   image.alt = `Webcam snapshot for ${item.student_name}`;
   image.loading = "lazy";
   const time = document.createElement("small");
   time.className = "snapshot-time";
-  time.textContent = item.snapshot_captured_at
-    ? new Date(item.snapshot_captured_at).toLocaleString()
-    : "Captured";
+  time.textContent = item.snapshot_captured_at ? new Date(item.snapshot_captured_at).toLocaleString() : "Captured";
   cell.append(image, time);
   loadSnapshotImage(item.assessment_id, image);
 }
 
 async function loadSnapshotImage(assessmentId, image) {
   try {
-    const response = await fetch(`/api/admin/assessments/${assessmentId}/snapshot`, {
-      headers: { "X-Admin-Key": state.adminKey },
-      cache: "no-store",
-    });
+    const response = await fetch(`/api/lecturer/assessments/${assessmentId}/snapshot`, { credentials: "same-origin", cache: "no-store" });
     if (!response.ok) throw new Error("Snapshot unavailable");
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
@@ -705,18 +901,13 @@ async function loadSnapshotImage(assessmentId, image) {
     image.title = "Open webcam snapshot";
     image.style.cursor = "zoom-in";
   } catch (_) {
-    image.replaceWith(Object.assign(document.createElement("span"), {
-      className: "snapshot-placeholder",
-      textContent: "Could not load",
-    }));
+    image.replaceWith(Object.assign(document.createElement("span"), { className: "snapshot-placeholder", textContent: "Could not load" }));
   }
 }
 
 async function reviewAssessment(assessmentId) {
   try {
-    const result = await api(`/api/admin/assessments/${assessmentId}`, {
-      headers: { "X-Admin-Key": state.adminKey },
-    });
+    const result = await api(`/api/lecturer/assessments/${assessmentId}`);
     $("#review-panel").classList.remove("hidden");
     $("#review-title").textContent = `${result.summary.student_name} · ${result.summary.document_title}`;
     const summary = $("#review-summary");
@@ -729,11 +920,9 @@ async function reviewAssessment(assessmentId) {
     ];
     metrics.forEach(([value, label]) => {
       const block = document.createElement("div");
-      const strong = document.createElement("strong");
-      const span = document.createElement("span");
-      strong.textContent = value;
-      span.textContent = label;
-      block.append(strong, span);
+      block.innerHTML = "<strong></strong><span></span>";
+      block.querySelector("strong").textContent = value;
+      block.querySelector("span").textContent = label;
       summary.appendChild(block);
     });
     const questions = $("#review-questions");
@@ -743,15 +932,8 @@ async function reviewAssessment(assessmentId) {
       card.className = "review-question";
       const outcome = item.timed_out ? "Timed out" : item.is_correct ? "Correct" : item.is_correct === false ? "Incorrect" : "Not answered";
       card.innerHTML = `
-        <h3></h3>
-        <div class="review-meta">
-          <span class="${item.is_correct ? "correct" : "incorrect"}">${outcome}</span>
-          <span>${item.difficulty}</span>
-          <span>${item.response_ms == null ? "No time" : `${(item.response_ms / 1000).toFixed(1)}s`}</span>
-          <span></span>
-        </div>
-        <ol class="review-options"></ol>
-        <div class="source-evidence"><strong>Supporting passage</strong><br><span></span></div>`;
+        <h3></h3><div class="review-meta"><span class="${item.is_correct ? "correct" : "incorrect"}">${outcome}</span><span>${item.difficulty}</span><span>${item.response_ms == null ? "No time" : `${(item.response_ms / 1000).toFixed(1)}s`}</span><span></span></div>
+        <ol class="review-options"></ol><div class="source-evidence"><strong>Supporting passage</strong><br><span></span></div>`;
       card.querySelector("h3").textContent = `${item.position}. ${item.stem}`;
       card.querySelector(".review-meta span:last-child").textContent = item.source_location;
       const optionList = card.querySelector(".review-options");
@@ -767,7 +949,7 @@ async function reviewAssessment(assessmentId) {
     });
     $("#review-panel").scrollIntoView({ behavior: "smooth" });
   } catch (error) {
-    setMessage($("#admin-message"), error.message, "error");
+    handleLecturerError(error);
   }
 }
 
@@ -775,9 +957,7 @@ $("#close-review").addEventListener("click", () => $("#review-panel").classList.
 
 async function downloadReport(assessmentId, studentId) {
   try {
-    const response = await fetch(`/api/admin/assessments/${assessmentId}/report.pdf`, {
-      headers: { "X-Admin-Key": state.adminKey },
-    });
+    const response = await fetch(`/api/lecturer/assessments/${assessmentId}/report.pdf`, { credentials: "same-origin" });
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
       throw new Error(payload.detail || "The report could not be downloaded.");
@@ -790,36 +970,85 @@ async function downloadReport(assessmentId, studentId) {
     link.click();
     URL.revokeObjectURL(url);
   } catch (error) {
-    setMessage($("#admin-message"), error.message, "error");
+    handleLecturerError(error);
   }
 }
 
-
 async function resetAttempt(assessmentId, studentName) {
-  if (!confirm(`Reset ${studentName}'s unfinished attempt? The current responses will be deleted.`)) return;
+  if (!confirm(`Reset ${studentName}'s attempt? Current answers and the still image will be deleted.`)) return;
   try {
-    await api(`/api/admin/assessments/${assessmentId}`, {
-      method: "DELETE",
-      headers: { "X-Admin-Key": state.adminKey },
-    });
+    await api(`/api/lecturer/assessments/${assessmentId}`, { method: "DELETE" });
     await loadSubmissions();
   } catch (error) {
-    setMessage($("#admin-message"), error.message, "error");
+    handleLecturerError(error);
   }
 }
 
 async function deleteSubmission(documentId, studentName) {
-  if (!confirm(`Delete ${studentName}'s document, questions, assessments, and reports? This cannot be undone.`)) return;
+  if (!confirm(`Delete ${studentName}'s submission and all related evidence? This cannot be undone.`)) return;
   try {
-    await api(`/api/admin/documents/${documentId}`, {
-      method: "DELETE",
-      headers: { "X-Admin-Key": state.adminKey },
-    });
-    await loadSubmissions();
+    await api(`/api/lecturer/documents/${documentId}`, { method: "DELETE" });
+    await Promise.all([loadCourses(), loadSubmissions()]);
   } catch (error) {
-    setMessage($("#admin-message"), error.message, "error");
+    handleLecturerError(error);
   }
 }
+
+const platformKeyInput = $("#platform-admin-key");
+platformKeyInput.value = state.platformKey;
+$("#load-pending-users").addEventListener("click", loadPendingUsers);
+
+async function loadPendingUsers() {
+  state.platformKey = platformKeyInput.value.trim();
+  if (!state.platformKey) {
+    setMessage($("#platform-message"), "Enter the platform ADMIN_KEY.", "warning");
+    return;
+  }
+  sessionStorage.setItem("kanokwere_platform_key", state.platformKey);
+  try {
+    const result = await api("/api/platform/pending", { headers: { "X-Admin-Key": state.platformKey } });
+    renderPendingUsers(result.users);
+    setMessage($("#platform-message"), `${result.users.length} pending registration(s).`, "success");
+  } catch (error) {
+    setMessage($("#platform-message"), error.message, "error");
+  }
+}
+
+function renderPendingUsers(users) {
+  const body = $("#pending-users-body");
+  body.replaceChildren();
+  if (!users.length) {
+    body.innerHTML = '<tr><td colspan="5" class="empty-state">No pending lecturer registrations.</td></tr>';
+    return;
+  }
+  users.forEach((user) => {
+    const row = document.createElement("tr");
+    row.innerHTML = '<td><strong></strong><small></small></td><td><strong></strong><small></small></td><td></td><td><select><option value="lecturer">Lecturer</option><option value="institution_admin">Institution administrator</option></select></td><td><button class="primary-button small-button" type="button">Approve</button></td>';
+    row.children[0].querySelector("strong").textContent = user.full_name;
+    row.children[0].querySelector("small").textContent = user.email;
+    row.children[1].querySelector("strong").textContent = user.institution?.name || "—";
+    row.children[1].querySelector("small").textContent = user.institution?.domain || "—";
+    row.children[2].textContent = `${user.department || "—"} · ${user.staff_id || "—"}`;
+    const role = row.children[3].querySelector("select");
+    row.children[4].querySelector("button").addEventListener("click", () => approvePendingUser(user.id, role.value));
+    body.appendChild(row);
+  });
+}
+
+async function approvePendingUser(userId, role) {
+  try {
+    await api(`/api/platform/users/${userId}/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Admin-Key": state.platformKey },
+      body: JSON.stringify({ role }),
+    });
+    await loadPendingUsers();
+  } catch (error) {
+    setMessage($("#platform-message"), error.message, "error");
+  }
+}
+
+$$('[data-view-link="admin"]').forEach((button) => button.addEventListener("click", () => loadLecturerSession(true)));
 
 if (state.documentId && !state.assessmentId) {
   showPanel("prepare", 2);
@@ -836,4 +1065,5 @@ if (state.assessmentId && state.token) {
     });
 }
 
+loadLecturerSession(true);
 window.addEventListener("pagehide", stopCamera);

@@ -279,3 +279,67 @@ footer strong { color: var(--brand-dark); }
   .webcam-monitor { align-items: flex-start; }
   .webcam-monitor video { width: 88px; }
 }
+
+/* Lecturer accounts and course management */
+button, input, select { font: inherit; }
+input[type="email"], select {
+  width: 100%;
+  border: 1px solid #cbd7d0;
+  background: #fbfdfc;
+  border-radius: 11px;
+  padding: 13px 14px;
+  color: var(--ink);
+  outline: none;
+  transition: border .15s, box-shadow .15s;
+}
+select:focus, input[type="email"]:focus { border-color: var(--brand); box-shadow: 0 0 0 4px rgba(20,108,67,.1); }
+label small { color: var(--muted); font-weight: 500; line-height: 1.4; }
+.security-note {
+  background: #173f2c;
+  color: white;
+  border-radius: var(--radius);
+  padding: 22px;
+  box-shadow: var(--shadow);
+}
+.security-note strong { font-size: 18px; }
+.security-note p { color: #dceae1; margin: 8px 0 0; font-size: 13px; line-height: 1.55; }
+.auth-grid { display: grid; grid-template-columns: .85fr 1.15fr; gap: 24px; margin-bottom: 24px; }
+.auth-card, .management-card, .platform-admin-card {
+  background: white;
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+  border-radius: var(--radius);
+}
+.auth-card { padding: 28px; }
+.auth-card h2 { margin: 7px 0 22px; font: 700 30px Georgia, serif; }
+.stack-form { display: grid; gap: 16px; }
+.stack-form .primary-button, .stack-form .secondary-button { justify-self: start; }
+.dashboard-header { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 56px 0 26px; }
+.dashboard-header h1 { margin: 8px 0 8px; font: 700 clamp(38px, 5vw, 58px)/1.08 Georgia, serif; }
+.dashboard-header p { margin: 0; color: var(--muted); text-transform: capitalize; }
+.management-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 30px; }
+.management-card .stack-form { padding: 22px 24px 26px; }
+.compact-form { grid-template-columns: 1fr 1fr; }
+.compact-form label:nth-last-child(2), .compact-form button { grid-column: 1 / -1; }
+.table-heading > div > small { display: block; margin-top: 5px; color: var(--muted); }
+.table-tools { display: flex; align-items: center; gap: 10px; }
+.table-tools select { min-width: 220px; padding: 9px 11px; }
+.enrollment-code { display: inline-block; white-space: nowrap; padding: 7px 9px; border-radius: 8px; background: var(--brand-soft); color: var(--brand-dark); font-weight: 850; letter-spacing: .04em; }
+.course-lecturers { min-width: 220px; color: var(--muted); line-height: 1.45; }
+.platform-admin-card { margin: 34px 0 70px; overflow: hidden; }
+.platform-controls { display: grid; grid-template-columns: minmax(280px, 1fr) auto; gap: 14px; align-items: end; padding: 22px 24px 4px; }
+.platform-controls + .message { margin-left: 24px; margin-right: 24px; }
+.small-button { padding: 8px 11px; font-size: 11px; }
+.snapshot-cell { min-width: 106px; }
+.snapshot-thumb { display: block; width: 86px; height: 64px; object-fit: cover; border-radius: 9px; border: 1px solid var(--line); }
+.snapshot-time { display: block; max-width: 100px; margin-top: 4px; font-size: 9px; }
+.snapshot-placeholder { color: var(--muted); font-size: 11px; }
+
+@media (max-width: 900px) {
+  .auth-grid, .management-grid { grid-template-columns: 1fr; }
+  .compact-form { grid-template-columns: 1fr; }
+  .compact-form label, .compact-form button { grid-column: auto; }
+  .dashboard-header { align-items: flex-start; flex-direction: column; }
+  .platform-controls { grid-template-columns: 1fr; }
+  .table-tools { align-items: stretch; flex-direction: column; }
+}
