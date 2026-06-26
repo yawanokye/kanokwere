@@ -6,6 +6,12 @@ const state = {
   timerHandle: null,
   currentPosition: null,
   adminKey: sessionStorage.getItem("kanokwere_admin_key") || "",
+  cameraStream: null,
+  snapshotCaptured: false,
+  snapshotPromise: null,
+  snapshotTimer: null,
+  captureScheduledForCurrentQuestion: false,
+  snapshotUrls: [],
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -53,6 +59,129 @@ function assessmentHeaders() {
     "Content-Type": "application/json",
     Authorization: `Bearer ${state.token}`,
   };
+}
+
+function setWebcamStatus(message, mode = "active") {
+  const monitor = $(".webcam-monitor");
+  const status = $("#webcam-status");
+  if (status) status.textContent = message;
+  if (!monitor) return;
+  monitor.classList.toggle("interrupted", mode === "interrupted");
+  monitor.classList.toggle("captured", mode === "captured");
+}
+
+async function startCamera() {
+  const activeTrack = state.cameraStream?.getVideoTracks?.()[0];
+  if (activeTrack?.readyState === "live") return state.cameraStream;
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error("This browser does not support webcam access. Use a current browser on an HTTPS connection.");
+  }
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: "user",
+      width: { ideal: 640, max: 1280 },
+      height: { ideal: 480, max: 720 },
+    },
+    audio: false,
+  });
+  state.cameraStream = stream;
+  const video = $("#webcam-preview");
+  video.srcObject = stream;
+  await video.play();
+  const track = stream.getVideoTracks()[0];
+  track.addEventListener("ended", () => {
+    setWebcamStatus("Camera access stopped. The lecturer record may show that no image was captured.", "interrupted");
+  });
+  track.addEventListener("mute", () => {
+    setWebcamStatus("The camera feed is temporarily unavailable.", "interrupted");
+  });
+  track.addEventListener("unmute", () => {
+    setWebcamStatus("No video or audio is being recorded. One still image will be captured at a random point.");
+  });
+  setWebcamStatus("No video or audio is being recorded. One still image will be captured at a random point.");
+  return stream;
+}
+
+function stopCamera() {
+  clearSnapshotTimer();
+  state.cameraStream?.getTracks?.().forEach((track) => track.stop());
+  state.cameraStream = null;
+  const video = $("#webcam-preview");
+  if (video) video.srcObject = null;
+}
+
+function clearSnapshotTimer() {
+  if (state.snapshotTimer) clearTimeout(state.snapshotTimer);
+  state.snapshotTimer = null;
+  state.captureScheduledForCurrentQuestion = false;
+}
+
+function canvasBlob(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => blob ? resolve(blob) : reject(new Error("The webcam image could not be created.")),
+      "image/jpeg",
+      0.78
+    );
+  });
+}
+
+async function captureSnapshotOnce(reason = "random") {
+  if (state.snapshotCaptured) return true;
+  if (state.snapshotPromise) return state.snapshotPromise;
+
+  state.snapshotPromise = (async () => {
+    const video = $("#webcam-preview");
+    const canvas = $("#webcam-canvas");
+    const track = state.cameraStream?.getVideoTracks?.()[0];
+    if (!video || !canvas || !track || track.readyState !== "live") {
+      setWebcamStatus("The still image could not be captured because the camera is unavailable.", "interrupted");
+      return false;
+    }
+    if (!video.videoWidth || !video.videoHeight) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    if (!video.videoWidth || !video.videoHeight) {
+      setWebcamStatus("The camera image was not ready for capture.", "interrupted");
+      return false;
+    }
+
+    const maxWidth = 640;
+    const scale = Math.min(1, maxWidth / video.videoWidth);
+    canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+    canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+    const context = canvas.getContext("2d", { alpha: false });
+    context.translate(canvas.width, 0);
+    context.scale(-1, 1);
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    context.setTransform(1, 0, 0, 1, 0, 0);
+
+    const blob = await canvasBlob(canvas);
+    const formData = new FormData();
+    formData.append("image", blob, "webcam-snapshot.jpg");
+    formData.append("capture_reason", reason);
+    const result = await api(`/api/assessments/${state.assessmentId}/snapshot`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${state.token}` },
+      body: formData,
+    });
+    state.snapshotCaptured = Boolean(result.captured);
+    if (state.snapshotCaptured) {
+      setWebcamStatus("Still image captured. The camera remains active until the assessment ends.", "captured");
+    }
+    return state.snapshotCaptured;
+  })();
+
+  try {
+    return await state.snapshotPromise;
+  } catch (error) {
+    setWebcamStatus(`Still image capture failed: ${error.message}`, "interrupted");
+    return false;
+  } finally {
+    state.snapshotPromise = null;
+    clearSnapshotTimer();
+  }
 }
 
 $$('[data-view-link]').forEach((button) => {
@@ -254,6 +383,9 @@ $("#start-button").addEventListener("click", async () => {
   button.disabled = true;
   button.textContent = "Starting…";
   try {
+    button.textContent = "Starting camera…";
+    await startCamera();
+    button.textContent = "Starting assessment…";
     const result = await api("/api/assessments/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -261,6 +393,7 @@ $("#start-button").addEventListener("click", async () => {
     });
     state.assessmentId = result.assessment_id;
     state.token = result.session_token;
+    state.snapshotCaptured = false;
     state.testActive = true;
     sessionStorage.setItem("kanokwere_assessment_id", state.assessmentId);
     sessionStorage.setItem("kanokwere_session_token", state.token);
@@ -268,7 +401,8 @@ $("#start-button").addEventListener("click", async () => {
     document.documentElement.requestFullscreen?.().catch(() => {});
     await loadQuestion();
   } catch (error) {
-    setMessage($("#mode-warning"), error.message, "error");
+    stopCamera();
+    setMessage($("#mode-warning"), `Webcam access is required to start: ${error.message}`, "error");
     button.disabled = false;
   } finally {
     button.textContent = "Start assessment";
@@ -293,6 +427,9 @@ function startQuestionTimer(remainingMs) {
     if (left <= 0) {
       clearQuestionTimer();
       disableOptions();
+      if (state.captureScheduledForCurrentQuestion && !state.snapshotCaptured) {
+        captureSnapshotOnce("random");
+      }
       setMessage($("#test-message"), "Time expired. Moving to the next question.", "warning");
       setTimeout(loadQuestion, 350);
     }
@@ -307,6 +444,7 @@ function disableOptions() {
 
 async function loadQuestion() {
   if (!state.assessmentId || !state.token) return;
+  clearSnapshotTimer();
   try {
     const result = await api(`/api/assessments/${state.assessmentId}/question`, {
       headers: { Authorization: `Bearer ${state.token}` },
@@ -337,6 +475,12 @@ async function loadQuestion() {
       options.appendChild(button);
     });
     startQuestionTimer(result.remaining_ms);
+    if (result.capture_requested && !state.snapshotCaptured) {
+      state.captureScheduledForCurrentQuestion = true;
+      const requestedDelay = Number(result.capture_after_ms || 1500);
+      const safeDelay = Math.max(250, Math.min(requestedDelay, Math.max(250, result.remaining_ms - 500)));
+      state.snapshotTimer = setTimeout(() => captureSnapshotOnce("random"), safeDelay);
+    }
   } catch (error) {
     setMessage($("#test-message"), error.message, "error");
   }
@@ -347,12 +491,16 @@ async function submitAnswer(index, selectedButton) {
   disableOptions();
   selectedButton.classList.add("selected");
   setMessage($("#test-message"), "Answer submitted.", "success");
+  const pendingCapture = state.captureScheduledForCurrentQuestion && !state.snapshotCaptured
+    ? captureSnapshotOnce("random")
+    : Promise.resolve(false);
   try {
     const result = await api(`/api/assessments/${state.assessmentId}/answer`, {
       method: "POST",
       headers: assessmentHeaders(),
       body: JSON.stringify({ selected_index: index }),
     });
+    await pendingCapture;
     if (result.status === "completed") {
       await loadResult();
     } else {
@@ -366,8 +514,11 @@ async function submitAnswer(index, selectedButton) {
 
 async function loadResult() {
   clearQuestionTimer();
+  clearSnapshotTimer();
   state.testActive = false;
   try {
+    if (!state.snapshotCaptured) await captureSnapshotOnce("completion_fallback");
+    stopCamera();
     const result = await api(`/api/assessments/${state.assessmentId}/result`, {
       headers: { Authorization: `Bearer ${state.token}` },
     });
@@ -388,10 +539,12 @@ async function loadResult() {
 }
 
 $("#new-assessment-button").addEventListener("click", () => {
+  stopCamera();
   state.documentId = null;
   state.assessmentId = null;
   state.token = null;
   state.currentPosition = null;
+  state.snapshotCaptured = false;
   pollStartedAt = null;
   localStorage.removeItem("kanokwere_document_id");
   $("#upload-form").reset();
@@ -446,11 +599,12 @@ async function loadSubmissions() {
 }
 
 function renderSubmissions(rows) {
+  clearSnapshotObjectUrls();
   const body = $("#submissions-body");
   body.replaceChildren();
   if (!rows.length) {
     const row = document.createElement("tr");
-    row.innerHTML = '<td colspan="6" class="empty-state">No submissions found.</td>';
+    row.innerHTML = '<td colspan="7" class="empty-state">No submissions found.</td>';
     body.appendChild(row);
     return;
   }
@@ -463,6 +617,7 @@ function renderSubmissions(rows) {
       <td><span class="status-pill"></span></td>
       <td>${score}</td>
       <td></td>
+      <td class="snapshot-cell"></td>
       <td><div class="action-row"></div></td>`;
     row.children[0].querySelector("strong").textContent = item.student_name;
     row.children[0].querySelector("small").textContent = item.student_id;
@@ -472,7 +627,8 @@ function renderSubmissions(rows) {
     status.textContent = item.assessment_status || item.status;
     status.classList.add(item.assessment_status || item.status);
     row.children[4].textContent = item.decision || "—";
-    const actions = row.children[5].querySelector(".action-row");
+    renderSnapshotCell(row.children[5], item);
+    const actions = row.children[6].querySelector(".action-row");
     if (item.assessment_id) {
       const review = document.createElement("button");
       review.textContent = "Review";
@@ -497,6 +653,63 @@ function renderSubmissions(rows) {
     actions.appendChild(remove);
     body.appendChild(row);
   });
+}
+
+function clearSnapshotObjectUrls() {
+  state.snapshotUrls.forEach((url) => URL.revokeObjectURL(url));
+  state.snapshotUrls = [];
+}
+
+function renderSnapshotCell(cell, item) {
+  cell.replaceChildren();
+  if (!item.assessment_id) {
+    const placeholder = document.createElement("span");
+    placeholder.className = "snapshot-placeholder";
+    placeholder.textContent = "No attempt";
+    cell.appendChild(placeholder);
+    return;
+  }
+  if (!item.snapshot_available) {
+    const placeholder = document.createElement("span");
+    placeholder.className = "snapshot-placeholder";
+    placeholder.textContent = item.assessment_status === "completed" ? "Not captured" : "Awaiting capture";
+    cell.appendChild(placeholder);
+    return;
+  }
+
+  const image = document.createElement("img");
+  image.className = "snapshot-thumb";
+  image.alt = `Webcam snapshot for ${item.student_name}`;
+  image.loading = "lazy";
+  const time = document.createElement("small");
+  time.className = "snapshot-time";
+  time.textContent = item.snapshot_captured_at
+    ? new Date(item.snapshot_captured_at).toLocaleString()
+    : "Captured";
+  cell.append(image, time);
+  loadSnapshotImage(item.assessment_id, image);
+}
+
+async function loadSnapshotImage(assessmentId, image) {
+  try {
+    const response = await fetch(`/api/admin/assessments/${assessmentId}/snapshot`, {
+      headers: { "X-Admin-Key": state.adminKey },
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error("Snapshot unavailable");
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    state.snapshotUrls.push(url);
+    image.src = url;
+    image.addEventListener("click", () => window.open(url, "_blank", "noopener"));
+    image.title = "Open webcam snapshot";
+    image.style.cursor = "zoom-in";
+  } catch (_) {
+    image.replaceWith(Object.assign(document.createElement("span"), {
+      className: "snapshot-placeholder",
+      textContent: "Could not load",
+    }));
+  }
 }
 
 async function reviewAssessment(assessmentId) {
@@ -615,5 +828,12 @@ if (state.documentId && !state.assessmentId) {
 if (state.assessmentId && state.token) {
   state.testActive = true;
   showPanel("test", 3);
-  loadQuestion();
+  startCamera()
+    .then(loadQuestion)
+    .catch((error) => {
+      state.testActive = false;
+      setMessage($("#test-message"), `Webcam access is required to resume: ${error.message}`, "error");
+    });
 }
+
+window.addEventListener("pagehide", stopCamera);

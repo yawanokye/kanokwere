@@ -231,3 +231,51 @@ footer strong { color: var(--brand-dark); }
   .processing-grid { gap: 30px; }
   .score-ring { width: 220px; }
 }
+
+.webcam-monitor {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: min(420px, 100%);
+  margin-top: 18px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #f8fbf9;
+}
+.webcam-monitor video {
+  width: 112px;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-radius: 10px;
+  background: #142219;
+  transform: scaleX(-1);
+}
+.webcam-copy { display: grid; gap: 5px; }
+.webcam-copy small { color: var(--muted); line-height: 1.4; }
+.camera-live { display: inline-flex; align-items: center; gap: 7px; color: var(--brand-dark); font-size: 12px; font-weight: 850; text-transform: uppercase; letter-spacing: .06em; }
+.camera-dot { width: 9px; height: 9px; border-radius: 50%; background: #d92d20; box-shadow: 0 0 0 5px rgba(217,45,32,.10); }
+.webcam-monitor.interrupted { border-color: #f0b8b4; background: var(--danger-soft); }
+.webcam-monitor.interrupted .camera-live { color: var(--danger); }
+.webcam-monitor.captured .camera-dot { background: var(--brand); box-shadow: 0 0 0 5px rgba(20,108,67,.10); }
+
+.snapshot-cell { min-width: 112px; }
+.snapshot-thumb {
+  display: block;
+  width: 84px;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: #edf2ef;
+}
+.snapshot-placeholder { display: inline-block; color: var(--muted); font-size: 11px; line-height: 1.35; }
+.snapshot-time { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
+.review-snapshot { display: flex; align-items: center; gap: 12px; padding: 0 24px 20px; background: #fafcfb; }
+.review-snapshot img { width: 150px; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 12px; border: 1px solid var(--line); }
+.review-snapshot span { color: var(--muted); font-size: 12px; }
+
+@media (max-width: 580px) {
+  .webcam-monitor { align-items: flex-start; }
+  .webcam-monitor video { width: 88px; }
+}

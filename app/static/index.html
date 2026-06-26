@@ -120,10 +120,12 @@
             <article><strong>30 seconds</strong><p>Every question has the same 30-second response period.</p></article>
             <article><strong>20 questions</strong><p>At least 16 correct answers are required to meet the 80% threshold.</p></article>
             <article><strong>Focus monitoring</strong><p>Leaving the test screen is logged for lecturer review but does not automatically change the score.</p></article>
+            <article><strong>Webcam verification</strong><p>The camera stays on during the assessment. No video or audio is recorded. One still image is captured at a random point.</p></article>
+            <article><strong>Photo use</strong><p>The still image is shown only to authorised lecturers with the assessment record.</p></article>
           </div>
           <label class="consent-row">
             <input id="consent-checkbox" type="checkbox">
-            <span>I understand the assessment rules and I am ready to begin.</span>
+            <span>I understand the assessment rules and consent to the webcam remaining active and capturing one still image. No video or audio will be recorded.</span>
           </label>
           <div id="mode-warning" class="message warning"></div>
           <div class="form-actions align-right">
@@ -142,6 +144,14 @@
               <small>seconds</small>
             </div>
           </div>
+          <div class="webcam-monitor" aria-live="polite">
+            <video id="webcam-preview" autoplay muted playsinline aria-label="Live webcam preview"></video>
+            <div class="webcam-copy">
+              <span class="camera-live"><span class="camera-dot" aria-hidden="true"></span> Camera active</span>
+              <small id="webcam-status">No video or audio is being recorded. One still image will be captured at a random point.</small>
+            </div>
+          </div>
+          <canvas id="webcam-canvas" hidden></canvas>
           <div class="difficulty-row">
             <span id="difficulty-badge" class="difficulty-badge">Understanding</span>
             <span>Choose the best answer.</span>
@@ -179,7 +189,7 @@
         <div>
           <span class="eyebrow">Lecturer workspace</span>
           <h1>Submission review</h1>
-          <p>Review scores, timed-out responses, focus losses, and the exact document passages supporting each question.</p>
+          <p>Review scores, timed-out responses, focus losses, the webcam still image, and the exact document passages supporting each question.</p>
         </div>
         <div class="admin-key-card">
           <label>
@@ -204,11 +214,12 @@
                 <th>Status</th>
                 <th>Score</th>
                 <th>Decision</th>
+                <th>Photo</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody id="submissions-body">
-              <tr><td colspan="6" class="empty-state">Enter the administrator key to load submissions.</td></tr>
+              <tr><td colspan="7" class="empty-state">Enter the administrator key to load submissions.</td></tr>
             </tbody>
           </table>
         </div>
@@ -232,6 +243,6 @@
     <span>Ownership confidence supports academic judgement. It does not replace due process.</span>
   </footer>
 
-  <script src="/static/app.js?v=20260625-6" defer></script>
+  <script src="/static/app.js?v=20260626-webcam-1" defer></script>
 </body>
 </html>
