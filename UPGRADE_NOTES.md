@@ -1,16 +1,16 @@
-# Upgrade notes: multi-lecturer accounts
+# Upgrade notes: lecturer setup-code accounts
 
 ## Replace the existing repository
 
 Commit the contents of this package to the same GitHub repository used by Render. Keep the existing PostgreSQL database attached.
 
-The new Render start command is:
+Use this Render start command:
 
 ```bash
-python -m app.prestart && uvicorn main:app --host 0.0.0.0 --port $PORT
+python prestart.py && uvicorn main:app --host 0.0.0.0 --port $PORT
 ```
 
-`app.prestart` creates the new account and course tables, then runs the Alembic migration that adds nullable institution, course, and lecturer fields to existing submissions. Existing documents and assessments are not deleted.
+The prestart step creates missing tables and applies Alembic migrations without deleting existing submissions.
 
 ## Required Render variables
 
@@ -20,21 +20,21 @@ ENVIRONMENT=production
 LECTURER_SESSION_HOURS=12
 LOGIN_MAX_FAILURES=5
 LOGIN_LOCK_MINUTES=15
-LECTURER_REGISTRATION_ENABLED=true
+LECTURER_REGISTRATION_ENABLED=false
+ACCOUNT_SETUP_CODE_HOURS=48
 ```
 
-Keep the existing variables, including `DATABASE_URL`, `OPENAI_API_KEY`, `ADMIN_KEY`, `PASS_THRESHOLD`, `QUESTION_TIME_SECONDS`, and webcam settings.
+Keep the existing `DATABASE_URL`, `OPENAI_API_KEY`, `ADMIN_KEY`, assessment, and webcam variables.
 
-## First use
+## New account workflow
 
-1. Deploy the updated project.
-2. Open the Lecturer tab and register the first lecturer.
-3. In the Platform administration section, enter the Render `ADMIN_KEY`.
-4. Approve the first lecturer as `institution_admin`.
-5. Sign in with that lecturer account.
-6. Create a course and share its `KANO-...` enrolment code with students.
-7. Students must enter the code when uploading their documents.
+1. Open the Admin tab and enter `ADMIN_KEY`.
+2. Create the lecturer account. Staff ID is not requested.
+3. Copy the login email and one-time setup code.
+4. Give those details directly to the lecturer.
+5. The lecturer selects **Activate account** and creates a private password and six-digit recovery PIN.
+6. The lecturer is signed in automatically after activation.
+7. Forgotten passwords are reset automatically with the login email and recovery PIN.
+8. If the recovery PIN is forgotten, the administrator issues a new setup code.
 
-## Existing submissions
-
-Submissions created before this update have no course assignment. They remain available through the legacy platform administrator API, but they are not displayed in lecturer dashboards. New submissions are always linked to a course.
+The new Alembic revision is `20260626_03`. The legacy `staff_id` database column is left untouched when it already exists, but the application no longer collects, displays, or uses staff IDs.

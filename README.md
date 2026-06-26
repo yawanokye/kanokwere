@@ -155,3 +155,11 @@ pytest -q
 ```
 
 The tests cover lecturer registration and approval, secure login, course creation, course-level submission isolation, document assessment, webcam capture, evidence review, and PDF generation.
+
+## Lecturer account administration
+
+Lecturers do not create their own accounts. Open the **Admin** tab, enter the platform `ADMIN_KEY`, and create the account using the lecturer's name, login email, institution, department, and role. Staff ID is not collected.
+
+Kanokwere displays a one-time setup code. Give the lecturer the login email and setup code directly. The lecturer opens the **Lecturer** tab, activates the account, creates a private password, and creates a six-digit recovery PIN. The administrator never creates or sees the lecturer's password or recovery PIN.
+
+A lecturer who forgets a password can reset it automatically with the login email and recovery PIN. Administrator approval and email delivery are not required. If the recovery PIN is also forgotten, the administrator can issue a new one-time setup code. The administrator can also suspend, reactivate, or delete an account. Course ownership is transferred safely before deletion.
