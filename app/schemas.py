@@ -6,6 +6,15 @@ from typing import Literal
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
+PASSWORD_PATTERN = re.compile(r"^(?=.*[A-Z])(?=.*[a-z])(?=.*\d).+$")
+
+
+def validate_password(value: str, label: str = "Password") -> str:
+    if not PASSWORD_PATTERN.match(value):
+        raise ValueError(f"{label} must include uppercase, lowercase, and a number.")
+    return value
+
+
 class GeneratedQuestion(BaseModel):
     stem: str = Field(min_length=12, max_length=600)
     options: list[str] = Field(min_length=4, max_length=4)
@@ -49,21 +58,39 @@ class LecturerRegisterRequest(BaseModel):
     password: str = Field(min_length=10, max_length=128)
     institution_name: str = Field(min_length=3, max_length=240)
     department: str = Field(min_length=2, max_length=180)
-    staff_id: str = Field(min_length=2, max_length=100)
 
     @field_validator("password")
     @classmethod
     def password_strength(cls, value: str) -> str:
-        if not re.search(r"[A-Z]", value) or not re.search(r"[a-z]", value):
-            raise ValueError("Password must include uppercase and lowercase letters.")
-        if not re.search(r"\d", value):
-            raise ValueError("Password must include a number.")
-        return value
+        return validate_password(value)
 
 
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=128)
+
+
+class ActivateAccountRequest(BaseModel):
+    email: EmailStr
+    setup_code: str = Field(min_length=8, max_length=40)
+    new_password: str = Field(min_length=10, max_length=128)
+    recovery_pin: str = Field(pattern=r"^\d{6}$")
+
+    @field_validator("new_password")
+    @classmethod
+    def new_password_strength(cls, value: str) -> str:
+        return validate_password(value, "New password")
+
+
+class SelfServicePasswordResetRequest(BaseModel):
+    email: EmailStr
+    recovery_pin: str = Field(pattern=r"^\d{6}$")
+    new_password: str = Field(min_length=10, max_length=128)
+
+    @field_validator("new_password")
+    @classmethod
+    def new_password_strength(cls, value: str) -> str:
+        return validate_password(value, "New password")
 
 
 class ChangePasswordRequest(BaseModel):
@@ -73,9 +100,7 @@ class ChangePasswordRequest(BaseModel):
     @field_validator("new_password")
     @classmethod
     def new_password_strength(cls, value: str) -> str:
-        if not re.search(r"[A-Z]", value) or not re.search(r"[a-z]", value) or not re.search(r"\d", value):
-            raise ValueError("New password must include uppercase, lowercase, and a number.")
-        return value
+        return validate_password(value, "New password")
 
 
 class CourseCreateRequest(BaseModel):
@@ -96,3 +121,23 @@ class UserApprovalRequest(BaseModel):
 
 class UserSuspensionRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
+
+
+class PasswordResetRequestCreate(BaseModel):
+    email: EmailStr
+
+
+class AdminUserCreateRequest(BaseModel):
+    full_name: str = Field(min_length=3, max_length=180)
+    email: EmailStr
+    institution_name: str = Field(min_length=3, max_length=240)
+    department: str = Field(min_length=2, max_length=180)
+    role: Literal["lecturer", "institution_admin"] = "lecturer"
+
+
+class AdminPasswordResetRequest(BaseModel):
+    pass
+
+
+class AdminUserStatusRequest(BaseModel):
+    status: Literal["active", "suspended"]

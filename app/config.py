@@ -49,7 +49,8 @@ class Settings:
     auth_cookie_name: str = os.getenv("AUTH_COOKIE_NAME", "kanokwere_lecturer_session")
     login_max_failures: int = int(os.getenv("LOGIN_MAX_FAILURES", "5"))
     login_lock_minutes: int = int(os.getenv("LOGIN_LOCK_MINUTES", "15"))
-    registration_enabled: bool = _as_bool(os.getenv("LECTURER_REGISTRATION_ENABLED"), True)
+    registration_enabled: bool = _as_bool(os.getenv("LECTURER_REGISTRATION_ENABLED"), False)
+    account_setup_code_hours: int = int(os.getenv("ACCOUNT_SETUP_CODE_HOURS", "48"))
 
 
 settings = Settings()

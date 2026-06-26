@@ -22,7 +22,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -48,11 +48,13 @@ from .document_service import read_and_extract
 from .models import (
     Assessment,
     AssessmentItem,
+    AuditLog,
     AuthSession,
     Course,
     CourseLecturer,
     Document,
     Institution,
+    PasswordResetRequest,
     Question,
     User,
     WebcamSnapshot,
@@ -60,6 +62,10 @@ from .models import (
 from .question_service import generate_question_bank, question_to_record
 from .report_service import build_pdf_report
 from .schemas import (
+    AdminPasswordResetRequest,
+    AdminUserCreateRequest,
+    AdminUserStatusRequest,
+    ActivateAccountRequest,
     AnswerRequest,
     ChangePasswordRequest,
     CourseCollaboratorRequest,
@@ -67,6 +73,7 @@ from .schemas import (
     FocusEventRequest,
     LecturerRegisterRequest,
     LoginRequest,
+    SelfServicePasswordResetRequest,
     StartAssessmentRequest,
     UserApprovalRequest,
     UserSuspensionRequest,
@@ -75,10 +82,12 @@ from .security import (
     bearer_token,
     create_lecturer_session,
     current_user,
+    generate_setup_code,
     hash_password,
     hash_token,
     require_admin,
     verify_password,
+    verify_token,
 )
 
 
@@ -113,7 +122,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="Kanokwere", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="Kanokwere", version="0.6.0", lifespan=lifespan)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -162,9 +171,14 @@ def _user_payload(user: User) -> dict[str, object]:
         "email": user.email,
         "role": user.role,
         "department": user.department,
-        "staff_id": user.staff_id,
         "account_status": user.account_status,
         "email_verified": user.email_verified,
+        "must_change_password": user.must_change_password,
+        "activation_required": user.account_status == "pending_activation",
+        "setup_code_expires_at": user.setup_code_expires_at.isoformat() if user.setup_code_expires_at else None,
+        "activated_at": user.activated_at.isoformat() if user.activated_at else None,
+        "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
+        "created_at": user.created_at.isoformat() if user.created_at else None,
         "institution": {
             "id": user.institution.id,
             "name": user.institution.name,
@@ -174,63 +188,112 @@ def _user_payload(user: User) -> dict[str, object]:
     }
 
 
-@app.post("/api/auth/register", status_code=201)
-def register_lecturer(
-    payload: LecturerRegisterRequest,
+@app.post("/api/auth/register", status_code=403)
+def register_lecturer() -> None:
+    raise HTTPException(
+        status_code=403,
+        detail="Lecturer self-registration is disabled. Ask the Kanokwere administrator to create your account.",
+    )
+
+
+def _credential_locked(user: User) -> bool:
+    locked_until = aware(user.locked_until)
+    return bool(locked_until and locked_until > utcnow())
+
+
+def _register_failed_credential(db: Session, user: User) -> None:
+    user.failed_login_count += 1
+    if user.failed_login_count >= settings.login_max_failures:
+        user.locked_until = utcnow() + timedelta(minutes=settings.login_lock_minutes)
+        user.failed_login_count = 0
+    db.commit()
+
+
+def _set_auth_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=settings.auth_cookie_name,
+        value=token,
+        max_age=settings.lecturer_session_hours * 3600,
+        httponly=True,
+        secure=settings.environment.casefold() == "production",
+        samesite="lax",
+        path="/",
+    )
+
+
+@app.post("/api/auth/activate")
+def activate_lecturer_account(
+    payload: ActivateAccountRequest,
+    response: Response,
     request: Request,
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
-    if not settings.registration_enabled:
-        raise HTTPException(status_code=403, detail="Lecturer registration is currently closed.")
-
     email = normalize_email(str(payload.email))
-    if db.scalar(select(User.id).where(User.email == email)):
-        raise HTTPException(status_code=409, detail="An account already exists for this email address.")
-
-    domain = email_domain(email)
-    institution = db.scalar(select(Institution).where(Institution.domain == domain))
-    if not institution:
-        institution = db.scalar(
-            select(Institution).where(func.lower(Institution.name) == payload.institution_name.strip().casefold())
-        )
-    if not institution:
-        institution = Institution(
-            name=payload.institution_name.strip(),
-            domain=domain,
-            status="pending",
-        )
-        db.add(institution)
-        db.flush()
-
-    user = User(
-        institution_id=institution.id,
-        full_name=payload.full_name.strip(),
-        email=email,
-        password_hash=hash_password(payload.password),
-        department=payload.department.strip(),
-        staff_id=payload.staff_id.strip(),
-        role="lecturer",
-        account_status="pending",
-        email_verified=False,
+    user = db.scalar(
+        select(User).options(selectinload(User.institution)).where(User.email == email)
     )
-    db.add(user)
-    db.flush()
-    audit(
-        db,
-        request,
-        "lecturer_registered",
-        user=user,
-        resource_type="user",
-        resource_id=user.id,
-        detail={"institution": institution.name, "domain": domain},
-    )
+    if not user or not user.setup_code_hash:
+        raise HTTPException(status_code=400, detail="The account details or setup code are invalid.")
+    if user.account_status == "suspended":
+        raise HTTPException(status_code=403, detail="This lecturer account is suspended.")
+    if _credential_locked(user):
+        raise HTTPException(status_code=429, detail="Too many failed attempts. Try again later.")
+    expires_at = aware(user.setup_code_expires_at)
+    if not expires_at or expires_at <= utcnow():
+        raise HTTPException(status_code=400, detail="The setup code has expired. Ask the administrator to issue a new code.")
+    setup_code = payload.setup_code.strip().upper()
+    if not verify_token(setup_code, user.setup_code_hash):
+        _register_failed_credential(db, user)
+        raise HTTPException(status_code=400, detail="The account details or setup code are invalid.")
+
+    user.password_hash = hash_password(payload.new_password)
+    user.recovery_pin_hash = hash_password(payload.recovery_pin)
+    user.account_status = "active"
+    user.email_verified = True
+    user.must_change_password = False
+    user.activated_at = utcnow()
+    user.setup_code_hash = None
+    user.setup_code_expires_at = None
+    user.failed_login_count = 0
+    user.locked_until = None
+    db.execute(delete(AuthSession).where(AuthSession.user_id == user.id))
+    audit(db, request, "lecturer_account_activated", user=user, resource_type="user", resource_id=user.id)
     db.commit()
-    return {
-        "status": "pending",
-        "message": "Registration received. A platform or institution administrator must approve the account before sign-in.",
-        "email": email,
-        "institution": institution.name,
-    }
+    token = create_lecturer_session(db, user)
+    _set_auth_cookie(response, token)
+    return {"activated": True, "authenticated": True, "user": _user_payload(user)}
+
+
+@app.post("/api/auth/reset-password")
+def self_service_password_reset(
+    payload: SelfServicePasswordResetRequest,
+    response: Response,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    email = normalize_email(str(payload.email))
+    user = db.scalar(
+        select(User).options(selectinload(User.institution)).where(User.email == email)
+    )
+    generic_error = "The account details or recovery PIN are invalid."
+    if not user or not user.recovery_pin_hash or user.account_status != "active":
+        raise HTTPException(status_code=400, detail=generic_error)
+    if _credential_locked(user):
+        raise HTTPException(status_code=429, detail="Too many failed attempts. Try again later.")
+    if not verify_password(payload.recovery_pin, user.recovery_pin_hash):
+        _register_failed_credential(db, user)
+        raise HTTPException(status_code=400, detail=generic_error)
+
+    user.password_hash = hash_password(payload.new_password)
+    user.must_change_password = False
+    user.failed_login_count = 0
+    user.locked_until = None
+    db.execute(delete(AuthSession).where(AuthSession.user_id == user.id))
+    audit(db, request, "self_service_password_reset", user=user, resource_type="user", resource_id=user.id)
+    db.commit()
+    token = create_lecturer_session(db, user)
+    _set_auth_cookie(response, token)
+    return {"reset": True, "authenticated": True, "user": _user_payload(user)}
 
 
 @app.post("/api/auth/login")
@@ -247,9 +310,11 @@ def login_lecturer(
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
-    locked_until = aware(user.locked_until)
-    if locked_until and locked_until > utcnow():
+    if _credential_locked(user):
         raise HTTPException(status_code=429, detail="Too many failed attempts. Try again later.")
+
+    if user.account_status in {"pending", "pending_activation"}:
+        raise HTTPException(status_code=403, detail="Activate your lecturer account with the setup code provided by the administrator.")
 
     if not verify_password(payload.password, user.password_hash):
         user.failed_login_count += 1
@@ -259,8 +324,6 @@ def login_lecturer(
         db.commit()
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
-    if user.account_status == "pending":
-        raise HTTPException(status_code=403, detail="Your lecturer account is awaiting approval.")
     if user.account_status != "active" or not user.email_verified:
         raise HTTPException(status_code=403, detail="This lecturer account is not active.")
     if not user.institution or user.institution.status != "active":
@@ -271,15 +334,7 @@ def login_lecturer(
     user.last_login_at = utcnow()
     db.commit()
     token = create_lecturer_session(db, user)
-    response.set_cookie(
-        key=settings.auth_cookie_name,
-        value=token,
-        max_age=settings.lecturer_session_hours * 3600,
-        httponly=True,
-        secure=settings.environment.casefold() == "production",
-        samesite="lax",
-        path="/",
-    )
+    _set_auth_cookie(response, token)
     audit(db, request, "lecturer_login", user=user, resource_type="user", resource_id=user.id)
     db.commit()
     return {"authenticated": True, "user": _user_payload(user)}
@@ -316,6 +371,9 @@ def change_password(
     if not verify_password(payload.current_password, user.password_hash):
         raise HTTPException(status_code=400, detail="The current password is incorrect.")
     user.password_hash = hash_password(payload.new_password)
+    user.must_change_password = False
+    user.failed_login_count = 0
+    user.locked_until = None
     db.execute(
         delete(AuthSession).where(AuthSession.user_id == user.id, AuthSession.id != request.state.auth_session.id)
     )
@@ -325,8 +383,112 @@ def change_password(
 
 
 # ---------------------------------------------------------------------------
-# Platform administration and approvals
+# Platform administration and lecturer account management
 # ---------------------------------------------------------------------------
+
+
+def _find_or_create_institution(db: Session, name: str, email: str) -> Institution:
+    domain = email_domain(email)
+    institution = db.scalar(select(Institution).where(Institution.domain == domain))
+    if not institution:
+        institution = db.scalar(
+            select(Institution).where(func.lower(Institution.name) == name.strip().casefold())
+        )
+    if not institution:
+        institution = Institution(name=name.strip(), domain=domain, status="active")
+        db.add(institution)
+        db.flush()
+    else:
+        institution.status = "active"
+        if not institution.domain:
+            institution.domain = domain
+    return institution
+
+
+def _platform_user_row(db: Session, user: User) -> dict[str, object]:
+    course_count = db.scalar(
+        select(func.count(CourseLecturer.id)).where(CourseLecturer.lecturer_id == user.id)
+    ) or 0
+    submission_count = db.scalar(
+        select(func.count(Document.id)).where(Document.submitted_to_lecturer_id == user.id)
+    ) or 0
+    return _user_payload(user) | {
+        "course_count": int(course_count),
+        "submission_count": int(submission_count),
+    }
+
+
+@app.get("/api/platform/verify", dependencies=[Depends(require_admin)])
+def platform_verify() -> dict[str, bool]:
+    return {"authenticated": True}
+
+
+@app.get("/api/platform/users", dependencies=[Depends(require_admin)])
+def platform_users(db: Session = Depends(get_db)) -> dict[str, object]:
+    users = db.scalars(
+        select(User)
+        .options(selectinload(User.institution))
+        .order_by(User.created_at.desc())
+    ).all()
+    return {"users": [_platform_user_row(db, user) for user in users]}
+
+
+def _issue_setup_code(user: User) -> tuple[str, datetime]:
+    setup_code = generate_setup_code()
+    expires_at = utcnow() + timedelta(hours=settings.account_setup_code_hours)
+    user.setup_code_hash = hash_token(setup_code)
+    user.setup_code_expires_at = expires_at
+    user.account_status = "pending_activation"
+    user.must_change_password = False
+    user.recovery_pin_hash = None
+    user.activated_at = None
+    user.failed_login_count = 0
+    user.locked_until = None
+    return setup_code, expires_at
+
+
+@app.post("/api/platform/users", status_code=201, dependencies=[Depends(require_admin)])
+def platform_create_user(
+    payload: AdminUserCreateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    email = normalize_email(str(payload.email))
+    if db.scalar(select(User.id).where(User.email == email)):
+        raise HTTPException(status_code=409, detail="An account already exists for this email address.")
+    institution = _find_or_create_institution(db, payload.institution_name, email)
+    user = User(
+        institution_id=institution.id,
+        full_name=payload.full_name.strip(),
+        email=email,
+        password_hash=hash_password(generate_setup_code() + generate_setup_code()),
+        role=payload.role,
+        department=payload.department.strip(),
+        email_verified=True,
+        account_status="pending_activation",
+        approved_at=utcnow(),
+        must_change_password=False,
+    )
+    setup_code, expires_at = _issue_setup_code(user)
+    db.add(user)
+    db.flush()
+    audit(
+        db,
+        request,
+        "lecturer_account_created",
+        resource_type="user",
+        resource_id=user.id,
+        detail={"email": email, "role": payload.role, "institution": institution.name},
+    )
+    db.commit()
+    db.refresh(user)
+    return {
+        "created": True,
+        "user": _user_payload(user),
+        "setup_code": setup_code,
+        "setup_code_expires_at": expires_at.isoformat(),
+        "message": "Account created. Give the login email and one-time setup code to the lecturer.",
+    }
 
 
 @app.get("/api/platform/pending", dependencies=[Depends(require_admin)])
@@ -334,10 +496,10 @@ def platform_pending(db: Session = Depends(get_db)) -> dict[str, object]:
     users = db.scalars(
         select(User)
         .options(selectinload(User.institution))
-        .where(User.account_status == "pending")
+        .where(User.account_status.in_(["pending", "pending_activation"]))
         .order_by(User.created_at.asc())
     ).all()
-    return {"users": [_user_payload(user) | {"created_at": user.created_at.isoformat()} for user in users]}
+    return {"users": [_user_payload(user) for user in users]}
 
 
 @app.post("/api/platform/users/{user_id}/approve", dependencies=[Depends(require_admin)])
@@ -350,15 +512,64 @@ def platform_approve_user(
     user = db.scalar(select(User).options(selectinload(User.institution)).where(User.id == user_id))
     if not user:
         raise HTTPException(status_code=404, detail="Lecturer account not found.")
-    user.account_status = "active"
     user.email_verified = True
     user.role = payload.role
     user.approved_at = utcnow()
+    setup_code, expires_at = _issue_setup_code(user)
     if user.institution:
         user.institution.status = "active"
     audit(db, request, "lecturer_approved", resource_type="user", resource_id=user.id, detail={"role": payload.role})
     db.commit()
-    return {"approved": True, "user": _user_payload(user)}
+    return {"approved": True, "user": _user_payload(user), "setup_code": setup_code, "setup_code_expires_at": expires_at.isoformat()}
+
+
+@app.post("/api/platform/users/{user_id}/reset-password", dependencies=[Depends(require_admin)])
+def platform_reset_password(
+    user_id: str,
+    payload: AdminPasswordResetRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    user = db.scalar(select(User).options(selectinload(User.institution)).where(User.id == user_id))
+    if not user:
+        raise HTTPException(status_code=404, detail="Lecturer account not found.")
+    setup_code, expires_at = _issue_setup_code(user)
+    db.execute(delete(AuthSession).where(AuthSession.user_id == user.id))
+    audit(db, request, "lecturer_setup_code_reissued", resource_type="user", resource_id=user.id)
+    db.commit()
+    return {
+        "reset": True,
+        "user": _user_payload(user),
+        "setup_code": setup_code,
+        "setup_code_expires_at": expires_at.isoformat(),
+        "message": "A new one-time setup code was issued. Give it to the lecturer so they can create a new password and recovery PIN.",
+    }
+
+
+@app.post("/api/platform/users/{user_id}/status", dependencies=[Depends(require_admin)])
+def platform_set_user_status(
+    user_id: str,
+    payload: AdminUserStatusRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    user = db.scalar(select(User).options(selectinload(User.institution)).where(User.id == user_id))
+    if not user:
+        raise HTTPException(status_code=404, detail="Lecturer account not found.")
+    user.account_status = payload.status
+    if payload.status == "active":
+        if not user.recovery_pin_hash or not user.activated_at:
+            raise HTTPException(status_code=409, detail="This account must be activated with a setup code before it can be active.")
+        user.email_verified = True
+        user.failed_login_count = 0
+        user.locked_until = None
+        if user.institution:
+            user.institution.status = "active"
+    else:
+        db.execute(delete(AuthSession).where(AuthSession.user_id == user.id))
+    audit(db, request, f"lecturer_{payload.status}", resource_type="user", resource_id=user.id)
+    db.commit()
+    return {"updated": True, "user": _user_payload(user)}
 
 
 @app.post("/api/platform/users/{user_id}/suspend", dependencies=[Depends(require_admin)])
@@ -376,6 +587,78 @@ def platform_suspend_user(
     audit(db, request, "lecturer_suspended", resource_type="user", resource_id=user.id, detail=payload.reason)
     db.commit()
     return {"suspended": True}
+
+
+def _replacement_for_course(db: Session, course: Course, removed_user_id: str) -> User | None:
+    links = db.execute(
+        select(User, CourseLecturer.access_level)
+        .join(CourseLecturer, CourseLecturer.lecturer_id == User.id)
+        .where(
+            CourseLecturer.course_id == course.id,
+            User.id != removed_user_id,
+            User.account_status == "active",
+        )
+    ).all()
+    if links:
+        priority = {"owner": 0, "co_lecturer": 1, "viewer": 2}
+        links.sort(key=lambda row: priority.get(row[1], 9))
+        return links[0][0]
+    return db.scalar(
+        select(User).where(
+            User.institution_id == course.institution_id,
+            User.id != removed_user_id,
+            User.role == "institution_admin",
+            User.account_status == "active",
+        ).limit(1)
+    )
+
+
+@app.delete("/api/platform/users/{user_id}", dependencies=[Depends(require_admin)])
+def platform_delete_user(
+    user_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, bool]:
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Lecturer account not found.")
+    created_courses = db.scalars(select(Course).where(Course.created_by == user.id)).all()
+    replacements: list[tuple[Course, User]] = []
+    blocked: list[str] = []
+    for course in created_courses:
+        replacement = _replacement_for_course(db, course, user.id)
+        if not replacement:
+            blocked.append(f"{course.course_code} · {course.title}")
+        else:
+            replacements.append((course, replacement))
+    if blocked:
+        raise HTTPException(
+            status_code=409,
+            detail="Create or assign another active lecturer to these courses before deleting the account: " + ", ".join(blocked),
+        )
+    for course, replacement in replacements:
+        course.created_by = replacement.id
+        link = db.scalar(
+            select(CourseLecturer).where(
+                CourseLecturer.course_id == course.id,
+                CourseLecturer.lecturer_id == replacement.id,
+            )
+        )
+        if link:
+            link.access_level = "owner"
+        else:
+            db.add(CourseLecturer(course_id=course.id, lecturer_id=replacement.id, access_level="owner"))
+    db.execute(delete(AuthSession).where(AuthSession.user_id == user.id))
+    db.execute(delete(CourseLecturer).where(CourseLecturer.lecturer_id == user.id))
+    db.execute(update(Document).where(Document.submitted_to_lecturer_id == user.id).values(submitted_to_lecturer_id=None))
+    db.execute(update(Assessment).where(Assessment.lecturer_id == user.id).values(lecturer_id=None))
+    db.execute(update(PasswordResetRequest).where(PasswordResetRequest.user_id == user.id).values(user_id=None))
+    db.execute(update(AuditLog).where(AuditLog.user_id == user.id).values(user_id=None))
+    email = user.email
+    db.delete(user)
+    audit(db, request, "lecturer_account_deleted", resource_type="user", resource_id=user_id, detail={"email": email})
+    db.commit()
+    return {"deleted": True}
 
 
 # ---------------------------------------------------------------------------

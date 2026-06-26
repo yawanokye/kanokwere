@@ -42,6 +42,22 @@ def verify_token(token: str, expected_hash: str) -> bool:
     return hmac.compare_digest(hash_token(token), expected_hash)
 
 
+
+
+def generate_setup_code() -> str:
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    groups = ["".join(secrets.choice(alphabet) for _ in range(4)) for _ in range(3)]
+    return "-".join(groups)
+
+def generate_temporary_password(length: int = 14) -> str:
+    # Guarantee uppercase, lowercase, and numeric characters, then shuffle.
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+    chars = [secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ"), secrets.choice("abcdefghijkmnopqrstuvwxyz"), secrets.choice("23456789")]
+    chars.extend(secrets.choice(alphabet) for _ in range(max(0, length - len(chars))))
+    secrets.SystemRandom().shuffle(chars)
+    return "".join(chars)
+
+
 def hash_password(password: str) -> str:
     return password_hasher.hash(password)
 
@@ -99,6 +115,9 @@ def current_user(
     user = session.user
     if user.account_status != "active":
         raise HTTPException(status_code=403, detail="This lecturer account is not active.")
+    password_change_paths = {"/api/auth/me", "/api/auth/logout", "/api/auth/change-password"}
+    if user.must_change_password and request.url.path not in password_change_paths:
+        raise HTTPException(status_code=403, detail="Change your password before using the lecturer workspace.")
     request.state.auth_session = session
     request.state.current_user = user
     return user
