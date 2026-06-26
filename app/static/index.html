@@ -18,7 +18,8 @@
     </a>
     <nav aria-label="Main navigation">
       <button class="nav-button active" data-view-link="home">Student</button>
-      <button class="nav-button" data-view-link="admin">Lecturer</button>
+      <button class="nav-button" data-view-link="lecturer">Lecturer</button>
+      <button class="nav-button" data-view-link="platform">Admin</button>
     </nav>
   </header>
 
@@ -189,42 +190,59 @@
       </div>
     </section>
 
-    <section id="view-admin" class="view">
+    <section id="view-lecturer" class="view">
       <div id="lecturer-auth-panel">
         <div class="admin-header">
           <div>
-            <span class="eyebrow">Lecturer accounts</span>
-            <h1>Control only your courses and students</h1>
-            <p>Register with your institutional details. After approval, create courses, share enrolment codes, add co-lecturers, and review only submissions assigned to your courses.</p>
+            <span class="eyebrow">Lecturer access</span>
+            <h1>Sign in or activate your lecturer account</h1>
+            <p>The Kanokwere administrator creates the account and gives you a login email and one-time setup code. No password is sent or created by the administrator.</p>
           </div>
           <div class="security-note">
-            <strong>Protected access</strong>
-            <p>Lecturer sessions use secure HTTP-only cookies. The former shared administrator key is reserved for platform approvals.</p>
+            <strong>Private password</strong>
+            <p>Use the setup code once to create your own password and six-digit recovery PIN.</p>
           </div>
         </div>
 
-        <div class="auth-grid">
+        <div class="auth-grid lecturer-auth-grid account-access-grid">
           <section class="auth-card">
-            <span class="eyebrow">Existing lecturer</span>
+            <span class="eyebrow">Existing account</span>
             <h2>Sign in</h2>
             <form id="lecturer-login-form" class="stack-form">
-              <label>Institutional email<input name="email" type="email" autocomplete="username" required></label>
-              <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+              <label>Login email<input name="email" type="email" autocomplete="username" required></label>
+              <label>Password
+                <span class="password-field"><input id="lecturer-login-password" name="password" type="password" autocomplete="current-password" required><button class="password-toggle" type="button" data-password-toggle="lecturer-login-password">Show</button></span>
+              </label>
               <button class="primary-button" type="submit">Sign in</button>
             </form>
           </section>
+
           <section class="auth-card">
-            <span class="eyebrow">New lecturer</span>
-            <h2>Register</h2>
-            <form id="lecturer-register-form" class="stack-form">
-              <label>Full name<input name="full_name" type="text" maxlength="180" required></label>
-              <label>Institutional email<input name="email" type="email" autocomplete="email" required></label>
-              <label>Institution<input name="institution_name" type="text" maxlength="240" required></label>
-              <label>Department<input name="department" type="text" maxlength="180" required></label>
-              <label>Staff ID<input name="staff_id" type="text" maxlength="100" required></label>
-              <label>Password<input name="password" type="password" minlength="10" autocomplete="new-password" required><small>Use at least 10 characters with uppercase, lowercase, and a number.</small></label>
-              <button class="secondary-button" type="submit">Submit registration</button>
+            <span class="eyebrow">First access or new setup code</span>
+            <h2>Activate account</h2>
+            <form id="lecturer-activation-form" class="stack-form">
+              <label>Login email<input name="email" type="email" autocomplete="username" required></label>
+              <label>One-time setup code<input name="setup_code" type="text" maxlength="40" autocomplete="one-time-code" required placeholder="ABCD-EFGH-JKLM"></label>
+              <label>Create password<input name="new_password" type="password" minlength="10" autocomplete="new-password" required><small>At least 10 characters with uppercase, lowercase, and a number.</small></label>
+              <label>Confirm password<input name="confirm_password" type="password" minlength="10" autocomplete="new-password" required></label>
+              <label>Create recovery PIN<input name="recovery_pin" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="new-password" required placeholder="6 digits"></label>
+              <label>Confirm recovery PIN<input name="confirm_recovery_pin" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="new-password" required></label>
+              <button class="primary-button" type="submit">Activate and sign in</button>
             </form>
+          </section>
+
+          <section class="auth-card account-help-card">
+            <span class="eyebrow">Automatic recovery</span>
+            <h2>Reset password</h2>
+            <p>Use the recovery PIN you created during activation. Administrator approval and email delivery are not required.</p>
+            <form id="lecturer-password-reset-form" class="stack-form">
+              <label>Login email<input name="email" type="email" autocomplete="username" required></label>
+              <label>Recovery PIN<input name="recovery_pin" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required></label>
+              <label>New password<input name="new_password" type="password" minlength="10" autocomplete="new-password" required></label>
+              <label>Confirm new password<input name="confirm_password" type="password" minlength="10" autocomplete="new-password" required></label>
+              <button class="secondary-button" type="submit">Reset and sign in</button>
+            </form>
+            <p class="muted">If you also forgot the recovery PIN, ask the administrator for a new setup code.</p>
           </section>
         </div>
         <div id="lecturer-auth-message" class="message" role="status"></div>
@@ -237,90 +255,162 @@
             <h1 id="lecturer-name">Lecturer dashboard</h1>
             <p id="lecturer-profile"></p>
           </div>
-          <button id="lecturer-logout" class="secondary-button" type="button">Sign out</button>
+          <div class="header-actions">
+            <button id="show-change-password" class="text-button" type="button">Change password</button>
+            <button id="lecturer-logout" class="secondary-button" type="button">Sign out</button>
+          </div>
         </div>
         <div id="lecturer-message" class="message" role="status"></div>
 
-        <div class="management-grid">
-          <section class="management-card">
-            <div class="table-heading"><h2>Create course</h2></div>
-            <form id="course-create-form" class="stack-form compact-form">
-              <label>Course code<input name="course_code" type="text" maxlength="80" required placeholder="RES 801"></label>
-              <label>Course title<input name="title" type="text" maxlength="240" required placeholder="Research Methods"></label>
-              <label>Academic year<input name="academic_year" type="text" maxlength="40" required placeholder="2026/2027"></label>
-              <label>Semester<input name="semester" type="text" maxlength="80" required placeholder="First Semester"></label>
-              <button class="primary-button" type="submit">Create course</button>
-            </form>
+        <section id="change-password-panel" class="management-card password-change-card hidden">
+          <div class="table-heading">
+            <div><span class="eyebrow">Account security</span><h2 id="change-password-heading">Change password</h2></div>
+          </div>
+          <form id="change-password-form" class="stack-form compact-form password-change-form">
+            <label>Current password<input name="current_password" type="password" autocomplete="current-password" required></label>
+            <label>New password<input name="new_password" type="password" minlength="10" autocomplete="new-password" required><small>At least 10 characters with uppercase, lowercase, and a number.</small></label>
+            <label>Confirm new password<input name="confirm_password" type="password" minlength="10" autocomplete="new-password" required></label>
+            <div class="form-actions"><button class="primary-button" type="submit">Save new password</button></div>
+          </form>
+          <div id="password-change-message" class="message" role="status"></div>
+        </section>
+
+        <div id="lecturer-main-content">
+          <div class="management-grid">
+            <section class="management-card">
+              <div class="table-heading"><h2>Create course</h2></div>
+              <form id="course-create-form" class="stack-form compact-form">
+                <label>Course code<input name="course_code" type="text" maxlength="80" required placeholder="RES 801"></label>
+                <label>Course title<input name="title" type="text" maxlength="240" required placeholder="Research Methods"></label>
+                <label>Academic year<input name="academic_year" type="text" maxlength="40" required placeholder="2026/2027"></label>
+                <label>Semester<input name="semester" type="text" maxlength="80" required placeholder="First Semester"></label>
+                <button class="primary-button" type="submit">Create course</button>
+              </form>
+            </section>
+
+            <section class="management-card">
+              <div class="table-heading"><h2>Add co-lecturer</h2></div>
+              <form id="collaborator-form" class="stack-form compact-form">
+                <label>Course<select name="course_id" id="collaborator-course" required><option value="">Select course</option></select></label>
+                <label>Lecturer email<input name="email" type="email" required></label>
+                <label>Access<select name="access_level"><option value="co_lecturer">Co-lecturer</option><option value="viewer">View only</option></select></label>
+                <button class="secondary-button" type="submit">Add lecturer</button>
+              </form>
+            </section>
+          </div>
+
+          <section class="admin-table-card">
+            <div class="table-heading">
+              <div><h2>My courses</h2><small>Share the enrolment code with students assigned to each course.</small></div>
+              <button id="refresh-courses" class="text-button" type="button">Refresh</button>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>Course</th><th>Period</th><th>Enrolment code</th><th>Lecturers</th><th>Submissions</th><th>Actions</th></tr></thead>
+                <tbody id="courses-body"><tr><td colspan="6" class="empty-state">No courses loaded.</td></tr></tbody>
+              </table>
+            </div>
           </section>
 
-          <section class="management-card">
-            <div class="table-heading"><h2>Add co-lecturer</h2></div>
-            <form id="collaborator-form" class="stack-form compact-form">
-              <label>Course<select name="course_id" id="collaborator-course" required><option value="">Select course</option></select></label>
-              <label>Approved lecturer email<input name="email" type="email" required></label>
-              <label>Access<select name="access_level"><option value="co_lecturer">Co-lecturer</option><option value="viewer">View only</option></select></label>
-              <button class="secondary-button" type="submit">Add lecturer</button>
-            </form>
+          <section class="admin-table-card">
+            <div class="table-heading">
+              <div><h2>Recent submissions</h2><small>Only submissions from courses assigned to your account are shown.</small></div>
+              <div class="table-tools">
+                <select id="submission-course-filter"><option value="">All my courses</option></select>
+                <button id="refresh-submissions" class="text-button" type="button">Refresh</button>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>Student</th><th>Course and document</th><th>Status</th><th>Score</th><th>Decision</th><th>Photo</th><th>Actions</th></tr></thead>
+                <tbody id="submissions-body"><tr><td colspan="7" class="empty-state">Sign in to load submissions.</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section id="review-panel" class="review-panel hidden">
+            <div class="review-heading">
+              <div><span class="eyebrow">Question-level evidence</span><h2 id="review-title">Assessment review</h2></div>
+              <button id="close-review" class="secondary-button" type="button">Close</button>
+            </div>
+            <div id="review-summary" class="review-summary"></div>
+            <div id="review-questions" class="review-questions"></div>
           </section>
         </div>
+      </div>
+    </section>
 
-        <section class="admin-table-card">
-          <div class="table-heading">
-            <div><h2>My courses</h2><small>Share the enrolment code with the students assigned to each course.</small></div>
-            <button id="refresh-courses" class="text-button" type="button">Refresh</button>
+    <section id="view-platform" class="view">
+      <div id="platform-login-panel">
+        <div class="admin-header">
+          <div>
+            <span class="eyebrow">Protected administration</span>
+            <h1>Lecturer account administration</h1>
+            <p>Create lecturer accounts, issue one-time setup codes, suspend access, and delete accounts. This section requires the private platform ADMIN_KEY.</p>
           </div>
-          <div class="table-scroll">
-            <table>
-              <thead><tr><th>Course</th><th>Period</th><th>Enrolment code</th><th>Lecturers</th><th>Submissions</th><th>Actions</th></tr></thead>
-              <tbody id="courses-body"><tr><td colspan="6" class="empty-state">No courses loaded.</td></tr></tbody>
-            </table>
+          <div class="security-note">
+            <strong>Administrator only</strong>
+            <p>Do not share the ADMIN_KEY with lecturers or students.</p>
           </div>
-        </section>
-
-        <section class="admin-table-card">
-          <div class="table-heading">
-            <div><h2>Recent submissions</h2><small>Only submissions from courses assigned to your account are shown.</small></div>
-            <div class="table-tools">
-              <select id="submission-course-filter"><option value="">All my courses</option></select>
-              <button id="refresh-submissions" class="text-button" type="button">Refresh</button>
-            </div>
-          </div>
-          <div class="table-scroll">
-            <table>
-              <thead>
-                <tr><th>Student</th><th>Course and document</th><th>Status</th><th>Score</th><th>Decision</th><th>Photo</th><th>Actions</th></tr>
-              </thead>
-              <tbody id="submissions-body"><tr><td colspan="7" class="empty-state">Sign in to load submissions.</td></tr></tbody>
-            </table>
-          </div>
-        </section>
-
-        <section id="review-panel" class="review-panel hidden">
-          <div class="review-heading">
-            <div><span class="eyebrow">Question-level evidence</span><h2 id="review-title">Assessment review</h2></div>
-            <button id="close-review" class="secondary-button" type="button">Close</button>
-          </div>
-          <div id="review-summary" class="review-summary"></div>
-          <div id="review-questions" class="review-questions"></div>
+        </div>
+        <section class="auth-card admin-key-card standalone-card">
+          <form id="platform-login-form" class="stack-form">
+            <label>Platform ADMIN_KEY
+              <span class="password-field"><input id="platform-admin-key" type="password" autocomplete="current-password" required placeholder="Enter ADMIN_KEY"><button class="password-toggle" type="button" data-password-toggle="platform-admin-key">Show</button></span>
+            </label>
+            <button class="primary-button" type="submit">Open admin dashboard</button>
+          </form>
+          <div id="platform-login-message" class="message" role="status"></div>
         </section>
       </div>
 
-      <section class="platform-admin-card">
-        <div class="table-heading">
-          <div><span class="eyebrow">Platform administration</span><h2>Approve lecturer registrations</h2></div>
-        </div>
-        <div class="platform-controls">
-          <label>Platform ADMIN_KEY<input id="platform-admin-key" type="password" autocomplete="current-password" placeholder="Enter ADMIN_KEY"></label>
-          <button id="load-pending-users" class="secondary-button" type="button">Load pending registrations</button>
+      <div id="platform-dashboard" class="hidden">
+        <div class="dashboard-header">
+          <div><span class="eyebrow">Platform administration</span><h1>Lecturer accounts</h1><p>Create lecturer accounts and give each lecturer a login email and one-time setup code. The lecturer creates their own password and recovery PIN.</p></div>
+          <button id="platform-logout" class="secondary-button" type="button">Lock admin</button>
         </div>
         <div id="platform-message" class="message" role="status"></div>
-        <div class="table-scroll">
-          <table>
-            <thead><tr><th>Lecturer</th><th>Institution</th><th>Department</th><th>Role</th><th>Action</th></tr></thead>
-            <tbody id="pending-users-body"><tr><td colspan="5" class="empty-state">Enter the platform key to review registrations.</td></tr></tbody>
-          </table>
+
+        <div class="management-grid admin-management-grid">
+          <section class="management-card">
+            <div class="table-heading"><div><h2>Create lecturer account</h2><small>The account remains pending until the lecturer completes activation.</small></div></div>
+            <form id="platform-create-user-form" class="stack-form compact-form">
+              <label>Full name<input name="full_name" type="text" maxlength="180" required></label>
+              <label>Institutional email<input name="email" type="email" required></label>
+              <label>Institution<input name="institution_name" type="text" maxlength="240" required></label>
+              <label>Department<input name="department" type="text" maxlength="180" required></label>
+              <label>Role<select name="role"><option value="lecturer">Lecturer</option><option value="institution_admin">Institution administrator</option></select></label>
+              <button class="primary-button" type="submit">Create account</button>
+            </form>
+          </section>
+
+          <section id="setup-credential-card" class="management-card credential-card hidden">
+            <div class="table-heading"><div><span class="eyebrow">Give directly to lecturer</span><h2>Account setup details</h2></div></div>
+            <p id="setup-credential-user"></p>
+            <div class="credential-list">
+              <div><span>Login email</span><code id="login-email-value"></code></div>
+              <div><span>One-time setup code</span><code id="setup-code-value"></code></div>
+            </div>
+            <button id="copy-setup-details" class="secondary-button" type="button">Copy setup details</button>
+            <p id="setup-code-expiry" class="muted"></p>
+            <p class="muted">The code is shown only in this response. The lecturer uses it to create a private password and recovery PIN.</p>
+          </section>
         </div>
-      </section>
+
+        <section class="admin-table-card">
+          <div class="table-heading">
+            <div><h2>All lecturer accounts</h2><small>Reissue a setup code, suspend, reactivate, or delete an account.</small></div>
+            <button id="refresh-platform-users" class="text-button" type="button">Refresh</button>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Lecturer</th><th>Institution</th><th>Role and status</th><th>Activity</th><th>Actions</th></tr></thead>
+              <tbody id="platform-users-body"><tr><td colspan="5" class="empty-state">Unlock the admin dashboard to load accounts.</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+
+      </div>
     </section>
   </main>
 
@@ -329,6 +419,6 @@
     <span>Ownership confidence supports academic judgement. It does not replace due process.</span>
   </footer>
 
-  <script src="/static/app.js?v=20260626-accounts-1" defer></script>
+  <script src="/static/app.js?v=20260626-setup-code-1" defer></script>
 </body>
 </html>

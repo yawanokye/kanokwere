@@ -8,6 +8,7 @@ const state = {
   lecturerUser: null,
   courses: [],
   platformKey: sessionStorage.getItem("kanokwere_platform_key") || "",
+  platformAuthenticated: false,
   cameraStream: null,
   snapshotCaptured: false,
   snapshotPromise: null,
@@ -190,6 +191,16 @@ $$('[data-view-link]').forEach((button) => {
   button.addEventListener("click", (event) => {
     event.preventDefault();
     showView(button.dataset.viewLink);
+  });
+});
+
+$$('[data-password-toggle]').forEach((button) => {
+  button.addEventListener("click", () => {
+    const input = document.getElementById(button.dataset.passwordToggle);
+    if (!input) return;
+    const revealing = input.type === "password";
+    input.type = revealing ? "text" : "password";
+    button.textContent = revealing ? "Hide" : "Show";
   });
 });
 
@@ -581,11 +592,28 @@ async function loadLecturerSession(silent = false) {
     const result = await api("/api/auth/me");
     state.lecturerUser = result.user;
     showLecturerDashboard(result.user);
-    await Promise.all([loadCourses(), loadSubmissions()]);
+    if (!result.user.must_change_password) {
+      await Promise.all([loadCourses(), loadSubmissions()]);
+    }
   } catch (error) {
     state.lecturerUser = null;
     showLecturerAuth();
     if (!silent && error.status !== 401) setMessage($("#lecturer-auth-message"), error.message, "error");
+  }
+}
+
+function setPasswordChangeMode(required) {
+  const panel = $("#change-password-panel");
+  const content = $("#lecturer-main-content");
+  panel.classList.toggle("hidden", !required);
+  content.classList.toggle("hidden", required);
+  $("#show-change-password").classList.toggle("hidden", required);
+  if (required) {
+    $("#change-password-heading").textContent = "Set a private password";
+    setMessage($("#password-change-message"), "Set a private password before using the lecturer workspace.", "warning");
+  } else {
+    $("#change-password-heading").textContent = "Change password";
+    setMessage($("#password-change-message"));
   }
 }
 
@@ -594,6 +622,7 @@ function showLecturerDashboard(user) {
   $("#lecturer-dashboard").classList.remove("hidden");
   $("#lecturer-name").textContent = user.full_name;
   $("#lecturer-profile").textContent = `${user.role.replaceAll("_", " ")} · ${user.department || "Department not set"} · ${user.institution?.name || "Institution"}`;
+  setPasswordChangeMode(Boolean(user.must_change_password));
 }
 
 function showLecturerAuth() {
@@ -620,6 +649,45 @@ $("#lecturer-login-form").addEventListener("submit", async (event) => {
     event.currentTarget.reset();
     setMessage($("#lecturer-auth-message"));
     showLecturerDashboard(result.user);
+    if (!result.user.must_change_password) {
+      await Promise.all([loadCourses(), loadSubmissions()]);
+    }
+  } catch (error) {
+    setMessage($("#lecturer-auth-message"), error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("#lecturer-activation-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const data = formJson(event.currentTarget);
+  if (data.new_password !== data.confirm_password) {
+    setMessage($("#lecturer-auth-message"), "The passwords do not match.", "error");
+    return;
+  }
+  if (data.recovery_pin !== data.confirm_recovery_pin) {
+    setMessage($("#lecturer-auth-message"), "The recovery PINs do not match.", "error");
+    return;
+  }
+  const button = event.submitter;
+  button.disabled = true;
+  setMessage($("#lecturer-auth-message"), "Activating account…");
+  try {
+    const result = await api("/api/auth/activate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: data.email,
+        setup_code: data.setup_code,
+        new_password: data.new_password,
+        recovery_pin: data.recovery_pin,
+      }),
+    });
+    state.lecturerUser = result.user;
+    event.currentTarget.reset();
+    showLecturerDashboard(result.user);
+    setMessage($("#lecturer-message"), "Account activated. You are now signed in.", "success");
     await Promise.all([loadCourses(), loadSubmissions()]);
   } catch (error) {
     setMessage($("#lecturer-auth-message"), error.message, "error");
@@ -628,21 +696,67 @@ $("#lecturer-login-form").addEventListener("submit", async (event) => {
   }
 });
 
-$("#lecturer-register-form").addEventListener("submit", async (event) => {
+$("#lecturer-password-reset-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  const data = formJson(event.currentTarget);
+  if (data.new_password !== data.confirm_password) {
+    setMessage($("#lecturer-auth-message"), "The new passwords do not match.", "error");
+    return;
+  }
   const button = event.submitter;
   button.disabled = true;
-  setMessage($("#lecturer-auth-message"), "Submitting registration…");
+  setMessage($("#lecturer-auth-message"), "Resetting password…");
   try {
-    const result = await api("/api/auth/register", {
+    const result = await api("/api/auth/reset-password", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(formJson(event.currentTarget)),
+      body: JSON.stringify({
+        email: data.email,
+        recovery_pin: data.recovery_pin,
+        new_password: data.new_password,
+      }),
     });
+    state.lecturerUser = result.user;
     event.currentTarget.reset();
-    setMessage($("#lecturer-auth-message"), result.message, "success");
+    showLecturerDashboard(result.user);
+    setMessage($("#lecturer-message"), "Password reset successfully. You are now signed in.", "success");
+    await Promise.all([loadCourses(), loadSubmissions()]);
   } catch (error) {
     setMessage($("#lecturer-auth-message"), error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("#show-change-password").addEventListener("click", () => {
+  $("#change-password-panel").classList.toggle("hidden");
+  $("#change-password-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+});
+
+$("#change-password-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const data = formJson(event.currentTarget);
+  if (data.new_password !== data.confirm_password) {
+    setMessage($("#password-change-message"), "The new passwords do not match.", "error");
+    return;
+  }
+  const button = event.submitter;
+  button.disabled = true;
+  try {
+    await api("/api/auth/change-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ current_password: data.current_password, new_password: data.new_password }),
+    });
+    event.currentTarget.reset();
+    state.lecturerUser.must_change_password = false;
+    setPasswordChangeMode(false);
+    $("#change-password-panel").classList.add("hidden");
+    $("#lecturer-main-content").classList.remove("hidden");
+    setMessage($("#lecturer-message"), "Password changed successfully.", "success");
+    await Promise.all([loadCourses(), loadSubmissions()]);
+  } catch (error) {
+    setMessage($("#password-change-message"), error.message, "error");
   } finally {
     button.disabled = false;
   }
@@ -996,59 +1110,202 @@ async function deleteSubmission(documentId, studentName) {
 
 const platformKeyInput = $("#platform-admin-key");
 platformKeyInput.value = state.platformKey;
-$("#load-pending-users").addEventListener("click", loadPendingUsers);
 
-async function loadPendingUsers() {
-  state.platformKey = platformKeyInput.value.trim();
+function platformHeaders(extra = {}) {
+  return { "X-Admin-Key": state.platformKey, ...extra };
+}
+
+function showPlatformLogin() {
+  state.platformAuthenticated = false;
+  $("#platform-login-panel").classList.remove("hidden");
+  $("#platform-dashboard").classList.add("hidden");
+}
+
+function showPlatformDashboard() {
+  state.platformAuthenticated = true;
+  $("#platform-login-panel").classList.add("hidden");
+  $("#platform-dashboard").classList.remove("hidden");
+}
+
+async function unlockPlatform(silent = false) {
   if (!state.platformKey) {
-    setMessage($("#platform-message"), "Enter the platform ADMIN_KEY.", "warning");
+    showPlatformLogin();
+    if (!silent) setMessage($("#platform-login-message"), "Enter the platform ADMIN_KEY.", "warning");
     return;
   }
-  sessionStorage.setItem("kanokwere_platform_key", state.platformKey);
   try {
-    const result = await api("/api/platform/pending", { headers: { "X-Admin-Key": state.platformKey } });
-    renderPendingUsers(result.users);
-    setMessage($("#platform-message"), `${result.users.length} pending registration(s).`, "success");
+    await api("/api/platform/verify", { headers: platformHeaders() });
+    sessionStorage.setItem("kanokwere_platform_key", state.platformKey);
+    showPlatformDashboard();
+    setMessage($("#platform-login-message"));
+    await loadPlatformUsers();
   } catch (error) {
-    setMessage($("#platform-message"), error.message, "error");
+    showPlatformLogin();
+    if (!silent) setMessage($("#platform-login-message"), error.message, "error");
   }
 }
 
-function renderPendingUsers(users) {
-  const body = $("#pending-users-body");
+$("#platform-login-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.submitter;
+  button.disabled = true;
+  state.platformKey = platformKeyInput.value.trim();
+  await unlockPlatform(false);
+  button.disabled = false;
+});
+
+$("#platform-logout").addEventListener("click", () => {
+  state.platformKey = "";
+  platformKeyInput.value = "";
+  sessionStorage.removeItem("kanokwere_platform_key");
+  showPlatformLogin();
+  setMessage($("#platform-login-message"), "Admin dashboard locked.", "success");
+});
+
+$("#platform-create-user-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.submitter;
+  const data = formJson(event.currentTarget);
+  button.disabled = true;
+  setMessage($("#platform-message"), "Creating lecturer account…");
+  try {
+    const result = await api("/api/platform/users", {
+      method: "POST",
+      headers: platformHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(data),
+    });
+    event.currentTarget.reset();
+    showSetupCredentials(result.user, result.setup_code, result.setup_code_expires_at);
+    setMessage($("#platform-message"), result.message, "success");
+    await loadPlatformUsers();
+  } catch (error) {
+    setMessage($("#platform-message"), error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+});
+
+function showSetupCredentials(user, setupCode, expiresAt) {
+  $("#setup-credential-card").classList.remove("hidden");
+  $("#setup-credential-user").textContent = `${user.full_name} · ${user.institution?.name || "Institution"}`;
+  $("#login-email-value").textContent = user.email;
+  $("#setup-code-value").textContent = setupCode;
+  $("#setup-code-expiry").textContent = expiresAt
+    ? `Code expires ${new Date(expiresAt).toLocaleString()}.`
+    : "Give this code directly to the lecturer.";
+  $("#setup-credential-card").scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+$("#copy-setup-details").addEventListener("click", async () => {
+  const email = $("#login-email-value").textContent;
+  const setupCode = $("#setup-code-value").textContent;
+  if (!email || !setupCode) return;
+  await navigator.clipboard.writeText(`Kanokwere login email: ${email}\nOne-time setup code: ${setupCode}`);
+  setMessage($("#platform-message"), "Setup details copied.", "success");
+});
+
+$("#refresh-platform-users").addEventListener("click", loadPlatformUsers);
+
+async function loadPlatformUsers() {
+  try {
+    const result = await api("/api/platform/users", { headers: platformHeaders() });
+    renderPlatformUsers(result.users);
+  } catch (error) {
+    setMessage($("#platform-message"), error.message, "error");
+    if (error.status === 401) showPlatformLogin();
+  }
+}
+
+function renderPlatformUsers(users) {
+  const body = $("#platform-users-body");
   body.replaceChildren();
   if (!users.length) {
-    body.innerHTML = '<tr><td colspan="5" class="empty-state">No pending lecturer registrations.</td></tr>';
+    body.innerHTML = '<tr><td colspan="5" class="empty-state">No lecturer accounts have been created.</td></tr>';
     return;
   }
   users.forEach((user) => {
     const row = document.createElement("tr");
-    row.innerHTML = '<td><strong></strong><small></small></td><td><strong></strong><small></small></td><td></td><td><select><option value="lecturer">Lecturer</option><option value="institution_admin">Institution administrator</option></select></td><td><button class="primary-button small-button" type="button">Approve</button></td>';
+    row.innerHTML = `
+      <td><strong></strong><small></small></td>
+      <td><strong></strong><small></small></td>
+      <td><span class="status-pill"></span><small></small></td>
+      <td><strong></strong><small></small></td>
+      <td><div class="action-row"></div></td>`;
     row.children[0].querySelector("strong").textContent = user.full_name;
     row.children[0].querySelector("small").textContent = user.email;
     row.children[1].querySelector("strong").textContent = user.institution?.name || "—";
-    row.children[1].querySelector("small").textContent = user.institution?.domain || "—";
-    row.children[2].textContent = `${user.department || "—"} · ${user.staff_id || "—"}`;
-    const role = row.children[3].querySelector("select");
-    row.children[4].querySelector("button").addEventListener("click", () => approvePendingUser(user.id, role.value));
+    row.children[1].querySelector("small").textContent = user.department || "—";
+    const status = row.children[2].querySelector("span");
+    status.textContent = user.account_status;
+    status.classList.add(user.account_status);
+    row.children[2].querySelector("small").textContent = user.role.replaceAll("_", " ");
+    row.children[3].querySelector("strong").textContent = `${user.course_count} course(s) · ${user.submission_count} submission(s)`;
+    row.children[3].querySelector("small").textContent = user.last_login_at ? `Last login ${new Date(user.last_login_at).toLocaleString()}` : "Never signed in";
+    const actions = row.children[4].querySelector(".action-row");
+    const setup = document.createElement("button");
+    setup.textContent = user.account_status === "pending_activation" ? "Reissue setup code" : "Issue new setup code";
+    setup.addEventListener("click", () => issuePlatformSetupCode(user));
+    actions.appendChild(setup);
+    if (user.account_status === "active" || user.account_status === "suspended") {
+      const statusButton = document.createElement("button");
+      statusButton.textContent = user.account_status === "active" ? "Suspend" : "Reactivate";
+      statusButton.addEventListener("click", () => setPlatformUserStatus(user, user.account_status === "active" ? "suspended" : "active"));
+      actions.appendChild(statusButton);
+    }
+    const remove = document.createElement("button");
+    remove.textContent = "Delete";
+    remove.className = "delete";
+    remove.addEventListener("click", () => deletePlatformUser(user));
+    actions.appendChild(remove);
     body.appendChild(row);
   });
 }
 
-async function approvePendingUser(userId, role) {
+async function issuePlatformSetupCode(user) {
+  if (!confirm(`Issue a new setup code for ${user.full_name}? Their current sessions will end and they will create a new password and recovery PIN.`)) return;
   try {
-    await api(`/api/platform/users/${userId}/approve`, {
+    const result = await api(`/api/platform/users/${user.id}/reset-password`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Admin-Key": state.platformKey },
-      body: JSON.stringify({ role }),
+      headers: platformHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({}),
     });
-    await loadPendingUsers();
+    showSetupCredentials(result.user || user, result.setup_code, result.setup_code_expires_at);
+    setMessage($("#platform-message"), result.message, "success");
+    await loadPlatformUsers();
   } catch (error) {
     setMessage($("#platform-message"), error.message, "error");
   }
 }
 
-$$('[data-view-link="admin"]').forEach((button) => button.addEventListener("click", () => loadLecturerSession(true)));
+async function setPlatformUserStatus(user, status) {
+  const action = status === "active" ? "reactivate" : "suspend";
+  if (!confirm(`${action[0].toUpperCase() + action.slice(1)} ${user.full_name}'s account?`)) return;
+  try {
+    await api(`/api/platform/users/${user.id}/status`, {
+      method: "POST",
+      headers: platformHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ status }),
+    });
+    setMessage($("#platform-message"), `Account ${status}.`, "success");
+    await loadPlatformUsers();
+  } catch (error) {
+    setMessage($("#platform-message"), error.message, "error");
+  }
+}
+
+async function deletePlatformUser(user) {
+  if (!confirm(`Permanently delete ${user.full_name}'s account? Course ownership will be transferred to another assigned lecturer. This cannot be undone.`)) return;
+  try {
+    await api(`/api/platform/users/${user.id}`, { method: "DELETE", headers: platformHeaders() });
+    setMessage($("#platform-message"), "Lecturer account deleted.", "success");
+    await loadPlatformUsers();
+  } catch (error) {
+    setMessage($("#platform-message"), error.message, "error");
+  }
+}
+
+$$('[data-view-link="lecturer"]').forEach((button) => button.addEventListener("click", () => loadLecturerSession(true)));
+$$('[data-view-link="platform"]').forEach((button) => button.addEventListener("click", () => unlockPlatform(true)));
 
 if (state.documentId && !state.assessmentId) {
   showPanel("prepare", 2);
@@ -1066,4 +1323,5 @@ if (state.assessmentId && state.token) {
 }
 
 loadLecturerSession(true);
+if (state.platformKey) unlockPlatform(true);
 window.addEventListener("pagehide", stopCamera);

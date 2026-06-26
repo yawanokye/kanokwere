@@ -343,3 +343,75 @@ label small { color: var(--muted); font-weight: 500; line-height: 1.4; }
   .platform-controls { grid-template-columns: 1fr; }
   .table-tools { align-items: stretch; flex-direction: column; }
 }
+
+/* Administrator-created lecturer accounts */
+.header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.lecturer-auth-grid { grid-template-columns: 1fr 1fr; max-width: 960px; }
+.account-help-card p { color: var(--muted); line-height: 1.55; }
+.password-field { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; margin-top: 7px; }
+.password-field input { margin-top: 0; }
+.password-toggle { border: 1px solid var(--line); border-radius: 10px; background: var(--surface-soft); padding: 12px 13px; color: var(--brand-dark); font-weight: 800; cursor: pointer; }
+.password-change-card { margin-bottom: 26px; overflow: hidden; border-color: #d5a84c; }
+.password-change-form { max-width: 780px; }
+.password-change-card .message { margin: 0 24px 24px; }
+.standalone-card { max-width: 620px; margin: 12px 0 70px; }
+.admin-key-card { padding: 28px; }
+.admin-management-grid { align-items: start; }
+.credential-card { padding-bottom: 25px; border-color: #9cc9ad; background: #fbfffc; }
+.credential-card > p { padding: 0 24px; }
+.credential-output { display: flex; align-items: center; gap: 12px; padding: 14px 24px; flex-wrap: wrap; }
+.credential-output code { flex: 1; min-width: 210px; padding: 15px; border-radius: 11px; background: #173f2c; color: white; font-size: 17px; letter-spacing: .05em; overflow-wrap: anywhere; }
+.status-pill.suspended { background: #fff0ee; color: var(--danger); }
+.status-pill.pending { background: #fff9e9; color: #7b5a15; }
+.status-pill.active { background: var(--brand-soft); color: var(--brand-dark); }
+#platform-users-body td small, #reset-requests-body td small { display: block; margin-top: 5px; color: var(--muted); line-height: 1.4; }
+#platform-dashboard .admin-table-card { margin-bottom: 28px; }
+
+@media (max-width: 900px) {
+  .lecturer-auth-grid { grid-template-columns: 1fr; }
+  .header-actions { width: 100%; }
+  .credential-output { align-items: stretch; flex-direction: column; }
+  .credential-output code { width: 100%; min-width: 0; }
+}
+
+/* Account activation and recovery */
+.account-access-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  max-width: 1320px;
+}
+.credential-list {
+  display: grid;
+  gap: 12px;
+  padding: 8px 24px 16px;
+}
+.credential-list > div {
+  display: grid;
+  gap: 6px;
+}
+.credential-list span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+.credential-list code {
+  padding: 14px;
+  border-radius: 11px;
+  background: #173f2c;
+  color: white;
+  font-size: 16px;
+  overflow-wrap: anywhere;
+}
+#copy-setup-details { margin: 0 24px 12px; }
+.status-pill.pending_activation { background: #fff9e9; color: #7b5a15; }
+
+@media (max-width: 1100px) {
+  .account-access-grid { grid-template-columns: 1fr 1fr; }
+  .account-access-grid .account-help-card { grid-column: 1 / -1; }
+}
+
+@media (max-width: 760px) {
+  .account-access-grid { grid-template-columns: 1fr; }
+  .account-access-grid .account-help-card { grid-column: auto; }
+}
