@@ -38,3 +38,9 @@ Keep the existing `DATABASE_URL`, `OPENAI_API_KEY`, `ADMIN_KEY`, assessment, and
 8. If the recovery PIN is forgotten, the administrator issues a new setup code.
 
 The new Alembic revision is `20260626_03`. The legacy `staff_id` database column is left untouched when it already exists, but the application no longer collects, displays, or uses staff IDs.
+
+## Database schema repair, revision 20260626_04
+
+This revision repairs deployments where Alembic was marked as current but the
+`users` table was still missing one or more account activation fields. Render's
+prestart step now verifies the complete user schema before Uvicorn starts.
