@@ -46,6 +46,12 @@ def build_pdf_report(assessment: Assessment) -> bytes:
         ["Student", assessment.document.student_name],
         ["Student ID", assessment.document.student_id],
         ["Document", assessment.document.title],
+        [
+            "Course",
+            f"{assessment.document.course.course_code} · {assessment.document.course.title}"
+            if assessment.document.course
+            else "Legacy or unassigned submission",
+        ],
         ["File fingerprint", assessment.document.file_hash],
         ["Correct answers", f"{assessment.correct_count} of 20"],
         ["Score", f"{assessment.score:.1f}%"],

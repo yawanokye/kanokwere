@@ -3,7 +3,17 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -15,6 +25,115 @@ def utcnow() -> datetime:
 
 def new_id() -> str:
     return str(uuid4())
+
+
+class Institution(Base):
+    __tablename__ = "institutions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(240), nullable=False, unique=True)
+    domain: Mapped[str | None] = mapped_column(String(180), nullable=True, unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    users: Mapped[list["User"]] = relationship(back_populates="institution")
+    courses: Mapped[list["Course"]] = relationship(back_populates="institution")
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    institution_id: Mapped[str] = mapped_column(
+        ForeignKey("institutions.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    full_name: Mapped[str] = mapped_column(String(180), nullable=False)
+    email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(40), nullable=False, default="lecturer")
+    department: Mapped[str | None] = mapped_column(String(180), nullable=True)
+    staff_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    account_status: Mapped[str] = mapped_column(String(30), nullable=False, default="pending")
+    failed_login_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    institution: Mapped[Institution] = relationship(back_populates="users")
+    sessions: Mapped[list["AuthSession"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    course_links: Mapped[list["CourseLecturer"]] = relationship(
+        back_populates="lecturer", cascade="all, delete-orphan"
+    )
+
+
+class AuthSession(Base):
+    __tablename__ = "auth_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    user: Mapped[User] = relationship(back_populates="sessions")
+
+
+class Course(Base):
+    __tablename__ = "courses"
+    __table_args__ = (
+        UniqueConstraint(
+            "institution_id", "course_code", "academic_year", "semester",
+            name="uq_course_identity",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    institution_id: Mapped[str] = mapped_column(
+        ForeignKey("institutions.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    course_code: Mapped[str] = mapped_column(String(80), nullable=False)
+    title: Mapped[str] = mapped_column(String(240), nullable=False)
+    academic_year: Mapped[str] = mapped_column(String(40), nullable=False)
+    semester: Mapped[str] = mapped_column(String(80), nullable=False)
+    enrollment_code: Mapped[str] = mapped_column(String(24), nullable=False, unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="active")
+    created_by: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    institution: Mapped[Institution] = relationship(back_populates="courses")
+    lecturer_links: Mapped[list["CourseLecturer"]] = relationship(
+        back_populates="course", cascade="all, delete-orphan"
+    )
+    documents: Mapped[list["Document"]] = relationship(back_populates="course")
+
+
+class CourseLecturer(Base):
+    __tablename__ = "course_lecturers"
+    __table_args__ = (
+        UniqueConstraint("course_id", "lecturer_id", name="uq_course_lecturer"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    course_id: Mapped[str] = mapped_column(
+        ForeignKey("courses.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    lecturer_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    access_level: Mapped[str] = mapped_column(String(30), nullable=False, default="co_lecturer")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    course: Mapped[Course] = relationship(back_populates="lecturer_links")
+    lecturer: Mapped[User] = relationship(back_populates="course_links")
 
 
 class Document(Base):
@@ -31,8 +150,18 @@ class Document(Base):
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="processing")
     generation_mode: Mapped[str] = mapped_column(String(30), nullable=False, default="ai")
     processing_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    institution_id: Mapped[str | None] = mapped_column(
+        ForeignKey("institutions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    course_id: Mapped[str | None] = mapped_column(
+        ForeignKey("courses.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    submitted_to_lecturer_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
+    course: Mapped[Course | None] = relationship(back_populates="documents")
     questions: Mapped[list["Question"]] = relationship(
         back_populates="document", cascade="all, delete-orphan"
     )
@@ -71,6 +200,12 @@ class Assessment(Base):
     document_id: Mapped[str] = mapped_column(
         ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    course_id: Mapped[str | None] = mapped_column(
+        ForeignKey("courses.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    lecturer_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="in_progress")
     current_position: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
@@ -88,9 +223,7 @@ class Assessment(Base):
         order_by="AssessmentItem.position",
     )
     webcam_snapshot: Mapped["WebcamSnapshot | None"] = relationship(
-        back_populates="assessment",
-        cascade="all, delete-orphan",
-        uselist=False,
+        back_populates="assessment", cascade="all, delete-orphan", uselist=False
     )
 
 
@@ -136,3 +269,18 @@ class WebcamSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     assessment: Mapped[Assessment] = relationship(back_populates="webcam_snapshot")
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    action: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    resource_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    resource_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ip_address: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

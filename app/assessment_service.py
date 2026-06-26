@@ -55,7 +55,12 @@ def start_assessment(db: Session, document_id: str) -> tuple[Assessment, str]:
         )
 
     token, token_hash = make_session_token()
-    assessment = Assessment(document_id=document.id, token_hash=token_hash)
+    assessment = Assessment(
+        document_id=document.id,
+        course_id=document.course_id,
+        lecturer_id=document.submitted_to_lecturer_id,
+        token_hash=token_hash,
+    )
     db.add(assessment)
     db.flush()
 

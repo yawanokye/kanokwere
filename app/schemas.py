@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import re
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
 class GeneratedQuestion(BaseModel):
@@ -40,3 +41,58 @@ class AnswerRequest(BaseModel):
 
 class FocusEventRequest(BaseModel):
     event: Literal["blur", "hidden"] = "hidden"
+
+
+class LecturerRegisterRequest(BaseModel):
+    full_name: str = Field(min_length=3, max_length=180)
+    email: EmailStr
+    password: str = Field(min_length=10, max_length=128)
+    institution_name: str = Field(min_length=3, max_length=240)
+    department: str = Field(min_length=2, max_length=180)
+    staff_id: str = Field(min_length=2, max_length=100)
+
+    @field_validator("password")
+    @classmethod
+    def password_strength(cls, value: str) -> str:
+        if not re.search(r"[A-Z]", value) or not re.search(r"[a-z]", value):
+            raise ValueError("Password must include uppercase and lowercase letters.")
+        if not re.search(r"\d", value):
+            raise ValueError("Password must include a number.")
+        return value
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=128)
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=10, max_length=128)
+
+    @field_validator("new_password")
+    @classmethod
+    def new_password_strength(cls, value: str) -> str:
+        if not re.search(r"[A-Z]", value) or not re.search(r"[a-z]", value) or not re.search(r"\d", value):
+            raise ValueError("New password must include uppercase, lowercase, and a number.")
+        return value
+
+
+class CourseCreateRequest(BaseModel):
+    course_code: str = Field(min_length=2, max_length=80)
+    title: str = Field(min_length=3, max_length=240)
+    academic_year: str = Field(min_length=4, max_length=40)
+    semester: str = Field(min_length=2, max_length=80)
+
+
+class CourseCollaboratorRequest(BaseModel):
+    email: EmailStr
+    access_level: Literal["co_lecturer", "viewer"] = "co_lecturer"
+
+
+class UserApprovalRequest(BaseModel):
+    role: Literal["lecturer", "institution_admin"] = "lecturer"
+
+
+class UserSuspensionRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
