@@ -1,18 +1,18 @@
 services:
   - type: web
-    name: kanokwere
+    name: kanokware
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: python prestart.py && uvicorn main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
       - key: APP_NAME
-        value: Kanokwere
+        value: Kanokware
       - key: ENVIRONMENT
         value: production
       - key: DATABASE_URL
         fromDatabase:
-          name: kanokwere-db
+          name: kanokware-db
           property: connectionString
       - key: OPENAI_API_KEY
         sync: false
@@ -58,6 +58,6 @@ services:
         value: "48"
 
 databases:
-  - name: kanokwere-db
-    databaseName: kanokwere
-    user: kanokwere
+  - name: kanokware-db
+    databaseName: kanokware
+    user: kanokware

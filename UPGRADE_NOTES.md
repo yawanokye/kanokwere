@@ -15,7 +15,7 @@ The prestart step creates missing tables and applies Alembic migrations without 
 ## Required Render variables
 
 ```env
-APP_NAME=Kanokwere
+APP_NAME=Kanokware
 ENVIRONMENT=production
 LECTURER_SESSION_HOURS=12
 LOGIN_MAX_FAILURES=5

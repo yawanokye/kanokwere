@@ -1,8 +1,8 @@
-# Kanokwere MVP
+# Kanokware MVP
 
 **Know your work. Prove your work.**
 
-Kanokwere generates 20 questions from a student's uploaded document and administers a timed ownership-confidence assessment. Every question has 30 seconds. The default threshold is 80%, which requires at least 16 correct answers.
+Kanokware generates 20 questions from a student's uploaded document and administers a timed ownership-confidence assessment. Every question has 30 seconds. The default threshold is 80%, which requires at least 16 correct answers.
 
 ## Multi-lecturer controls
 
@@ -68,7 +68,7 @@ Can review evidence but cannot reset or delete submissions.
 2. Platform administrator opens the approval section and enters `ADMIN_KEY`.
 3. Administrator approves the lecturer as either `lecturer` or `institution_admin`.
 4. Lecturer signs in and creates a course.
-5. Kanokwere generates an enrolment code such as `KANO-A7K92Q`.
+5. Kanokware generates an enrolment code such as `KANO-A7K92Q`.
 6. Lecturer shares the code with the relevant students.
 7. Students use the code when uploading documents.
 8. Submissions appear only in the dashboards of lecturers assigned to that course.
@@ -144,7 +144,7 @@ DELETE /api/lecturer/documents/{document_id}
 
 ## Data and privacy
 
-Kanokwere stores account details, course assignments, extracted document text, generated questions, assessment responses, timing, scores, audit events, and one webcam still image. It does not retain the original uploaded file or record webcam video or audio.
+Kanokware stores account details, course assignments, extracted document text, generated questions, assessment responses, timing, scores, audit events, and one webcam still image. It does not retain the original uploaded file or record webcam video or audio.
 
 Institutions should publish retention periods, identify who may access still images, and establish a clear appeal and due-process procedure. The ownership-confidence score is evidence of demonstrated document knowledge. It is not conclusive proof of authorship or misconduct.
 
@@ -160,6 +160,6 @@ The tests cover lecturer registration and approval, secure login, course creatio
 
 Lecturers do not create their own accounts. Open the **Admin** tab, enter the platform `ADMIN_KEY`, and create the account using the lecturer's name, login email, institution, department, and role. Staff ID is not collected.
 
-Kanokwere displays a one-time setup code. Give the lecturer the login email and setup code directly. The lecturer opens the **Lecturer** tab, activates the account, creates a private password, and creates a six-digit recovery PIN. The administrator never creates or sees the lecturer's password or recovery PIN.
+Kanokware displays a one-time setup code. Give the lecturer the login email and setup code directly. The lecturer opens the **Lecturer** tab, activates the account, creates a private password, and creates a six-digit recovery PIN. The administrator never creates or sees the lecturer's password or recovery PIN.
 
 A lecturer who forgets a password can reset it automatically with the login email and recovery PIN. Administrator approval and email delivery are not required. If the recovery PIN is also forgotten, the administrator can issue a new one-time setup code. The administrator can also suspend, reactivate, or delete an account. Course ownership is transferred safely before deletion.
