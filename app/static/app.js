@@ -1,13 +1,13 @@
 const state = {
-  documentId: localStorage.getItem("kanokwere_document_id"),
-  assessmentId: sessionStorage.getItem("kanokwere_assessment_id"),
-  token: sessionStorage.getItem("kanokwere_session_token"),
+  documentId: localStorage.getItem("kanokware_document_id"),
+  assessmentId: sessionStorage.getItem("kanokware_assessment_id"),
+  token: sessionStorage.getItem("kanokware_session_token"),
   testActive: false,
   timerHandle: null,
   currentPosition: null,
   lecturerUser: null,
   courses: [],
-  platformKey: sessionStorage.getItem("kanokwere_platform_key") || "",
+  platformKey: sessionStorage.getItem("kanokware_platform_key") || "",
   platformAuthenticated: false,
   cameraStream: null,
   snapshotCaptured: false,
@@ -237,7 +237,7 @@ $("#upload-form").addEventListener("submit", async (event) => {
     pollStartedAt = Date.now();
     setProcessingSpinner(true);
     setGenerationActions(false);
-    localStorage.setItem("kanokwere_document_id", state.documentId);
+    localStorage.setItem("kanokware_document_id", state.documentId);
     showPanel("prepare", 2);
     pollDocumentStatus();
   } catch (error) {
@@ -323,9 +323,9 @@ async function pollDocumentStatus() {
     if (documentMissing) {
       clearTimeout(pollHandle);
       pollHandle = null;
-      localStorage.removeItem("kanokwere_document_id");
-      sessionStorage.removeItem("kanokwere_assessment_id");
-      sessionStorage.removeItem("kanokwere_session_token");
+      localStorage.removeItem("kanokware_document_id");
+      sessionStorage.removeItem("kanokware_assessment_id");
+      sessionStorage.removeItem("kanokware_session_token");
       state.documentId = null;
       state.assessmentId = null;
       state.token = null;
@@ -378,7 +378,7 @@ if (restartUploadButton) restartUploadButton.addEventListener("click", () => {
   clearTimeout(pollHandle);
   pollStartedAt = null;
   state.documentId = null;
-  localStorage.removeItem("kanokwere_document_id");
+  localStorage.removeItem("kanokware_document_id");
   $("#upload-form").reset();
   $("#file-label").textContent = "Choose a PDF, DOCX, or TXT file";
   setMessage($("#prepare-error"));
@@ -408,8 +408,8 @@ $("#start-button").addEventListener("click", async () => {
     state.token = result.session_token;
     state.snapshotCaptured = false;
     state.testActive = true;
-    sessionStorage.setItem("kanokwere_assessment_id", state.assessmentId);
-    sessionStorage.setItem("kanokwere_session_token", state.token);
+    sessionStorage.setItem("kanokware_assessment_id", state.assessmentId);
+    sessionStorage.setItem("kanokware_session_token", state.token);
     showPanel("test", 3);
     document.documentElement.requestFullscreen?.().catch(() => {});
     await loadQuestion();
@@ -544,8 +544,8 @@ async function loadResult() {
     $("#timeout-count").textContent = result.timed_out_count;
     $("#focus-count").textContent = result.focus_loss_count;
     $("#result-disclaimer").textContent = result.disclaimer;
-    sessionStorage.removeItem("kanokwere_assessment_id");
-    sessionStorage.removeItem("kanokwere_session_token");
+    sessionStorage.removeItem("kanokware_assessment_id");
+    sessionStorage.removeItem("kanokware_session_token");
   } catch (error) {
     setMessage($("#test-message"), error.message, "error");
   }
@@ -559,7 +559,7 @@ $("#new-assessment-button").addEventListener("click", () => {
   state.currentPosition = null;
   state.snapshotCaptured = false;
   pollStartedAt = null;
-  localStorage.removeItem("kanokwere_document_id");
+  localStorage.removeItem("kanokware_document_id");
   $("#upload-form").reset();
   $("#file-label").textContent = "Choose a PDF, DOCX, or TXT file";
   $("#consent-checkbox").checked = false;
@@ -1085,7 +1085,7 @@ async function downloadReport(assessmentId, studentId) {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `kanokwere-${studentId.replaceAll("/", "-")}.pdf`;
+    link.download = `kanokware-${studentId.replaceAll("/", "-")}.pdf`;
     link.click();
     URL.revokeObjectURL(url);
   } catch (error) {
@@ -1140,7 +1140,7 @@ async function unlockPlatform(silent = false) {
   }
   try {
     await api("/api/platform/verify", { headers: platformHeaders() });
-    sessionStorage.setItem("kanokwere_platform_key", state.platformKey);
+    sessionStorage.setItem("kanokware_platform_key", state.platformKey);
     showPlatformDashboard();
     setMessage($("#platform-login-message"));
     await loadPlatformUsers();
@@ -1162,7 +1162,7 @@ $("#platform-login-form").addEventListener("submit", async (event) => {
 $("#platform-logout").addEventListener("click", () => {
   state.platformKey = "";
   platformKeyInput.value = "";
-  sessionStorage.removeItem("kanokwere_platform_key");
+  sessionStorage.removeItem("kanokware_platform_key");
   showPlatformLogin();
   setMessage($("#platform-login-message"), "Admin dashboard locked.", "success");
 });
@@ -1205,7 +1205,7 @@ $("#copy-setup-details").addEventListener("click", async () => {
   const email = $("#login-email-value").textContent;
   const setupCode = $("#setup-code-value").textContent;
   if (!email || !setupCode) return;
-  await navigator.clipboard.writeText(`Kanokwere login email: ${email}\nOne-time setup code: ${setupCode}`);
+  await navigator.clipboard.writeText(`Kanokware login email: ${email}\nOne-time setup code: ${setupCode}`);
   setMessage($("#platform-message"), "Setup details copied.", "success");
 });
 
