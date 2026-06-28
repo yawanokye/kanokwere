@@ -22,7 +22,7 @@ def build_pdf_report(assessment: Assessment) -> bytes:
         leftMargin=18 * mm,
         topMargin=18 * mm,
         bottomMargin=18 * mm,
-        title="Kanokwere Ownership Assessment Report",
+        title="Kanokware Ownership Assessment Report",
     )
     styles = getSampleStyleSheet()
     styles.add(
@@ -34,7 +34,7 @@ def build_pdf_report(assessment: Assessment) -> bytes:
         )
     )
     story = [
-        Paragraph("Kanokwere Ownership Assessment Report", styles["Title"]),
+        Paragraph("Kanokware Ownership Assessment Report", styles["Title"]),
         Spacer(1, 8),
         Paragraph(
             "Knowledge of submitted work assessment", styles["Heading2"]

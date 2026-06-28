@@ -21,10 +21,10 @@ def _as_bool(value: str | None, default: bool = False) -> bool:
 
 @dataclass(frozen=True)
 class Settings:
-    app_name: str = os.getenv("APP_NAME", "Kanokwere")
+    app_name: str = os.getenv("APP_NAME", "Kanokware")
     environment: str = os.getenv("ENVIRONMENT", "development")
     database_url: str = os.getenv(
-        "DATABASE_URL", f"sqlite:///{(BASE_DIR / 'kanokwere.db').as_posix()}"
+        "DATABASE_URL", f"sqlite:///{(BASE_DIR / 'kanokware.db').as_posix()}"
     )
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-5.5")
@@ -46,7 +46,7 @@ class Settings:
     webcam_required: bool = _as_bool(os.getenv("WEBCAM_REQUIRED"), True)
     webcam_max_image_kb: int = int(os.getenv("WEBCAM_MAX_IMAGE_KB", "700"))
     lecturer_session_hours: int = int(os.getenv("LECTURER_SESSION_HOURS", "12"))
-    auth_cookie_name: str = os.getenv("AUTH_COOKIE_NAME", "kanokwere_lecturer_session")
+    auth_cookie_name: str = os.getenv("AUTH_COOKIE_NAME", "kanokware_lecturer_session")
     login_max_failures: int = int(os.getenv("LOGIN_MAX_FAILURES", "5"))
     login_lock_minutes: int = int(os.getenv("LOGIN_LOCK_MINUTES", "15"))
     registration_enabled: bool = _as_bool(os.getenv("LECTURER_REGISTRATION_ENABLED"), False)

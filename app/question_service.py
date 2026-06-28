@@ -271,7 +271,7 @@ def _generate_with_openai(text: str, title: str) -> GeneratedQuestionBank:
         except APIConnectionError as exc:
             raise HTTPException(
                 status_code=502,
-                detail="Kanokwere could not connect to OpenAI. Retry shortly.",
+                detail="Kanokware could not connect to OpenAI. Retry shortly.",
             ) from exc
         except APIStatusError as exc:
             request_id = getattr(exc, "request_id", None)

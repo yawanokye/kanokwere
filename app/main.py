@@ -92,7 +92,7 @@ from .security import (
 )
 
 
-logger = logging.getLogger("kanokwere")
+logger = logging.getLogger("kanokware")
 
 
 def utcnow() -> datetime:
@@ -123,7 +123,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="Kanokwere", version="0.6.0", lifespan=lifespan)
+app = FastAPI(title="Kanokware", version="0.6.0", lifespan=lifespan)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -193,7 +193,7 @@ def _user_payload(user: User) -> dict[str, object]:
 def register_lecturer() -> None:
     raise HTTPException(
         status_code=403,
-        detail="Lecturer self-registration is disabled. Ask the Kanokwere administrator to create your account.",
+        detail="Lecturer self-registration is disabled. Ask the Kanokware administrator to create your account.",
     )
 
 
@@ -328,7 +328,7 @@ def login_lecturer(
     if user.account_status != "active" or not user.email_verified:
         raise HTTPException(status_code=403, detail="This lecturer account is not active.")
     if not user.institution or user.institution.status != "active":
-        raise HTTPException(status_code=403, detail="Your institution is not active on Kanokwere.")
+        raise HTTPException(status_code=403, detail="Your institution is not active on Kanokware.")
 
     user.failed_login_count = 0
     user.locked_until = None
@@ -1176,7 +1176,7 @@ def lecturer_assessment_snapshot(
     return Response(
         content=snapshot.image_data,
         media_type=snapshot.mime_type or "image/jpeg",
-        headers={"Cache-Control": "private, no-store", "Content-Disposition": 'inline; filename="kanokwere-webcam-snapshot.jpg"'},
+        headers={"Cache-Control": "private, no-store", "Content-Disposition": 'inline; filename="kanokware-webcam-snapshot.jpg"'},
     )
 
 
@@ -1194,7 +1194,7 @@ def lecturer_pdf_report(
     audit(db, request, "report_downloaded", user=user, resource_type="assessment", resource_id=assessment.id)
     db.commit()
     safe_id = assessment.document.student_id.replace("/", "-").replace("\\", "-")
-    return Response(content=pdf, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="kanokwere-{safe_id}.pdf"'})
+    return Response(content=pdf, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="kanokware-{safe_id}.pdf"'})
 
 
 @app.delete("/api/lecturer/assessments/{assessment_id}")

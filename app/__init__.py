@@ -1,1 +1,1 @@
-"""Kanokwere application package."""
+"""Kanokware application package."""
