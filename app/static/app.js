@@ -1309,6 +1309,22 @@ async function deletePlatformUser(user) {
   }
 }
 
+
+const trialCodeButton = $("#use-trial-code-button");
+if (trialCodeButton) {
+  trialCodeButton.addEventListener("click", () => {
+    const courseCodeInput = document.querySelector('input[name="course_code"]');
+    if (!courseCodeInput) return;
+    courseCodeInput.value = "KANO-3LH9PW";
+    courseCodeInput.focus();
+    setMessage(
+      $("#upload-message"),
+      "Practice code KANO-3LH9PW has been added. Complete the remaining details and upload a document.",
+      "success"
+    );
+  });
+}
+
 $$('[data-view-link="lecturer"]').forEach((button) => button.addEventListener("click", () => loadLecturerSession(true)));
 $$('[data-view-link="platform"]').forEach((button) => button.addEventListener("click", () => unlockPlatform(true)));
 

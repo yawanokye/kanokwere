@@ -28,7 +28,7 @@
       <div class="hero">
         <div class="hero-copy">
           <span class="eyebrow">Document ownership assessment</span>
-          <h1>Prove ownership of work submitted under your name through knowledge assessment</h1>
+          <h1>Prove your ownership of work submitted under your name through knowledge assessment</h1>
           <p>Upload a document, answer 20 document-specific questions, and receive an ownership confidence score. The standard threshold is 70%.</p>
           <div class="hero-stats" aria-label="Assessment summary">
             <div><strong>20</strong><span>questions</span></div>
@@ -58,13 +58,22 @@
           <div class="panel-heading">
             <div>
               <span class="eyebrow">Step 1</span>
-              <h2 id="upload-heading">Submit your work</h2>
+              <h2 id="upload-heading">Submit the student’s work</h2>
+            </div>
+          </div>
+          <div class="trial-code-banner" role="note" aria-label="Practice code">
+            <div>
+              <span class="eyebrow">Practice or trial access</span>
+              <strong>Try Kanokware with course code <code>KANO-3LH9PW</code></strong>
+              <p>Use this code to practise the document upload and ownership assessment process.</p>
+            </div>
+            <button id="use-trial-code-button" class="secondary-button" type="button">Use trial code</button>
           </div>
           <form id="upload-form" class="form-grid">
             <label class="full-width">
               Course enrolment code
-              <input name="course_code" type="text" maxlength="24" required autocomplete="off" placeholder="e.g. KANO-A7K92Q">
-              <strong>Obtain this code from your lecturer or supervisor. Use this code "KANO-3LH9PW" for practice.</strong>
+              <input name="course_code" type="text" maxlength="24" required autocomplete="off" placeholder="e.g. KANO-3LH9PW">
+              <small>Obtain this code from your lecturer or supervisor.</small>
             </label>
             <label>
               Student name
@@ -417,6 +426,6 @@
     <span>Ownership confidence supports academic judgement. It does not replace due process.</span>
   </footer>
 
-  <script src="/static/app.js?v=20260626-authfix1" defer></script>
+  <script src="/static/app.js?v=20260628-trial1" defer></script>
 </body>
 </html>
