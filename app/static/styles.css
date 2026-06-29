@@ -464,3 +464,71 @@ label small { color: var(--muted); font-weight: 500; line-height: 1.4; }
     width: 100%;
   }
 }
+
+
+/* Live webcam monitoring */
+.monitoring-warning {
+  display: grid;
+  gap: 5px;
+  margin: 14px 0 4px;
+  padding: 13px 15px;
+  border: 1px solid #f4d58b;
+  border-radius: 12px;
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+.monitoring-warning.critical {
+  border-color: #f0b8b4;
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.monitoring-warning strong { font-size: 13px; }
+.monitoring-warning span { font-size: 12px; line-height: 1.45; }
+.monitoring-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 9px;
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+.monitoring-indicator.warning { background: var(--warning-soft); color: var(--warning); }
+.monitoring-indicator.critical { background: var(--danger-soft); color: var(--danger); }
+.review-monitoring {
+  margin: 18px 24px 24px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fbfdfc;
+}
+.monitoring-event-list { display: grid; gap: 10px; }
+.monitoring-event {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) auto;
+  gap: 8px 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: white;
+}
+.monitoring-event strong { color: var(--brand-dark); }
+.monitoring-event small { color: var(--muted); line-height: 1.45; }
+.monitoring-event .event-status {
+  align-self: start;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-size: 10px;
+  font-weight: 800;
+}
+.monitoring-event .event-status.corrected {
+  background: var(--brand-soft);
+  color: var(--brand-dark);
+}
+@media (max-width: 680px) {
+  .monitoring-event { grid-template-columns: 1fr; }
+}

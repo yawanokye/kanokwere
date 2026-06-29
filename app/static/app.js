@@ -15,6 +15,13 @@ const state = {
   snapshotTimer: null,
   captureScheduledForCurrentQuestion: false,
   snapshotUrls: [],
+  assessmentQuestionCount: 20,
+  faceDetector: null,
+  monitoringTimer: null,
+  monitoringBusy: false,
+  monitoringStates: {},
+  monitoringEventCount: 0,
+  monitoringSupported: true,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -73,6 +80,258 @@ function setWebcamStatus(message, mode = "active") {
   monitor.classList.toggle("captured", mode === "captured");
 }
 
+
+const MONITORING_RULES = {
+  no_face: {
+    thresholdMs: 4000,
+    severity: "warning",
+    title: "Face not visible",
+    message: "Please position your face clearly inside the camera frame.",
+  },
+  multiple_faces: {
+    thresholdMs: 2000,
+    severity: "critical",
+    title: "More than one face detected",
+    message: "Please ensure that you are the only person visible during the assessment.",
+  },
+  looking_away: {
+    thresholdMs: 5000,
+    severity: "warning",
+    title: "Please face the screen",
+    message: "Your face appears turned away or outside the central camera area.",
+  },
+  low_light: {
+    thresholdMs: 4000,
+    severity: "warning",
+    title: "Lighting is too low",
+    message: "Increase the lighting so your face remains clearly visible.",
+  },
+  camera_interrupted: {
+    thresholdMs: 0,
+    severity: "critical",
+    title: "Camera interrupted",
+    message: "Restore webcam access to continue reliable assessment monitoring.",
+  },
+};
+
+function resetMonitoringStates() {
+  state.monitoringStates = Object.fromEntries(
+    Object.keys(MONITORING_RULES).map((name) => [
+      name,
+      { activeSince: null, warned: false, lastDurationMs: 0 },
+    ])
+  );
+  state.monitoringEventCount = 0;
+  hideMonitoringWarning();
+}
+
+function showMonitoringWarning(rule) {
+  const box = $("#monitoring-warning");
+  if (!box) return;
+  $("#monitoring-warning-title").textContent = rule.title;
+  $("#monitoring-warning-text").textContent = rule.message;
+  box.classList.remove("hidden", "critical");
+  if (rule.severity === "critical") box.classList.add("critical");
+}
+
+function hideMonitoringWarning() {
+  const box = $("#monitoring-warning");
+  if (box) box.classList.add("hidden");
+}
+
+async function postMonitoringEvent(eventType, durationMs, corrected = false, override = {}) {
+  if (!state.testActive || !state.assessmentId || !state.token) return;
+  const rule = MONITORING_RULES[eventType] || {};
+  try {
+    const result = await api(`/api/assessments/${state.assessmentId}/monitoring-event`, {
+      method: "POST",
+      headers: assessmentHeaders(),
+      body: JSON.stringify({
+        event_type: eventType,
+        duration_ms: Math.max(0, Math.round(durationMs || 0)),
+        question_position: state.currentPosition || null,
+        severity: override.severity || rule.severity || "warning",
+        corrected,
+        message: override.message || rule.message || null,
+      }),
+    });
+    if (Number.isFinite(Number(result?.monitoring_event_count))) {
+      state.monitoringEventCount = Number(result.monitoring_event_count);
+    }
+  } catch (_) {
+    // Monitoring warnings must not stop the timed assessment.
+  }
+}
+
+function updateMonitoringCondition(eventType, active) {
+  const rule = MONITORING_RULES[eventType];
+  const condition = state.monitoringStates[eventType];
+  if (!rule || !condition) return;
+  const now = performance.now();
+
+  if (active) {
+    if (condition.activeSince == null) condition.activeSince = now;
+    const duration = now - condition.activeSince;
+    condition.lastDurationMs = duration;
+    if (!condition.warned && duration >= rule.thresholdMs) {
+      condition.warned = true;
+      showMonitoringWarning(rule);
+      setWebcamStatus(rule.message, rule.severity === "critical" ? "interrupted" : "active");
+      postMonitoringEvent(eventType, duration, false);
+    }
+    return;
+  }
+
+  if (condition.activeSince != null && condition.warned) {
+    postMonitoringEvent(eventType, condition.lastDurationMs, true);
+  }
+  condition.activeSince = null;
+  condition.lastDurationMs = 0;
+  condition.warned = false;
+
+  const anotherWarning = Object.entries(state.monitoringStates).find(
+    ([name, value]) => name !== eventType && value.warned
+  );
+  if (anotherWarning) {
+    showMonitoringWarning(MONITORING_RULES[anotherWarning[0]]);
+  } else {
+    hideMonitoringWarning();
+    setWebcamStatus(
+      "Camera active. No video or audio is recorded. Live face checks are running in this browser."
+    );
+  }
+}
+
+function faceBox(detection) {
+  const box = detection?.boundingBox || detection?.locationData?.relativeBoundingBox;
+  if (!box) return null;
+  const width = Number(box.width || 0);
+  const height = Number(box.height || 0);
+  const xCenter = Number.isFinite(Number(box.xCenter))
+    ? Number(box.xCenter)
+    : Number(box.xmin || 0) + width / 2;
+  const yCenter = Number.isFinite(Number(box.yCenter))
+    ? Number(box.yCenter)
+    : Number(box.ymin || 0) + height / 2;
+  return { xCenter, yCenter, width, height };
+}
+
+function faceLooksAway(detection) {
+  const box = faceBox(detection);
+  if (!box) return false;
+  let away =
+    box.xCenter < 0.25 ||
+    box.xCenter > 0.75 ||
+    box.yCenter < 0.20 ||
+    box.yCenter > 0.82 ||
+    box.width < 0.13;
+
+  const landmarks = detection?.landmarks || detection?.locationData?.relativeKeypoints || [];
+  if (landmarks.length >= 3) {
+    const firstEye = landmarks[0];
+    const secondEye = landmarks[1];
+    const nose = landmarks[2];
+    const eyeDistance = Math.abs(Number(firstEye.x) - Number(secondEye.x));
+    if (eyeDistance > 0.02) {
+      const midpoint = (Number(firstEye.x) + Number(secondEye.x)) / 2;
+      away = away || Math.abs(Number(nose.x) - midpoint) / eyeDistance > 0.48;
+    }
+  }
+  return away;
+}
+
+function averageFrameBrightness(video) {
+  const canvas = $("#monitoring-canvas");
+  if (!canvas || !video.videoWidth || !video.videoHeight) return 255;
+  canvas.width = 96;
+  canvas.height = 72;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+  let total = 0;
+  for (let index = 0; index < pixels.length; index += 16) {
+    total += (pixels[index] + pixels[index + 1] + pixels[index + 2]) / 3;
+  }
+  return total / (pixels.length / 16);
+}
+
+function handleFaceDetectionResults(results) {
+  if (!state.testActive) return;
+  const detections = Array.isArray(results?.detections) ? results.detections : [];
+  updateMonitoringCondition("no_face", detections.length === 0);
+  updateMonitoringCondition("multiple_faces", detections.length > 1);
+  updateMonitoringCondition(
+    "looking_away",
+    detections.length === 1 && faceLooksAway(detections[0])
+  );
+}
+
+async function startSuspiciousMonitoring() {
+  stopSuspiciousMonitoring();
+  resetMonitoringStates();
+
+  if (typeof window.FaceDetection !== "function") {
+    state.monitoringSupported = false;
+    setWebcamStatus(
+      "Camera active. Automated face checks could not load, but camera interruption and tab switching are still monitored.",
+      "interrupted"
+    );
+    return;
+  }
+
+  state.monitoringSupported = true;
+  const detector = new window.FaceDetection({
+    locateFile: (file) =>
+      `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}`,
+  });
+  detector.setOptions({
+    model: "short",
+    minDetectionConfidence: 0.55,
+  });
+  detector.onResults(handleFaceDetectionResults);
+  state.faceDetector = detector;
+
+  state.monitoringTimer = window.setInterval(async () => {
+    if (
+      !state.testActive ||
+      state.monitoringBusy ||
+      document.visibilityState === "hidden"
+    ) return;
+    const video = $("#webcam-preview");
+    const track = state.cameraStream?.getVideoTracks?.()[0];
+    if (!video || !track || track.readyState !== "live" || !video.videoWidth) {
+      updateMonitoringCondition("camera_interrupted", true);
+      return;
+    }
+
+    updateMonitoringCondition("camera_interrupted", false);
+    updateMonitoringCondition("low_light", averageFrameBrightness(video) < 38);
+    state.monitoringBusy = true;
+    try {
+      await detector.send({ image: video });
+    } catch (_) {
+      state.monitoringSupported = false;
+      setWebcamStatus(
+        "Camera active. Automated face checks are temporarily unavailable.",
+        "interrupted"
+      );
+    } finally {
+      state.monitoringBusy = false;
+    }
+  }, 1000);
+}
+
+function stopSuspiciousMonitoring() {
+  if (state.monitoringTimer) clearInterval(state.monitoringTimer);
+  state.monitoringTimer = null;
+  state.monitoringBusy = false;
+  if (state.faceDetector?.close) {
+    try { state.faceDetector.close(); } catch (_) {}
+  }
+  state.faceDetector = null;
+  hideMonitoringWarning();
+}
+
 async function startCamera() {
   const activeTrack = state.cameraStream?.getVideoTracks?.()[0];
   if (activeTrack?.readyState === "live") return state.cameraStream;
@@ -94,20 +353,26 @@ async function startCamera() {
   await video.play();
   const track = stream.getVideoTracks()[0];
   track.addEventListener("ended", () => {
-    setWebcamStatus("Camera access stopped. The lecturer record may show that no image was captured.", "interrupted");
+    if (!state.testActive) return;
+    setWebcamStatus("Camera access stopped. Restore access to continue monitoring.", "interrupted");
+    updateMonitoringCondition("camera_interrupted", true);
   });
   track.addEventListener("mute", () => {
+    if (!state.testActive) return;
     setWebcamStatus("The camera feed is temporarily unavailable.", "interrupted");
+    updateMonitoringCondition("camera_interrupted", true);
   });
   track.addEventListener("unmute", () => {
-    setWebcamStatus("No video or audio is being recorded. One still image will be captured at a random point.");
+    if (!state.testActive) return;
+    updateMonitoringCondition("camera_interrupted", false);
   });
-  setWebcamStatus("No video or audio is being recorded. One still image will be captured at a random point.");
+  setWebcamStatus("Camera active. No video or audio is recorded. Live face checks will begin with the assessment.");
   return stream;
 }
 
 function stopCamera() {
   clearSnapshotTimer();
+  stopSuspiciousMonitoring();
   state.cameraStream?.getTracks?.().forEach((track) => track.stop());
   state.cameraStream = null;
   const video = $("#webcam-preview");
@@ -276,6 +541,19 @@ async function pollDocumentStatus() {
     const result = await api(`/api/documents/${state.documentId}/status`);
     const elapsedMs = Date.now() - pollStartedAt;
     $("#processing-questions").textContent = result.question_count;
+    state.assessmentQuestionCount = Number(result.assessment_question_count || 20);
+    const passThreshold = Number(result.pass_threshold || 80);
+    const thresholdBadge = document.querySelector(".threshold-badge");
+    if (thresholdBadge) thresholdBadge.textContent = `Pass threshold: ${passThreshold}%`;
+    const requiredCorrect = Math.ceil(
+      state.assessmentQuestionCount * passThreshold / 100
+    );
+    const instructionCount = $("#instruction-question-count");
+    const instructionRequirement = $("#instruction-question-requirement");
+    if (instructionCount) instructionCount.textContent = `${state.assessmentQuestionCount} questions`;
+    if (instructionRequirement) {
+      instructionRequirement.textContent = `The lecturer selected ${state.assessmentQuestionCount} questions. At least ${requiredCorrect} correct answers are required at the displayed threshold.`;
+    }
     $("#processing-mode").textContent = result.generation_mode === "pending" ? "Pending" : result.generation_mode;
     const widths = { queued: 12, generating: 55, ready: 100, failed: 100 };
     $("#processing-progress").style.width = `${widths[result.status] || 25}%`;
@@ -407,11 +685,13 @@ $("#start-button").addEventListener("click", async () => {
     state.assessmentId = result.assessment_id;
     state.token = result.session_token;
     state.snapshotCaptured = false;
+    state.assessmentQuestionCount = Number(result.question_count || state.assessmentQuestionCount || 20);
     state.testActive = true;
     sessionStorage.setItem("kanokware_assessment_id", state.assessmentId);
     sessionStorage.setItem("kanokware_session_token", state.token);
     showPanel("test", 3);
     document.documentElement.requestFullscreen?.().catch(() => {});
+    await startSuspiciousMonitoring();
     await loadQuestion();
   } catch (error) {
     stopCamera();
@@ -540,9 +820,10 @@ async function loadResult() {
     $("#score-value").textContent = `${score.toFixed(0)}%`;
     $("#score-ring").style.background = `conic-gradient(var(--brand) ${score}%, #e6ede9 ${score}%)`;
     $("#result-decision").textContent = result.decision;
-    $("#correct-count").textContent = `${result.correct_count}/20`;
+    $("#correct-count").textContent = `${result.correct_count}/${result.question_count}`;
     $("#timeout-count").textContent = result.timed_out_count;
     $("#focus-count").textContent = result.focus_loss_count;
+    $("#monitoring-count").textContent = result.monitoring_event_count || 0;
     $("#result-disclaimer").textContent = result.disclaimer;
     sessionStorage.removeItem("kanokware_assessment_id");
     sessionStorage.removeItem("kanokware_session_token");
@@ -558,6 +839,8 @@ $("#new-assessment-button").addEventListener("click", () => {
   state.token = null;
   state.currentPosition = null;
   state.snapshotCaptured = false;
+  state.monitoringEventCount = 0;
+  state.assessmentQuestionCount = 20;
   pollStartedAt = null;
   localStorage.removeItem("kanokware_document_id");
   $("#upload-form").reset();
@@ -857,7 +1140,7 @@ function renderCourses(courses) {
   const body = $("#courses-body");
   body.replaceChildren();
   if (!courses.length) {
-    body.innerHTML = '<tr><td colspan="6" class="empty-state">Create your first course to receive student submissions.</td></tr>';
+    body.innerHTML = '<tr><td colspan="7" class="empty-state">Create your first course to receive student submissions.</td></tr>';
     return;
   }
   courses.forEach((course) => {
@@ -866,6 +1149,7 @@ function renderCourses(courses) {
       <td><strong></strong><small></small></td>
       <td><strong></strong><small></small></td>
       <td><code class="enrollment-code"></code></td>
+      <td><strong class="question-count"></strong><small>per attempt</small></td>
       <td class="course-lecturers"></td>
       <td></td>
       <td><div class="action-row"></div></td>`;
@@ -874,9 +1158,10 @@ function renderCourses(courses) {
     row.children[1].querySelector("strong").textContent = course.academic_year;
     row.children[1].querySelector("small").textContent = course.semester;
     row.children[2].querySelector("code").textContent = course.enrollment_code;
-    row.children[3].textContent = course.lecturers.map((item) => `${item.full_name} (${item.access_level.replaceAll("_", " ")})`).join(", ");
-    row.children[4].textContent = String(course.submission_count);
-    const actions = row.children[5].querySelector(".action-row");
+    row.children[3].querySelector("strong").textContent = String(course.assessment_question_count || 20);
+    row.children[4].textContent = course.lecturers.map((item) => `${item.full_name} (${item.access_level.replaceAll("_", " ")})`).join(", ");
+    row.children[5].textContent = String(course.submission_count);
+    const actions = row.children[6].querySelector(".action-row");
     const copy = document.createElement("button");
     copy.textContent = "Copy code";
     copy.addEventListener("click", async () => {
@@ -885,6 +1170,10 @@ function renderCourses(courses) {
     });
     actions.appendChild(copy);
     if (["owner", "institution_admin"].includes(course.my_access_level)) {
+      const questions = document.createElement("button");
+      questions.textContent = "Set questions";
+      questions.addEventListener("click", () => updateCourseQuestionCount(course));
+      actions.appendChild(questions);
       const regenerate = document.createElement("button");
       regenerate.textContent = "New code";
       regenerate.addEventListener("click", () => regenerateCourseCode(course));
@@ -892,6 +1181,30 @@ function renderCourses(courses) {
     }
     body.appendChild(row);
   });
+}
+
+async function updateCourseQuestionCount(course) {
+  const entered = prompt(
+    `How many questions should each ${course.course_code} assessment contain? Enter 5 to 20.`,
+    String(course.assessment_question_count || 20)
+  );
+  if (entered == null) return;
+  const count = Number(entered);
+  if (!Number.isInteger(count) || count < 5 || count > 20) {
+    setMessage($("#lecturer-message"), "Enter a whole number from 5 to 20.", "error");
+    return;
+  }
+  try {
+    await api(`/api/lecturer/courses/${course.id}/settings`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ assessment_question_count: count }),
+    });
+    setMessage($("#lecturer-message"), `${course.course_code} will now use ${count} questions per assessment.`, "success");
+    await loadCourses();
+  } catch (error) {
+    handleLecturerError(error);
+  }
 }
 
 async function regenerateCourseCode(course) {
@@ -933,7 +1246,7 @@ function renderSubmissions(rows) {
   const body = $("#submissions-body");
   body.replaceChildren();
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="7" class="empty-state">No submissions found for the selected course.</td></tr>';
+    body.innerHTML = '<tr><td colspan="8" class="empty-state">No submissions found for the selected course.</td></tr>';
     return;
   }
   rows.forEach((item) => {
@@ -946,6 +1259,7 @@ function renderSubmissions(rows) {
       <td>${score}</td>
       <td></td>
       <td class="snapshot-cell"></td>
+      <td class="monitoring-cell"></td>
       <td><div class="action-row"></div></td>`;
     row.children[0].querySelector("strong").textContent = item.student_name;
     row.children[0].querySelector("small").textContent = item.student_id;
@@ -956,7 +1270,8 @@ function renderSubmissions(rows) {
     status.classList.add(item.assessment_status || item.status);
     row.children[4].textContent = item.decision || "—";
     renderSnapshotCell(row.children[5], item);
-    const actions = row.children[6].querySelector(".action-row");
+    renderMonitoringCell(row.children[6], item);
+    const actions = row.children[7].querySelector(".action-row");
     if (item.assessment_id) {
       const review = document.createElement("button");
       review.textContent = "Review";
@@ -981,6 +1296,23 @@ function renderSubmissions(rows) {
     actions.appendChild(remove);
     body.appendChild(row);
   });
+}
+
+function renderMonitoringCell(cell, item) {
+  cell.replaceChildren();
+  if (!item.assessment_id) {
+    cell.textContent = "No attempt";
+    return;
+  }
+  const count = Number(item.monitoring_event_count || 0);
+  const unresolved = Number(item.monitoring_unresolved_count || 0);
+  const critical = Number(item.monitoring_critical_count || 0);
+  const badge = document.createElement("span");
+  badge.className = "monitoring-indicator";
+  badge.textContent = count ? `${count} warning${count === 1 ? "" : "s"}` : "No warnings";
+  if (critical) badge.classList.add("critical");
+  else if (unresolved || count) badge.classList.add("warning");
+  cell.appendChild(badge);
 }
 
 function clearSnapshotObjectUrls() {
@@ -1036,6 +1368,7 @@ async function reviewAssessment(assessmentId) {
       [result.summary.correct_count ?? "—", "correct answers"],
       [result.summary.timed_out_count ?? "—", "timed out"],
       [result.summary.focus_loss_count ?? "—", "focus losses"],
+      [result.summary.monitoring_event_count ?? 0, "webcam warnings"],
     ];
     metrics.forEach(([value, label]) => {
       const block = document.createElement("div");
@@ -1044,6 +1377,26 @@ async function reviewAssessment(assessmentId) {
       block.querySelector("span").textContent = label;
       summary.appendChild(block);
     });
+    const monitoringPanel = $("#review-monitoring");
+    const monitoringList = $("#review-monitoring-events");
+    monitoringList.replaceChildren();
+    const monitoringEvents = result.monitoring_events || [];
+    monitoringPanel.classList.toggle("hidden", monitoringEvents.length === 0);
+    monitoringEvents.forEach((event) => {
+      const card = document.createElement("article");
+      card.className = "monitoring-event";
+      const duration = `${(Number(event.duration_ms || 0) / 1000).toFixed(1)}s`;
+      const question = event.question_position ? `Question ${event.question_position}` : "Assessment";
+      const label = (event.message || event.event_type.replaceAll("_", " ")).replace(/\.$/, "");
+      card.innerHTML = `<div><strong></strong><small></small></div><span class="event-status"></span>`;
+      card.querySelector("strong").textContent = label;
+      card.querySelector("small").textContent = `${question} · ${duration} · ${event.created_at ? new Date(event.created_at).toLocaleString() : "Time unavailable"}`;
+      const status = card.querySelector(".event-status");
+      status.textContent = event.corrected ? "Corrected" : "Needs review";
+      if (event.corrected) status.classList.add("corrected");
+      monitoringList.appendChild(card);
+    });
+
     const questions = $("#review-questions");
     questions.replaceChildren();
     result.questions.forEach((item) => {
@@ -1336,6 +1689,7 @@ if (state.assessmentId && state.token) {
   state.testActive = true;
   showPanel("test", 3);
   startCamera()
+    .then(startSuspiciousMonitoring)
     .then(loadQuestion)
     .catch((error) => {
       state.testActive = false;

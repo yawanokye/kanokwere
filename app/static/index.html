@@ -29,11 +29,11 @@
         <div class="hero-copy">
           <span class="eyebrow">Document ownership assessment</span>
           <h1>Prove ownership of work submitted under your name through knowledge assessment</h1>
-          <p>Upload a document, answer 20 document-specific questions, and receive an ownership confidence score. The standard threshold is 70%.</p>
+          <p>Upload a document, answer the lecturer-selected number of document-specific questions, and receive an ownership confidence score. The standard threshold is 80%.</p>
           <div class="hero-stats" aria-label="Assessment summary">
-            <div><strong>20</strong><span>questions</span></div>
+            <div><strong>5–20</strong><span>lecturer-selected questions</span></div>
             <div><strong>30s</strong><span>per question</span></div>
-            <div><strong>70%</strong><span>threshold</span></div>
+            <div><strong>80%</strong><span>standard threshold</span></div>
           </div>
         </div>
         <aside class="principle-card">
@@ -126,19 +126,19 @@
               <span class="eyebrow">Ready</span>
               <h2 id="ready-heading">Assessment instructions</h2>
             </div>
-            <span class="threshold-badge">Pass threshold: 70%</span>
+            <span class="threshold-badge">Pass threshold: 80%</span>
           </div>
           <div class="instruction-grid">
             <article><strong>One question at a time</strong><p>You cannot return to a previous question after answering or timing out.</p></article>
             <article><strong>30 seconds</strong><p>Every question has the same 30-second response period.</p></article>
-            <article><strong>20 questions</strong><p>At least 16 correct answers are required to meet the 70% threshold.</p></article>
+            <article><strong id="instruction-question-count">20 questions</strong><p id="instruction-question-requirement">The required score is calculated using the course question setting and the displayed threshold.</p></article>
             <article><strong>Focus monitoring</strong><p>Leaving the test screen is logged for lecturer review but does not automatically change the score.</p></article>
-            <article><strong>Webcam verification</strong><p>The camera stays on during the assessment. No video or audio is recorded. One still image is captured at a random point.</p></article>
-            <article><strong>Photo use</strong><p>The still image is shown only to authorised lecturers with the assessment record.</p></article>
+            <article><strong>Live webcam checks</strong><p>The browser checks face presence, multiple faces, sustained looking away, poor lighting, and camera interruption.</p></article>
+            <article><strong>Privacy</strong><p>No video or audio is recorded. One still image is captured at a random point and warning events are shown only to authorised lecturers.</p></article>
           </div>
           <label class="consent-row">
             <input id="consent-checkbox" type="checkbox">
-            <span>I understand the assessment rules and consent to the webcam remaining active and capturing still images. Video or audio may be recorded.</span>
+            <span>I understand the assessment rules and consent to the webcam remaining active, on-device live checks, and one still-image capture. Video and audio are not recorded.</span>
           </label>
           <div id="mode-warning" class="message warning"></div>
           <div class="form-actions align-right">
@@ -149,7 +149,7 @@
         <section id="panel-test" class="panel test-panel" aria-labelledby="question-heading">
           <div class="test-header">
             <div>
-              <span id="question-progress-text" class="eyebrow">Question 1 of 20</span>
+              <span id="question-progress-text" class="eyebrow">Question 1</span>
               <div class="question-progress"><span id="question-progress-bar"></span></div>
             </div>
             <div class="timer" id="timer" aria-label="Time remaining">
@@ -161,10 +161,15 @@
             <video id="webcam-preview" autoplay muted playsinline aria-label="Live webcam preview"></video>
             <div class="webcam-copy">
               <span class="camera-live"><span class="camera-dot" aria-hidden="true"></span> Camera active</span>
-              <small id="webcam-status">No video or audio is being recorded. One still image will be captured at a random point.</small>
+              <small id="webcam-status">No video or audio is recorded. Live face checks run in this browser and one still image will be captured at a random point.</small>
             </div>
           </div>
+          <div id="monitoring-warning" class="monitoring-warning hidden" role="alert" aria-live="assertive">
+            <strong id="monitoring-warning-title">Webcam warning</strong>
+            <span id="monitoring-warning-text"></span>
+          </div>
           <canvas id="webcam-canvas" hidden></canvas>
+          <canvas id="monitoring-canvas" hidden></canvas>
           <div class="difficulty-row">
             <span id="difficulty-badge" class="difficulty-badge">Understanding</span>
             <span>Choose the best answer.</span>
@@ -185,9 +190,10 @@
               <h2 id="result-heading">Result</h2>
               <p id="result-decision" class="decision-text"></p>
               <div class="result-metrics">
-                <div><strong id="correct-count">0/20</strong><span>correct</span></div>
+                <div><strong id="correct-count">0/0</strong><span>correct</span></div>
                 <div><strong id="timeout-count">0</strong><span>timed out</span></div>
                 <div><strong id="focus-count">0</strong><span>focus losses</span></div>
+                <div><strong id="monitoring-count">0</strong><span>webcam warnings</span></div>
               </div>
               <p id="result-disclaimer" class="muted"></p>
               <button id="new-assessment-button" class="secondary-button" type="button">Assess another document</button>
@@ -291,6 +297,10 @@
                 <label>Course title<input name="title" type="text" maxlength="240" required placeholder="Research Methods"></label>
                 <label>Academic year<input name="academic_year" type="text" maxlength="40" required placeholder="2026/2027"></label>
                 <label>Semester<input name="semester" type="text" maxlength="80" required placeholder="First Semester"></label>
+                <label>Assessment questions
+                  <input name="assessment_question_count" type="number" min="5" max="20" value="20" required>
+                  <small>Select between 5 and 20 questions. A new random subset is used for each attempt.</small>
+                </label>
                 <button class="primary-button" type="submit">Create course</button>
               </form>
             </section>
@@ -313,8 +323,8 @@
             </div>
             <div class="table-scroll">
               <table>
-                <thead><tr><th>Course</th><th>Period</th><th>Enrolment code</th><th>Lecturers</th><th>Submissions</th><th>Actions</th></tr></thead>
-                <tbody id="courses-body"><tr><td colspan="6" class="empty-state">No courses loaded.</td></tr></tbody>
+                <thead><tr><th>Course</th><th>Period</th><th>Enrolment code</th><th>Questions</th><th>Lecturers</th><th>Submissions</th><th>Actions</th></tr></thead>
+                <tbody id="courses-body"><tr><td colspan="7" class="empty-state">No courses loaded.</td></tr></tbody>
               </table>
             </div>
           </section>
@@ -329,8 +339,8 @@
             </div>
             <div class="table-scroll">
               <table>
-                <thead><tr><th>Student</th><th>Course and document</th><th>Status</th><th>Score</th><th>Decision</th><th>Photo</th><th>Actions</th></tr></thead>
-                <tbody id="submissions-body"><tr><td colspan="7" class="empty-state">Sign in to load submissions.</td></tr></tbody>
+                <thead><tr><th>Student</th><th>Course and document</th><th>Status</th><th>Score</th><th>Decision</th><th>Photo</th><th>Monitoring</th><th>Actions</th></tr></thead>
+                <tbody id="submissions-body"><tr><td colspan="8" class="empty-state">Sign in to load submissions.</td></tr></tbody>
               </table>
             </div>
           </section>
@@ -341,6 +351,10 @@
               <button id="close-review" class="secondary-button" type="button">Close</button>
             </div>
             <div id="review-summary" class="review-summary"></div>
+            <div id="review-monitoring" class="review-monitoring hidden">
+              <div class="table-heading"><h3>Webcam monitoring events</h3></div>
+              <div id="review-monitoring-events" class="monitoring-event-list"></div>
+            </div>
             <div id="review-questions" class="review-questions"></div>
           </section>
         </div>
@@ -426,6 +440,7 @@
     <span>Ownership confidence supports academic judgement. It does not replace due process.</span>
   </footer>
 
-  <script src="/static/app.js?v=20260628-trial1" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/face_detection.js" crossorigin="anonymous"></script>
+  <script src="/static/app.js?v=20260629-monitoring1" defer></script>
 </body>
 </html>
