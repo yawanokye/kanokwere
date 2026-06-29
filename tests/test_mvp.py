@@ -97,6 +97,7 @@ def test_admin_created_lecturer_activation_course_and_complete_assessment():
                 "title": "Research Methods",
                 "academic_year": "2026/2027",
                 "semester": "First Semester",
+                "assessment_question_count": 10,
             },
         )
         assert course.status_code == 201, course.text
@@ -119,11 +120,13 @@ def test_admin_created_lecturer_activation_course_and_complete_assessment():
         assert status.status_code == 200
         assert status.json()["status"] == "ready"
         assert status.json()["question_count"] == 20
+        assert status.json()["assessment_question_count"] == 10
         assert status.json()["generation_mode"] == "demo"
 
         started = client.post("/api/assessments/start", json={"document_id": document_id})
         assert started.status_code == 200, started.text
         assert started.json()["webcam_required"] is True
+        assert started.json()["question_count"] == 10
         assessment_id = started.json()["assessment_id"]
         token = started.json()["session_token"]
         student_headers = {"Authorization": f"Bearer {token}"}
@@ -133,7 +136,36 @@ def test_admin_created_lecturer_activation_course_and_complete_assessment():
             "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABBQJ//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAwEBPwF//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAgEBPwF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQAGPwJ//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPyF//9oADAMBAAIAAwAAABAf/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAwEBPxB//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAgEBPxB//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxB//9k="
         )
 
-        for position in range(1, 21):
+        warning = client.post(
+            f"/api/assessments/{assessment_id}/monitoring-event",
+            headers=student_headers,
+            json={
+                "event_type": "no_face",
+                "duration_ms": 4200,
+                "question_position": 1,
+                "severity": "warning",
+                "corrected": False,
+                "message": "Please position your face clearly inside the camera frame.",
+            },
+        )
+        assert warning.status_code == 200, warning.text
+        assert warning.json()["monitoring_event_count"] == 1
+
+        corrected = client.post(
+            f"/api/assessments/{assessment_id}/monitoring-event",
+            headers=student_headers,
+            json={
+                "event_type": "no_face",
+                "duration_ms": 5200,
+                "question_position": 1,
+                "severity": "warning",
+                "corrected": True,
+                "message": "Please position your face clearly inside the camera frame.",
+            },
+        )
+        assert corrected.status_code == 200, corrected.text
+
+        for position in range(1, 11):
             question = client.get(
                 f"/api/assessments/{assessment_id}/question", headers=student_headers
             )
@@ -173,11 +205,14 @@ def test_admin_created_lecturer_activation_course_and_complete_assessment():
         )
         assert result.status_code == 200, result.text
         assert result.json()["score"] == 100.0
+        assert result.json()["question_count"] == 10
+        assert result.json()["monitoring_event_count"] == 1
         assert snapshot_sent is True
 
         lecturer_submissions = client.get("/api/lecturer/submissions")
         assert lecturer_submissions.status_code == 200, lecturer_submissions.text
         assert lecturer_submissions.json()["submissions"][0]["snapshot_available"] is True
+        assert lecturer_submissions.json()["submissions"][0]["monitoring_event_count"] == 1
 
         report = client.get(f"/api/lecturer/assessments/{assessment_id}/report.pdf")
         assert report.status_code == 200, report.text
