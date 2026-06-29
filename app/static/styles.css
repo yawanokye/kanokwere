@@ -257,6 +257,8 @@ footer strong { color: var(--brand-dark); }
 .camera-dot { width: 9px; height: 9px; border-radius: 50%; background: #d92d20; box-shadow: 0 0 0 5px rgba(217,45,32,.10); }
 .webcam-monitor.interrupted { border-color: #f0b8b4; background: var(--danger-soft); }
 .webcam-monitor.interrupted .camera-live { color: var(--danger); }
+.webcam-monitor.limited { border-color: #ead39a; background: #fff9e9; }
+.webcam-monitor.limited .camera-live { color: #7b5a15; }
 .webcam-monitor.captured .camera-dot { background: var(--brand); box-shadow: 0 0 0 5px rgba(20,108,67,.10); }
 
 .snapshot-cell { min-width: 112px; }

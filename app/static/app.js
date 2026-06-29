@@ -27,6 +27,9 @@ const state = {
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
+const FACE_DETECTION_ASSET_BASE = "/static/vendor/mediapipe-face-detection";
+const FACE_DETECTION_MAX_FAILURES = 3;
+
 function setMessage(element, text = "", type = "") {
   element.textContent = text;
   element.className = "message";
@@ -78,6 +81,7 @@ function setWebcamStatus(message, mode = "active") {
   if (!monitor) return;
   monitor.classList.toggle("interrupted", mode === "interrupted");
   monitor.classList.toggle("captured", mode === "captured");
+  monitor.classList.toggle("limited", mode === "limited");
 }
 
 
@@ -273,22 +277,27 @@ async function startSuspiciousMonitoring() {
   if (typeof window.FaceDetection !== "function") {
     state.monitoringSupported = false;
     setWebcamStatus(
-      "Camera active. Automated face checks could not load, but camera interruption and tab switching are still monitored.",
-      "interrupted"
+      "Camera active. Face checks could not start. Camera interruption and tab switching are still monitored.",
+      "limited"
     );
+    console.error("MediaPipe FaceDetection did not load from the local static assets.");
     return;
   }
 
   state.monitoringSupported = true;
+  let detectionFailures = 0;
   const detector = new window.FaceDetection({
-    locateFile: (file) =>
-      `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}`,
+    locateFile: (file) => `${FACE_DETECTION_ASSET_BASE}/${file}`,
   });
   detector.setOptions({
     model: "short",
+    selfieMode: true,
     minDetectionConfidence: 0.55,
   });
-  detector.onResults(handleFaceDetectionResults);
+  detector.onResults((results) => {
+    detectionFailures = 0;
+    handleFaceDetectionResults(results);
+  });
   state.faceDetector = detector;
 
   state.monitoringTimer = window.setInterval(async () => {
@@ -297,6 +306,7 @@ async function startSuspiciousMonitoring() {
       state.monitoringBusy ||
       document.visibilityState === "hidden"
     ) return;
+
     const video = $("#webcam-preview");
     const track = state.cameraStream?.getVideoTracks?.()[0];
     if (!video || !track || track.readyState !== "live" || !video.videoWidth) {
@@ -309,12 +319,18 @@ async function startSuspiciousMonitoring() {
     state.monitoringBusy = true;
     try {
       await detector.send({ image: video });
-    } catch (_) {
-      state.monitoringSupported = false;
-      setWebcamStatus(
-        "Camera active. Automated face checks are temporarily unavailable.",
-        "interrupted"
-      );
+    } catch (error) {
+      detectionFailures += 1;
+      console.error("Local MediaPipe face detection failed:", error);
+      if (detectionFailures >= FACE_DETECTION_MAX_FAILURES) {
+        state.monitoringSupported = false;
+        clearInterval(state.monitoringTimer);
+        state.monitoringTimer = null;
+        setWebcamStatus(
+          "Camera active. Face checks are unavailable in this browser. Camera interruption and tab switching remain monitored.",
+          "limited"
+        );
+      }
     } finally {
       state.monitoringBusy = false;
     }
