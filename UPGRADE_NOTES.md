@@ -44,3 +44,14 @@ The new Alembic revision is `20260626_03`. The legacy `staff_id` database column
 This revision repairs deployments where Alembic was marked as current but the
 `users` table was still missing one or more account activation fields. Render's
 prestart step now verifies the complete user schema before Uvicorn starts.
+
+
+## 2026-06-29: webcam warnings and course question counts
+
+The deployment adds `courses.assessment_question_count`, `assessments.question_count`, and the `monitoring_events` table. The existing Render start command runs the migration automatically:
+
+```bash
+python prestart.py && uvicorn main:app --host 0.0.0.0 --port $PORT
+```
+
+No new Render environment variable is required. The Content Security Policy now permits the jsDelivr MediaPipe runtime used for browser-side face detection.

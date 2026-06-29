@@ -163,3 +163,15 @@ Lecturers do not create their own accounts. Open the **Admin** tab, enter the pl
 Kanokware displays a one-time setup code. Give the lecturer the login email and setup code directly. The lecturer opens the **Lecturer** tab, activates the account, creates a private password, and creates a six-digit recovery PIN. The administrator never creates or sees the lecturer's password or recovery PIN.
 
 A lecturer who forgets a password can reset it automatically with the login email and recovery PIN. Administrator approval and email delivery are not required. If the recovery PIN is also forgotten, the administrator can issue a new one-time setup code. The administrator can also suspend, reactivate, or delete an account. Course ownership is transferred safely before deletion.
+
+
+## Live webcam warnings and configurable assessment length
+
+- Lecturers choose between 5 and 20 assessment questions when creating a course.
+- Course owners and institution administrators can change the number later from **My courses → Set questions**.
+- Kanokware still generates a validated 20-question bank and randomly selects the course-defined number for each attempt.
+- The browser analyses approximately one webcam frame per second for face presence, multiple faces, sustained off-centre or turned-away position, low lighting, and camera interruption.
+- Video and audio are not recorded. Only one existing random still image is retained.
+- Warning events are stored with the question number, duration, severity, and whether the condition was corrected.
+- Monitoring warnings never automatically fail a student. They are lecturer review indicators only.
+- The browser loads MediaPipe Face Detection from jsDelivr. If it cannot load, camera continuity and tab-switch monitoring still remain active.
