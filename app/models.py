@@ -126,6 +126,7 @@ class Course(Base):
     semester: Mapped[str] = mapped_column(String(80), nullable=False)
     enrollment_code: Mapped[str] = mapped_column(String(24), nullable=False, unique=True, index=True)
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="active")
+    assessment_question_count: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
     created_by: Mapped[str] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
     )
@@ -237,6 +238,7 @@ class Assessment(Base):
     score: Mapped[float | None] = mapped_column(Float, nullable=True)
     decision: Mapped[str | None] = mapped_column(String(80), nullable=True)
     focus_loss_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    question_count: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
 
     document: Mapped[Document] = relationship(back_populates="assessments")
     items: Mapped[list["AssessmentItem"]] = relationship(
@@ -246,6 +248,11 @@ class Assessment(Base):
     )
     webcam_snapshot: Mapped["WebcamSnapshot | None"] = relationship(
         back_populates="assessment", cascade="all, delete-orphan", uselist=False
+    )
+    monitoring_events: Mapped[list["MonitoringEvent"]] = relationship(
+        back_populates="assessment",
+        cascade="all, delete-orphan",
+        order_by="MonitoringEvent.created_at",
     )
 
 
@@ -291,6 +298,25 @@ class WebcamSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     assessment: Mapped[Assessment] = relationship(back_populates="webcam_snapshot")
+
+
+class MonitoringEvent(Base):
+    __tablename__ = "monitoring_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    assessment_id: Mapped[str] = mapped_column(
+        ForeignKey("assessments.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    severity: Mapped[str] = mapped_column(String(20), nullable=False, default="warning")
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    question_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    message: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    corrected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    assessment: Mapped[Assessment] = relationship(back_populates="monitoring_events")
 
 
 class AuditLog(Base):

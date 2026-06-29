@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 from datetime import datetime, timedelta, timezone
 
@@ -9,8 +10,15 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from .config import settings
-from .models import Assessment, AssessmentItem, Document, Question, WebcamSnapshot
+from .models import Assessment, AssessmentItem, Course, Document, Question, WebcamSnapshot
 from .security import make_session_token, verify_token
+
+
+DIFFICULTY_WEIGHTS = {
+    "recall": 0.30,
+    "understanding": 0.40,
+    "application": 0.30,
+}
 
 
 def utcnow() -> datetime:
@@ -33,13 +41,72 @@ def _authorise(assessment: Assessment, token: str) -> None:
         raise HTTPException(status_code=401, detail="This assessment session has expired.")
 
 
+def _question_total(assessment: Assessment) -> int:
+    if assessment.question_count:
+        return int(assessment.question_count)
+    return len(assessment.items)
+
+
+def _difficulty_targets(total: int) -> dict[str, int]:
+    raw = {name: total * weight for name, weight in DIFFICULTY_WEIGHTS.items()}
+    targets = {name: math.floor(value) for name, value in raw.items()}
+    remaining = total - sum(targets.values())
+    ranked = sorted(
+        raw,
+        key=lambda name: (raw[name] - targets[name], DIFFICULTY_WEIGHTS[name]),
+        reverse=True,
+    )
+    for name in ranked[:remaining]:
+        targets[name] += 1
+    return targets
+
+
+def _select_questions(questions: list[Question], total: int) -> list[Question]:
+    rng = random.SystemRandom()
+    grouped: dict[str, list[Question]] = {
+        "recall": [],
+        "understanding": [],
+        "application": [],
+    }
+    for question in questions:
+        grouped.setdefault(question.difficulty, []).append(question)
+    for values in grouped.values():
+        rng.shuffle(values)
+
+    selected: list[Question] = []
+    targets = _difficulty_targets(total)
+    for difficulty in ("recall", "understanding", "application"):
+        take = min(targets[difficulty], len(grouped.get(difficulty, [])))
+        selected.extend(grouped.get(difficulty, [])[:take])
+        grouped[difficulty] = grouped.get(difficulty, [])[take:]
+
+    if len(selected) < total:
+        remainder = [
+            question
+            for difficulty in ("recall", "understanding", "application")
+            for question in grouped.get(difficulty, [])
+        ]
+        rng.shuffle(remainder)
+        selected.extend(remainder[: total - len(selected)])
+
+    if len(selected) < total:
+        raise HTTPException(
+            status_code=409,
+            detail="The document does not contain enough validated questions for this course setting.",
+        )
+    rng.shuffle(selected)
+    return selected
+
+
 def start_assessment(db: Session, document_id: str) -> tuple[Assessment, str]:
     document = db.scalar(
-        select(Document).options(selectinload(Document.questions)).where(Document.id == document_id)
+        select(Document)
+        .options(selectinload(Document.questions))
+        .where(Document.id == document_id)
     )
     if not document:
         raise HTTPException(status_code=404, detail="Document not found.")
-    if document.status != "ready" or len(document.questions) != 20:
+    if document.status != "ready" or len(document.questions) < 20:
         raise HTTPException(status_code=409, detail="The document is not ready for assessment.")
 
     attempt_count = db.scalar(
@@ -54,28 +121,36 @@ def start_assessment(db: Session, document_id: str) -> tuple[Assessment, str]:
             ),
         )
 
+    course = db.get(Course, document.course_id) if document.course_id else None
+    requested_count = int(getattr(course, "assessment_question_count", 20) or 20)
+    question_count = max(5, min(20, requested_count, len(document.questions)))
+
     token, token_hash = make_session_token()
     assessment = Assessment(
         document_id=document.id,
         course_id=document.course_id,
         lecturer_id=document.submitted_to_lecturer_id,
         token_hash=token_hash,
+        question_count=question_count,
     )
     db.add(assessment)
     db.flush()
 
-    questions = list(document.questions)
+    questions = _select_questions(list(document.questions), question_count)
     for question in questions:
         question.time_limit_seconds = settings.question_time_seconds
     db.flush()
-    random.SystemRandom().shuffle(questions)
+
+    rng = random.SystemRandom()
     for position, question in enumerate(questions, start=1):
         options = json.loads(question.options_json)
         indexed = list(enumerate(options))
-        random.SystemRandom().shuffle(indexed)
+        rng.shuffle(indexed)
         shuffled_options = [value for _, value in indexed]
         correct_shuffled_index = next(
-            index for index, (original_index, _) in enumerate(indexed) if original_index == question.correct_index
+            index
+            for index, (original_index, _) in enumerate(indexed)
+            if original_index == question.correct_index
         )
         db.add(
             AssessmentItem(
@@ -87,13 +162,13 @@ def start_assessment(db: Session, document_id: str) -> tuple[Assessment, str]:
             )
         )
 
-    # The exact trigger is kept server-side until the selected question is shown.
-    # A completion fallback is used if the browser misses the random trigger.
+    earliest_capture = 2 if question_count >= 4 else 1
+    latest_capture = max(earliest_capture, question_count - 1)
     db.add(
         WebcamSnapshot(
             assessment_id=assessment.id,
-            scheduled_position=random.SystemRandom().randint(3, 18),
-            scheduled_offset_ms=random.SystemRandom().randint(1500, 6500),
+            scheduled_position=rng.randint(earliest_capture, latest_capture),
+            scheduled_offset_ms=rng.randint(1500, 6500),
             status="pending",
         )
     )
@@ -105,7 +180,12 @@ def start_assessment(db: Session, document_id: str) -> tuple[Assessment, str]:
 def get_assessment(db: Session, assessment_id: str, token: str) -> Assessment:
     assessment = db.scalar(
         select(Assessment)
-        .options(selectinload(Assessment.document), selectinload(Assessment.webcam_snapshot), selectinload(Assessment.items).selectinload(AssessmentItem.question))
+        .options(
+            selectinload(Assessment.document),
+            selectinload(Assessment.webcam_snapshot),
+            selectinload(Assessment.monitoring_events),
+            selectinload(Assessment.items).selectinload(AssessmentItem.question),
+        )
         .where(Assessment.id == assessment_id)
     )
     if not assessment:
@@ -134,8 +214,9 @@ def _mark_timeout(item: AssessmentItem) -> None:
 
 
 def _complete(db: Session, assessment: Assessment) -> None:
+    total = _question_total(assessment)
     correct = sum(1 for item in assessment.items if item.is_correct is True)
-    score = round((correct / 20) * 100, 1)
+    score = round((correct / total) * 100, 1) if total else 0.0
     assessment.correct_count = correct
     assessment.score = score
     assessment.status = "completed"
@@ -152,7 +233,8 @@ def current_question(db: Session, assessment: Assessment) -> dict[str, object]:
     if assessment.status == "completed":
         return {"status": "completed"}
 
-    while assessment.current_position <= 20:
+    total = _question_total(assessment)
+    while assessment.current_position <= total:
         item = _get_item(assessment, assessment.current_position)
         if not item:
             raise HTTPException(status_code=500, detail="Assessment question sequence is incomplete.")
@@ -185,7 +267,7 @@ def current_question(db: Session, assessment: Assessment) -> dict[str, object]:
         return {
             "status": "in_progress",
             "position": item.position,
-            "total": 20,
+            "total": total,
             "stem": item.question.stem,
             "options": json.loads(item.shuffled_options_json),
             "difficulty": item.question.difficulty,
@@ -225,7 +307,8 @@ def submit_answer(
     assessment.current_position += 1
     db.commit()
 
-    if assessment.current_position > 20:
+    total = _question_total(assessment)
+    if assessment.current_position > total:
         _complete(db, assessment)
         return {"status": "completed"}
     return {"status": "accepted", "next_position": assessment.current_position}
@@ -236,22 +319,29 @@ def result_payload(assessment: Assessment) -> dict[str, object]:
         raise HTTPException(status_code=409, detail="The assessment is not complete.")
     timed_out = sum(1 for item in assessment.items if item.timed_out)
     answered = sum(1 for item in assessment.items if item.answered_at and not item.timed_out)
+    events = list(getattr(assessment, "monitoring_events", []) or [])
+    unresolved = sum(1 for event in events if not event.corrected)
+    critical = sum(1 for event in events if event.severity == "critical")
     return {
         "assessment_id": assessment.id,
         "student_name": assessment.document.student_name,
         "student_id": assessment.document.student_id,
         "document_title": assessment.document.title,
         "correct_count": assessment.correct_count,
-        "question_count": 20,
+        "question_count": _question_total(assessment),
         "answered_count": answered,
         "timed_out_count": timed_out,
         "score": assessment.score,
         "threshold": settings.pass_threshold,
         "decision": assessment.decision,
         "focus_loss_count": assessment.focus_loss_count,
+        "monitoring_event_count": len(events),
+        "monitoring_unresolved_count": unresolved,
+        "monitoring_critical_count": critical,
         "completed_at": assessment.completed_at.isoformat() if assessment.completed_at else None,
         "disclaimer": (
             "This score measures demonstrated knowledge of the submitted document. "
-            "It is not conclusive proof of authorship or academic misconduct."
+            "Webcam warnings are review indicators only. They are not conclusive proof "
+            "of authorship, cheating, or academic misconduct."
         ),
     }

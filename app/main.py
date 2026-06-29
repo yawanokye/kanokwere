@@ -54,6 +54,7 @@ from .models import (
     CourseLecturer,
     Document,
     Institution,
+    MonitoringEvent,
     PasswordResetRequest,
     Question,
     User,
@@ -70,7 +71,9 @@ from .schemas import (
     ChangePasswordRequest,
     CourseCollaboratorRequest,
     CourseCreateRequest,
+    CourseSettingsRequest,
     FocusEventRequest,
+    MonitoringEventRequest,
     LecturerRegisterRequest,
     LoginRequest,
     SelfServicePasswordResetRequest,
@@ -123,7 +126,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="Kanokware", version="0.6.0", lifespan=lifespan)
+app = FastAPI(title="Kanokware", version="0.7.0", lifespan=lifespan)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -137,8 +140,11 @@ async def security_headers(request: Request, call_next):
     response.headers["Permissions-Policy"] = "camera=(self), microphone=(), geolocation=()"
     response.headers["Cache-Control"] = "no-store" if request.url.path.startswith("/api/") else "no-cache"
     response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; "
-        "img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'"
+        "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "script-src 'self' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; "
+        "img-src 'self' data: blob:; media-src 'self' blob:; "
+        "connect-src 'self' https://cdn.jsdelivr.net; worker-src 'self' blob:; "
+        "frame-ancestors 'none'"
     )
     return response
 
@@ -696,6 +702,7 @@ def _course_payload(db: Session, course: Course, current_user: User | None = Non
         "semester": course.semester,
         "enrollment_code": course.enrollment_code,
         "status": course.status,
+        "assessment_question_count": int(course.assessment_question_count or 20),
         "submission_count": int(submission_count),
         "my_access_level": my_access_level,
         "lecturers": [
@@ -730,6 +737,7 @@ def create_course(
         academic_year=payload.academic_year.strip(),
         semester=payload.semester.strip(),
         enrollment_code=generate_enrollment_code(db),
+        assessment_question_count=payload.assessment_question_count,
         created_by=user.id,
         status="active",
     )
@@ -786,6 +794,30 @@ def add_course_collaborator(
     )
     db.commit()
     return {"added": True, "course": _course_payload(db, course, user)}
+
+
+@app.patch("/api/lecturer/courses/{course_id}/settings")
+def update_course_settings(
+    course_id: str,
+    payload: CourseSettingsRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    course = require_course_access(db, user, course_id, owner_only=True)
+    course.assessment_question_count = payload.assessment_question_count
+    audit(
+        db,
+        request,
+        "course_assessment_settings_updated",
+        user=user,
+        resource_type="course",
+        resource_id=course.id,
+        detail={"assessment_question_count": payload.assessment_question_count},
+    )
+    db.commit()
+    db.refresh(course)
+    return {"course": _course_payload(db, course, user)}
 
 
 @app.post("/api/lecturer/courses/{course_id}/regenerate-code")
@@ -896,6 +928,7 @@ async def upload_document(
         "status": document.status,
         "word_count": document.word_count,
         "course": f"{course.course_code} · {course.title}",
+        "assessment_question_count": int(course.assessment_question_count or 20),
         "message": "The document was accepted and question generation has started.",
     }
 
@@ -918,10 +951,14 @@ def document_status(document_id: str, db: Session = Depends(get_db)) -> dict[str
     question_count = db.scalar(
         select(func.count()).select_from(Question).where(Question.document_id == document.id)
     )
+    course = db.get(Course, document.course_id) if document.course_id else None
+    assessment_question_count = int(course.assessment_question_count or 20) if course else 20
     return {
         "document_id": document.id,
         "status": document.status,
         "question_count": int(question_count or 0),
+        "assessment_question_count": assessment_question_count,
+        "pass_threshold": settings.pass_threshold,
         "generation_mode": document.generation_mode,
         "error": document.processing_error,
         "elapsed_seconds": elapsed_seconds,
@@ -956,13 +993,15 @@ def begin_assessment(payload: StartAssessmentRequest, db: Session = Depends(get_
     return {
         "assessment_id": assessment.id,
         "session_token": token,
-        "question_count": 20,
+        "question_count": int(assessment.question_count or len(assessment.items) or 20),
         "pass_threshold": settings.pass_threshold,
         "webcam_required": settings.webcam_required,
+        "monitoring_enabled": settings.webcam_required,
         "instructions": (
             f"Questions appear one at a time. Each question allows {settings.question_time_seconds} seconds. "
             "You cannot return to an earlier question. The webcam remains active during the assessment. "
-            "No video or audio is recorded, and one still image is captured at a random point."
+            "No video or audio is recorded. Live face-presence checks run in the browser, one still image "
+            "is captured at a random point, and warning events are available to the assigned lecturer."
         ),
     }
 
@@ -1030,8 +1069,112 @@ def focus_event(
     assessment = get_assessment(db, assessment_id, bearer_token(authorization))
     if assessment.status == "in_progress":
         assessment.focus_loss_count += 1
+        db.add(
+            MonitoringEvent(
+                assessment_id=assessment.id,
+                event_type="tab_hidden",
+                severity="warning",
+                duration_ms=0,
+                question_position=assessment.current_position,
+                message="The assessment tab or window lost focus.",
+                corrected=True,
+                resolved_at=utcnow(),
+            )
+        )
         db.commit()
     return {"recorded": True, "count": assessment.focus_loss_count}
+
+
+@app.post("/api/assessments/{assessment_id}/monitoring-event")
+def assessment_monitoring_event(
+    assessment_id: str,
+    payload: MonitoringEventRequest,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    assessment = get_assessment(db, assessment_id, bearer_token(authorization))
+    if assessment.status != "in_progress":
+        return {
+            "recorded": False,
+            "reason": "assessment_complete",
+            "monitoring_event_count": len(assessment.monitoring_events),
+        }
+
+    if payload.corrected:
+        event = db.scalar(
+            select(MonitoringEvent)
+            .where(
+                MonitoringEvent.assessment_id == assessment.id,
+                MonitoringEvent.event_type == payload.event_type,
+                MonitoringEvent.corrected.is_(False),
+            )
+            .order_by(MonitoringEvent.created_at.desc())
+            .limit(1)
+        )
+        if event:
+            event.corrected = True
+            event.resolved_at = utcnow()
+            if payload.duration_ms:
+                event.duration_ms = max(event.duration_ms, payload.duration_ms)
+            db.commit()
+        count = db.scalar(
+            select(func.count(MonitoringEvent.id)).where(
+                MonitoringEvent.assessment_id == assessment.id
+            )
+        ) or 0
+        return {"recorded": bool(event), "corrected": True, "monitoring_event_count": int(count)}
+
+    # Avoid writing repeated rows for the same ongoing condition.
+    existing = db.scalar(
+        select(MonitoringEvent)
+        .where(
+            MonitoringEvent.assessment_id == assessment.id,
+            MonitoringEvent.event_type == payload.event_type,
+            MonitoringEvent.corrected.is_(False),
+        )
+        .order_by(MonitoringEvent.created_at.desc())
+        .limit(1)
+    )
+    if existing:
+        existing.duration_ms = max(existing.duration_ms, payload.duration_ms)
+        existing.question_position = payload.question_position or existing.question_position
+        existing.severity = "critical" if "critical" in {existing.severity, payload.severity} else "warning"
+        existing.message = payload.message or existing.message
+        db.commit()
+        count = db.scalar(
+            select(func.count(MonitoringEvent.id)).where(
+                MonitoringEvent.assessment_id == assessment.id
+            )
+        ) or 0
+        return {
+            "recorded": True,
+            "event_id": existing.id,
+            "monitoring_event_count": int(count),
+            "updated": True,
+        }
+
+    event = MonitoringEvent(
+        assessment_id=assessment.id,
+        event_type=payload.event_type,
+        severity=payload.severity,
+        duration_ms=payload.duration_ms,
+        question_position=payload.question_position or assessment.current_position,
+        message=payload.message,
+        corrected=False,
+    )
+    db.add(event)
+    db.commit()
+    count = db.scalar(
+        select(func.count(MonitoringEvent.id)).where(
+            MonitoringEvent.assessment_id == assessment.id
+        )
+    ) or 0
+    return {
+        "recorded": True,
+        "event_id": event.id,
+        "monitoring_event_count": int(count),
+        "updated": False,
+    }
 
 
 @app.get("/api/assessments/{assessment_id}/result")
@@ -1049,12 +1192,29 @@ def assessment_result(
 # ---------------------------------------------------------------------------
 
 
+def _monitoring_event_payload(event: MonitoringEvent) -> dict[str, object]:
+    return {
+        "id": event.id,
+        "event_type": event.event_type,
+        "severity": event.severity,
+        "duration_ms": event.duration_ms,
+        "question_position": event.question_position,
+        "message": event.message,
+        "corrected": event.corrected,
+        "created_at": event.created_at.isoformat() if event.created_at else None,
+        "resolved_at": event.resolved_at.isoformat() if event.resolved_at else None,
+    }
+
+
 def _submission_rows(db: Session, documents: list[Document]) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for document in documents:
         latest = db.scalar(
             select(Assessment)
-            .options(selectinload(Assessment.webcam_snapshot))
+            .options(
+                selectinload(Assessment.webcam_snapshot),
+                selectinload(Assessment.monitoring_events),
+            )
             .where(Assessment.document_id == document.id)
             .order_by(Assessment.started_at.desc())
             .limit(1)
@@ -1078,6 +1238,9 @@ def _submission_rows(db: Session, documents: list[Document]) -> list[dict[str, o
             "snapshot_available": bool(latest and latest.webcam_snapshot and latest.webcam_snapshot.image_data),
             "snapshot_status": latest.webcam_snapshot.status if latest and latest.webcam_snapshot else None,
             "snapshot_captured_at": latest.webcam_snapshot.captured_at.isoformat() if latest and latest.webcam_snapshot and latest.webcam_snapshot.captured_at else None,
+            "monitoring_event_count": len(latest.monitoring_events) if latest else 0,
+            "monitoring_unresolved_count": sum(1 for event in latest.monitoring_events if not event.corrected) if latest else 0,
+            "monitoring_critical_count": sum(1 for event in latest.monitoring_events if event.severity == "critical") if latest else 0,
         })
     return rows
 
@@ -1088,6 +1251,7 @@ def _assessment_for_lecturer(db: Session, user: User, assessment_id: str) -> Ass
         .options(
             selectinload(Assessment.document),
             selectinload(Assessment.webcam_snapshot),
+            selectinload(Assessment.monitoring_events),
             selectinload(Assessment.items).selectinload(AssessmentItem.question),
         )
         .where(Assessment.id == assessment_id)
@@ -1128,7 +1292,18 @@ def _assessment_detail(assessment: Assessment) -> dict[str, object]:
     summary["snapshot_available"] = bool(snapshot and snapshot.image_data)
     summary["snapshot_status"] = snapshot.status if snapshot else None
     summary["snapshot_captured_at"] = snapshot.captured_at.isoformat() if snapshot and snapshot.captured_at else None
-    return {"summary": summary, "questions": details}
+    monitoring_events = sorted(
+        list(assessment.monitoring_events or []),
+        key=lambda event: event.created_at,
+    )
+    summary["monitoring_event_count"] = len(monitoring_events)
+    summary["monitoring_unresolved_count"] = sum(1 for event in monitoring_events if not event.corrected)
+    summary["monitoring_critical_count"] = sum(1 for event in monitoring_events if event.severity == "critical")
+    return {
+        "summary": summary,
+        "questions": details,
+        "monitoring_events": [_monitoring_event_payload(event) for event in monitoring_events],
+    }
 
 
 @app.get("/api/lecturer/submissions")
@@ -1244,6 +1419,7 @@ def admin_assessment_detail(assessment_id: str, db: Session = Depends(get_db)) -
         .options(
             selectinload(Assessment.document),
             selectinload(Assessment.webcam_snapshot),
+            selectinload(Assessment.monitoring_events),
             selectinload(Assessment.items).selectinload(AssessmentItem.question),
         )
         .where(Assessment.id == assessment_id)
@@ -1265,7 +1441,7 @@ def admin_assessment_snapshot(assessment_id: str, db: Session = Depends(get_db))
 def admin_pdf_report(assessment_id: str, db: Session = Depends(get_db)) -> Response:
     assessment = db.scalar(
         select(Assessment)
-        .options(selectinload(Assessment.document), selectinload(Assessment.webcam_snapshot), selectinload(Assessment.items).selectinload(AssessmentItem.question))
+        .options(selectinload(Assessment.document), selectinload(Assessment.webcam_snapshot), selectinload(Assessment.monitoring_events), selectinload(Assessment.items).selectinload(AssessmentItem.question))
         .where(Assessment.id == assessment_id)
     )
     if not assessment:

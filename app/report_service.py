@@ -53,10 +53,15 @@ def build_pdf_report(assessment: Assessment) -> bytes:
             else "Legacy or unassigned submission",
         ],
         ["File fingerprint", assessment.document.file_hash],
-        ["Correct answers", f"{assessment.correct_count} of 20"],
+        ["Correct answers", f"{assessment.correct_count} of {assessment.question_count or len(assessment.items)}"],
         ["Score", f"{assessment.score:.1f}%"],
         ["Decision", assessment.decision or "Not available"],
         ["Focus losses recorded", str(assessment.focus_loss_count)],
+        ["Webcam warning events", str(len(assessment.monitoring_events or []))],
+        [
+            "Unresolved warning events",
+            str(sum(1 for event in (assessment.monitoring_events or []) if not event.corrected)),
+        ],
         [
             "Webcam still image",
             "Captured" if assessment.webcam_snapshot and assessment.webcam_snapshot.image_data else "Not captured",
@@ -95,6 +100,38 @@ def build_pdf_report(assessment: Assessment) -> bytes:
             styles["BodyText"],
         )
     )
+    monitoring_events = list(assessment.monitoring_events or [])
+    if monitoring_events:
+        story.extend([Spacer(1, 12), Paragraph("Webcam monitoring events", styles["Heading2"])])
+        monitoring_data = [["Time", "Question", "Event", "Duration", "Status"]]
+        for event in monitoring_events:
+            monitoring_data.append(
+                [
+                    event.created_at.isoformat() if event.created_at else "Not available",
+                    str(event.question_position or "—"),
+                    (event.message or event.event_type.replace("_", " ")).title(),
+                    f"{event.duration_ms / 1000:.1f}s",
+                    "Corrected" if event.corrected else "Needs review",
+                ]
+            )
+        monitoring_table = Table(
+            monitoring_data,
+            colWidths=[39 * mm, 18 * mm, 55 * mm, 22 * mm, 28 * mm],
+            repeatRows=1,
+        )
+        monitoring_table.setStyle(
+            TableStyle(
+                [
+                    ("GRID", (0, 0), (-1, -1), 0.35, colors.grey),
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ]
+            )
+        )
+        story.append(monitoring_table)
+
     story.extend([PageBreak(), Paragraph("Question-level review", styles["Heading1"])])
 
     for item in sorted(assessment.items, key=lambda value: value.position):

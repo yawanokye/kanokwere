@@ -108,6 +108,27 @@ class CourseCreateRequest(BaseModel):
     title: str = Field(min_length=3, max_length=240)
     academic_year: str = Field(min_length=4, max_length=40)
     semester: str = Field(min_length=2, max_length=80)
+    assessment_question_count: int = Field(default=20, ge=5, le=20)
+
+
+class CourseSettingsRequest(BaseModel):
+    assessment_question_count: int = Field(ge=5, le=20)
+
+
+class MonitoringEventRequest(BaseModel):
+    event_type: Literal[
+        "no_face",
+        "multiple_faces",
+        "looking_away",
+        "low_light",
+        "camera_interrupted",
+        "tab_hidden",
+    ]
+    duration_ms: int = Field(default=0, ge=0, le=300000)
+    question_position: int | None = Field(default=None, ge=1, le=50)
+    severity: Literal["warning", "critical"] = "warning"
+    corrected: bool = False
+    message: str | None = Field(default=None, max_length=300)
 
 
 class CourseCollaboratorRequest(BaseModel):

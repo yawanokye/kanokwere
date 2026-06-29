@@ -70,6 +70,43 @@ def _repair_legacy_user_columns() -> None:
             )
 
 
+def _repair_assessment_columns() -> None:
+    """Repair course and assessment settings if an older database was stamped ahead."""
+    with engine.begin() as connection:
+        inspector = sa.inspect(connection)
+        tables = set(inspector.get_table_names())
+        operations = Operations(MigrationContext.configure(connection))
+
+        if "courses" in tables:
+            columns = {item["name"] for item in inspector.get_columns("courses")}
+            if "assessment_question_count" not in columns:
+                print("Prestart: adding missing courses.assessment_question_count", flush=True)
+                operations.add_column(
+                    "courses",
+                    sa.Column(
+                        "assessment_question_count",
+                        sa.Integer(),
+                        nullable=False,
+                        server_default="20",
+                    ),
+                )
+
+        inspector = sa.inspect(connection)
+        if "assessments" in set(inspector.get_table_names()):
+            columns = {item["name"] for item in inspector.get_columns("assessments")}
+            if "question_count" not in columns:
+                print("Prestart: adding missing assessments.question_count", flush=True)
+                operations.add_column(
+                    "assessments",
+                    sa.Column(
+                        "question_count",
+                        sa.Integer(),
+                        nullable=False,
+                        server_default="20",
+                    ),
+                )
+
+
 def _verify_schema() -> None:
     inspector = sa.inspect(engine)
     tables = set(inspector.get_table_names())
@@ -81,7 +118,15 @@ def _verify_schema() -> None:
         raise RuntimeError(
             "Database upgrade incomplete. Missing users columns: " + ", ".join(missing)
         )
-    print("Prestart: user account schema verified.", flush=True)
+    course_columns = {item["name"] for item in inspector.get_columns("courses")}
+    if "assessment_question_count" not in course_columns:
+        raise RuntimeError("Database upgrade incomplete: courses.assessment_question_count is missing.")
+    assessment_columns = {item["name"] for item in inspector.get_columns("assessments")}
+    if "question_count" not in assessment_columns:
+        raise RuntimeError("Database upgrade incomplete: assessments.question_count is missing.")
+    if "monitoring_events" not in tables:
+        raise RuntimeError("Database upgrade incomplete: monitoring_events table is missing.")
+    print("Prestart: user, course, assessment, and monitoring schema verified.", flush=True)
 
 
 def main() -> None:
@@ -90,6 +135,7 @@ def main() -> None:
     # starting the app against an incomplete database.
     Base.metadata.create_all(bind=engine)
     _repair_legacy_user_columns()
+    _repair_assessment_columns()
 
     config = Config(str(BASE_DIR / "alembic.ini"))
     command.upgrade(config, "head")
