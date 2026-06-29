@@ -141,9 +141,9 @@ async def security_headers(request: Request, call_next):
     response.headers["Cache-Control"] = "no-store" if request.url.path.startswith("/api/") else "no-cache"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; style-src 'self' 'unsafe-inline'; "
-        "script-src 'self' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; "
+        "script-src 'self' 'wasm-unsafe-eval'; "
         "img-src 'self' data: blob:; media-src 'self' blob:; "
-        "connect-src 'self' https://cdn.jsdelivr.net; worker-src 'self' blob:; "
+        "connect-src 'self'; worker-src 'self' blob:; "
         "frame-ancestors 'none'"
     )
     return response
