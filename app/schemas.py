@@ -120,6 +120,7 @@ class MonitoringEventRequest(BaseModel):
         "no_face",
         "multiple_faces",
         "looking_away",
+        "excessive_movement",
         "low_light",
         "camera_interrupted",
         "tab_hidden",
