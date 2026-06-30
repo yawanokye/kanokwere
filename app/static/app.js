@@ -22,6 +22,8 @@ const state = {
   monitoringStates: {},
   monitoringEventCount: 0,
   monitoringSupported: true,
+  lastFaceMotionSample: null,
+  faceMotionHistory: [],
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -99,10 +101,16 @@ const MONITORING_RULES = {
     message: "Please ensure that you are the only person visible during the assessment.",
   },
   looking_away: {
-    thresholdMs: 5000,
+    thresholdMs: 2500,
     severity: "warning",
     title: "Please face the screen",
-    message: "Your face appears turned away or outside the central camera area.",
+    message: "Your head appears turned away or your face is outside the central camera area.",
+  },
+  excessive_movement: {
+    thresholdMs: 1500,
+    severity: "warning",
+    title: "Excessive face movement detected",
+    message: "Please keep your face reasonably steady and remain focused on the assessment screen.",
   },
   low_light: {
     thresholdMs: 4000,
@@ -126,6 +134,8 @@ function resetMonitoringStates() {
     ])
   );
   state.monitoringEventCount = 0;
+  state.lastFaceMotionSample = null;
+  state.faceMotionHistory = [];
   hideMonitoringWarning();
 }
 
@@ -220,28 +230,77 @@ function faceBox(detection) {
   return { xCenter, yCenter, width, height };
 }
 
-function faceLooksAway(detection) {
+function facePoseMetrics(detection) {
   const box = faceBox(detection);
-  if (!box) return false;
-  let away =
-    box.xCenter < 0.25 ||
-    box.xCenter > 0.75 ||
-    box.yCenter < 0.20 ||
-    box.yCenter > 0.82 ||
-    box.width < 0.13;
+  if (!box) return null;
 
+  const metrics = {
+    ...box,
+    yawScore: 0,
+    hasLandmarks: false,
+  };
   const landmarks = detection?.landmarks || detection?.locationData?.relativeKeypoints || [];
   if (landmarks.length >= 3) {
     const firstEye = landmarks[0];
     const secondEye = landmarks[1];
     const nose = landmarks[2];
     const eyeDistance = Math.abs(Number(firstEye.x) - Number(secondEye.x));
-    if (eyeDistance > 0.02) {
+    if (eyeDistance > 0.015) {
       const midpoint = (Number(firstEye.x) + Number(secondEye.x)) / 2;
-      away = away || Math.abs(Number(nose.x) - midpoint) / eyeDistance > 0.48;
+      metrics.yawScore = Math.abs(Number(nose.x) - midpoint) / eyeDistance;
+      metrics.hasLandmarks = true;
     }
   }
-  return away;
+  return metrics;
+}
+
+function faceLooksAway(detection) {
+  const metrics = facePoseMetrics(detection);
+  if (!metrics) return false;
+  return (
+    metrics.xCenter < 0.30 ||
+    metrics.xCenter > 0.70 ||
+    metrics.yCenter < 0.22 ||
+    metrics.yCenter > 0.80 ||
+    metrics.width < 0.15 ||
+    (metrics.hasLandmarks && metrics.yawScore > 0.28)
+  );
+}
+
+function faceMovesExcessively(detection) {
+  const metrics = facePoseMetrics(detection);
+  if (!metrics) {
+    state.lastFaceMotionSample = null;
+    state.faceMotionHistory = [];
+    return false;
+  }
+
+  const now = performance.now();
+  const sample = {
+    at: now,
+    x: metrics.xCenter,
+    y: metrics.yCenter,
+    width: Math.max(metrics.width, 0.01),
+  };
+  const previous = state.lastFaceMotionSample;
+  state.lastFaceMotionSample = sample;
+  if (!previous) return false;
+
+  const elapsed = Math.max(250, now - previous.at);
+  const centreShift = Math.hypot(sample.x - previous.x, sample.y - previous.y);
+  const scaleShift = Math.abs(Math.log(sample.width / previous.width));
+  const movementStep = centreShift + scaleShift * 0.30;
+  const speed = movementStep / (elapsed / 1000);
+
+  state.faceMotionHistory.push({ at: now, movementStep, speed });
+  state.faceMotionHistory = state.faceMotionHistory.filter((item) => now - item.at <= 3500);
+
+  const totalMovement = state.faceMotionHistory.reduce((sum, item) => sum + item.movementStep, 0);
+  const rapidSamples = state.faceMotionHistory.filter((item) => item.speed > 0.16).length;
+  return (
+    state.faceMotionHistory.length >= 3 &&
+    (totalMovement > 0.30 || rapidSamples >= 3)
+  );
 }
 
 function averageFrameBrightness(video) {
@@ -268,6 +327,14 @@ function handleFaceDetectionResults(results) {
     "looking_away",
     detections.length === 1 && faceLooksAway(detections[0])
   );
+  updateMonitoringCondition(
+    "excessive_movement",
+    detections.length === 1 && faceMovesExcessively(detections[0])
+  );
+  if (detections.length !== 1) {
+    state.lastFaceMotionSample = null;
+    state.faceMotionHistory = [];
+  }
 }
 
 async function startSuspiciousMonitoring() {
@@ -299,6 +366,9 @@ async function startSuspiciousMonitoring() {
     handleFaceDetectionResults(results);
   });
   state.faceDetector = detector;
+  setWebcamStatus(
+    "Camera active. Live checks are active for face presence, multiple faces, looking away, excessive movement and lighting."
+  );
 
   state.monitoringTimer = window.setInterval(async () => {
     if (
@@ -334,7 +404,7 @@ async function startSuspiciousMonitoring() {
     } finally {
       state.monitoringBusy = false;
     }
-  }, 1000);
+  }, 650);
 }
 
 function stopSuspiciousMonitoring() {
@@ -345,6 +415,8 @@ function stopSuspiciousMonitoring() {
     try { state.faceDetector.close(); } catch (_) {}
   }
   state.faceDetector = null;
+  state.lastFaceMotionSample = null;
+  state.faceMotionHistory = [];
   hideMonitoringWarning();
 }
 
