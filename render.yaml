@@ -56,6 +56,16 @@ services:
         value: "false"
       - key: ACCOUNT_SETUP_CODE_HOURS
         value: "48"
+      - key: HEARTBEAT_INTERVAL_SECONDS
+        value: "5"
+      - key: HEARTBEAT_STALE_SECONDS
+        value: "20"
+      - key: ASSESSMENT_RESUME_WINDOW_MINUTES
+        value: "15"
+      - key: MAX_ASSESSMENT_INTERRUPTION_COUNT
+        value: "2"
+      - key: MAX_ASSESSMENT_OFFLINE_SECONDS
+        value: "300"
 
 databases:
   - name: kanokware-db

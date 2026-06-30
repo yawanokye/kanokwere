@@ -180,3 +180,13 @@ A lecturer who forgets a password can reset it automatically with the login emai
 ### Webcam movement monitoring
 
 The browser-side monitor records warnings for sustained looking away and excessive face movement, alongside no-face, multiple-face, low-light, camera interruption, and tab-switch events. These are review indicators and do not automatically determine misconduct.
+
+## Advanced camera monitoring reliability
+
+The assessment now performs a mandatory camera-monitoring preflight before an attempt starts. The preflight must receive several consecutive single-face detections from a live, adequately lit camera feed. During the assessment, Kanokware combines face presence, multiple-face checks, sustained head position, rapid head movement, lighting, camera obstruction, frozen-feed detection, camera interruption, and browser-focus monitoring. A watchdog detects a stalled face engine, and failed monitoring-event uploads are queued and retried so warnings are not silently lost.
+
+Students receive a concise consent notice that camera monitoring is active and that monitoring evidence may be retained for authorised lecturer review. The interface does not disclose the random verification-image capture time.
+
+## Assessment continuity
+
+Kanokware sends a heartbeat during active assessments. Abrupt browser closure, network loss, sleep, or power loss is detected from missing heartbeats even when the browser cannot report the event. Submitted answers remain stored. The current server-side question timer continues, and secure resume requires the same browser profile plus camera reverification.

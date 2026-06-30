@@ -55,3 +55,42 @@ python prestart.py && uvicorn main:app --host 0.0.0.0 --port $PORT
 ```
 
 No new Render environment variable is required. The Content Security Policy now permits the jsDelivr MediaPipe runtime used for browser-side face detection.
+
+## 2026-06-30 advanced monitoring reliability update
+
+- Added mandatory monitoring preflight before assessment creation.
+- Added local MediaPipe detector health watchdog and native FaceDetector fallback where available.
+- Reduced no-face, multiple-face, looking-away, and excessive-movement thresholds.
+- Added camera-covered and camera-frozen detection.
+- Added monitoring-unavailable and browser-window-blur events.
+- Added queued retries for monitoring events that fail to reach the server.
+- Kept a concise, transparent monitoring consent statement without exposing capture timing.
+- No database migration or new environment variable is required.
+
+## 2026-06-30: Assessment interruption and recovery
+
+This release adds server heartbeats, secure same-browser resume, persistent monitoring-event queues, camera reverification, interruption limits, and lecturer controls.
+
+New Render environment variables:
+
+```env
+HEARTBEAT_INTERVAL_SECONDS=5
+HEARTBEAT_STALE_SECONDS=20
+ASSESSMENT_RESUME_WINDOW_MINUTES=15
+MAX_ASSESSMENT_INTERRUPTION_COUNT=2
+MAX_ASSESSMENT_OFFLINE_SECONDS=300
+```
+
+The migration `20260630_06_assessment_continuity.py` adds the required assessment audit fields. Keep the start command as:
+
+```bash
+python prestart.py && uvicorn main:app --host 0.0.0.0 --port $PORT
+```
+
+Behaviour:
+
+- The server-side question timer continues during a connection interruption.
+- Answers are disabled while offline and are accepted only after server confirmation.
+- The same browser can resume within 15 minutes after camera reverification.
+- More than two interruptions or more than five minutes total offline locks the attempt.
+- Lecturers can allow resume, end and score the attempt, mark the interruption excused, or reset the attempt.
