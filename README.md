@@ -175,3 +175,8 @@ A lecturer who forgets a password can reset it automatically with the login emai
 - Warning events are stored with the question number, duration, severity, and whether the condition was corrected.
 - Monitoring warnings never automatically fail a student. They are lecturer review indicators only.
 - The browser loads MediaPipe Face Detection from jsDelivr. If it cannot load, camera continuity and tab-switch monitoring still remain active.
+
+
+### Webcam movement monitoring
+
+The browser-side monitor records warnings for sustained looking away and excessive face movement, alongside no-face, multiple-face, low-light, camera interruption, and tab-switch events. These are review indicators and do not automatically determine misconduct.
