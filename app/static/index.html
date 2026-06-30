@@ -133,12 +133,13 @@
             <article><strong>30 seconds</strong><p>Every question has the same 30-second response period.</p></article>
             <article><strong id="instruction-question-count">20 questions</strong><p id="instruction-question-requirement">The required score is calculated using the course question setting and the displayed threshold.</p></article>
             <article><strong>Focus monitoring</strong><p>Leaving the test screen is logged for lecturer review but does not automatically change the score.</p></article>
-            <article><strong>Live webcam checks</strong><p>The browser checks face presence, multiple faces, sustained looking away, poor lighting, and camera interruption.</p></article>
-            <article><strong>Privacy</strong><p>No video or audio is recorded. One still image is captured at a random point and warning events are shown only to authorised lecturers.</p></article>
+            <article><strong>Camera monitoring</strong><p>Automated visual monitoring checks the assessment environment and camera continuity.</p></article>
+            <article><strong>Monitoring evidence</strong><p>A verification image and monitoring events may be retained for authorised lecturer review.</p></article>
+            <article><strong>Connection recovery</strong><p>The server-side question clock continues during an interruption. Resume requires the same browser and camera reverification.</p></article>
           </div>
           <label class="consent-row">
             <input id="consent-checkbox" type="checkbox">
-            <span>I understand the assessment rules and consent to the webcam remaining active, on-device live checks, and one still-image capture. Video and audio are not recorded.</span>
+            <span>I understand the assessment rules and consent to camera monitoring and retention of monitoring evidence for authorised review.</span>
           </label>
           <div id="mode-warning" class="message warning"></div>
           <div class="form-actions align-right">
@@ -161,7 +162,7 @@
             <video id="webcam-preview" autoplay muted playsinline aria-label="Live webcam preview"></video>
             <div class="webcam-copy">
               <span class="camera-live"><span class="camera-dot" aria-hidden="true"></span> Camera active</span>
-              <small id="webcam-status">No video or audio is recorded. Live checks monitor face presence, multiple faces, looking away, excessive movement and lighting. No video or audio is recorded, and one still image will be captured at a random point.</small>
+              <small id="webcam-status">Camera monitoring will be checked before the assessment starts.</small>
             </div>
           </div>
           <div id="monitoring-warning" class="monitoring-warning hidden" role="alert" aria-live="assertive">
@@ -170,6 +171,19 @@
           </div>
           <canvas id="webcam-canvas" hidden></canvas>
           <canvas id="monitoring-canvas" hidden></canvas>
+          <div id="connection-overlay" class="connection-overlay hidden" role="alert" aria-live="assertive">
+            <div class="connection-card">
+              <span id="connection-status-chip" class="connection-status-chip">Interrupted</span>
+              <h3 id="connection-title">Connection interrupted</h3>
+              <p id="connection-text">Kanokware is attempting to restore the assessment securely.</p>
+              <div class="connection-metrics">
+                <div><strong id="connection-interruptions">0</strong><span>interruptions</span></div>
+                <div><strong id="connection-offline-time">0s</strong><span>offline time</span></div>
+                <div><strong id="connection-resume-time">—</strong><span>resume window</span></div>
+              </div>
+              <button id="retry-connection-button" class="primary-button" type="button">Retry connection</button>
+            </div>
+          </div>
           <div class="difficulty-row">
             <span id="difficulty-badge" class="difficulty-badge">Understanding</span>
             <span>Choose the best answer.</span>
@@ -194,6 +208,7 @@
                 <div><strong id="timeout-count">0</strong><span>timed out</span></div>
                 <div><strong id="focus-count">0</strong><span>focus losses</span></div>
                 <div><strong id="monitoring-count">0</strong><span>webcam warnings</span></div>
+                <div><strong id="interruption-count">0</strong><span>interruptions</span></div>
               </div>
               <p id="result-disclaimer" class="muted"></p>
               <button id="new-assessment-button" class="secondary-button" type="button">Assess another document</button>
@@ -339,8 +354,8 @@
             </div>
             <div class="table-scroll">
               <table>
-                <thead><tr><th>Student</th><th>Course and document</th><th>Status</th><th>Score</th><th>Decision</th><th>Photo</th><th>Monitoring</th><th>Actions</th></tr></thead>
-                <tbody id="submissions-body"><tr><td colspan="8" class="empty-state">Sign in to load submissions.</td></tr></tbody>
+                <thead><tr><th>Student</th><th>Course and document</th><th>Status</th><th>Score</th><th>Decision</th><th>Photo</th><th>Monitoring</th><th>Interruption</th><th>Actions</th></tr></thead>
+                <tbody id="submissions-body"><tr><td colspan="9" class="empty-state">Sign in to load submissions.</td></tr></tbody>
               </table>
             </div>
           </section>
@@ -351,6 +366,18 @@
               <button id="close-review" class="secondary-button" type="button">Close</button>
             </div>
             <div id="review-summary" class="review-summary"></div>
+            <div id="review-interruption" class="review-interruption hidden">
+              <div>
+                <span class="eyebrow">Connection continuity</span>
+                <h3 id="review-interruption-title">Assessment interruption</h3>
+                <p id="review-interruption-text"></p>
+              </div>
+              <div class="interruption-actions">
+                <button id="allow-resume-button" class="primary-button" type="button">Allow resume</button>
+                <button id="finish-interrupted-button" class="secondary-button" type="button">End and score</button>
+                <button id="excuse-interruption-button" class="text-button" type="button">Mark excused</button>
+              </div>
+            </div>
             <div id="review-monitoring" class="review-monitoring hidden">
               <div class="table-heading"><h3>Webcam monitoring events</h3></div>
               <div id="review-monitoring-events" class="monitoring-event-list"></div>
@@ -441,6 +468,6 @@
   </footer>
 
   <script src="/static/vendor/mediapipe-face-detection/face_detection.js?v=0.4.1657300184"></script>
-  <script src="/static/app.js?v=20260630-motion2" defer></script>
+  <script src="/static/app.js?v=20260630-continuity1" defer></script>
 </body>
 </html>

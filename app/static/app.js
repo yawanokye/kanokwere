@@ -1,7 +1,18 @@
+function getOrCreateClientInstanceId() {
+  const key = "kanokware_client_instance_id";
+  let value = localStorage.getItem(key);
+  if (!value) {
+    value = globalThis.crypto?.randomUUID?.() || `kano-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    localStorage.setItem(key, value);
+  }
+  return value;
+}
+
 const state = {
   documentId: localStorage.getItem("kanokware_document_id"),
-  assessmentId: sessionStorage.getItem("kanokware_assessment_id"),
-  token: sessionStorage.getItem("kanokware_session_token"),
+  assessmentId: localStorage.getItem("kanokware_assessment_id") || sessionStorage.getItem("kanokware_assessment_id"),
+  token: localStorage.getItem("kanokware_session_token") || sessionStorage.getItem("kanokware_session_token"),
+  clientInstanceId: getOrCreateClientInstanceId(),
   testActive: false,
   timerHandle: null,
   currentPosition: null,
@@ -22,15 +33,42 @@ const state = {
   monitoringStates: {},
   monitoringEventCount: 0,
   monitoringSupported: true,
+  monitoringEngine: null,
+  monitoringWatchdogTimer: null,
+  monitoringFlushTimer: null,
+  monitoringEventQueue: [],
+  latestFaceDetections: [],
+  monitoringResultVersion: 0,
+  lastMonitoringResultAt: 0,
+  detectionFailureCount: 0,
+  lastVideoCurrentTime: null,
+  videoFrozenSince: null,
+  lastFrameSignature: null,
   lastFaceMotionSample: null,
   faceMotionHistory: [],
+  heartbeatTimer: null,
+  heartbeatBusy: false,
+  heartbeatIntervalMs: 5000,
+  connectionStatus: navigator.onLine ? "online" : "offline",
+  offlineStartedAt: null,
+  resumeInProgress: false,
+  currentReviewAssessmentId: null,
+  currentReviewSummary: null,
+  recoveryDbPromise: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
 const FACE_DETECTION_ASSET_BASE = "/static/vendor/mediapipe-face-detection";
-const FACE_DETECTION_MAX_FAILURES = 3;
+const FACE_DETECTION_MAX_FAILURES = 5;
+const MONITOR_INTERVAL_MS = 350;
+const MONITOR_RESULT_TIMEOUT_MS = 2600;
+const MONITOR_PREFLIGHT_TIMEOUT_MS = 12000;
+const MONITOR_QUEUE_LIMIT = 80;
+const RECOVERY_DB_NAME = "kanokware-assessment-recovery";
+const RECOVERY_DB_VERSION = 1;
+const RECOVERY_STORE = "monitoring-events";
 
 function setMessage(element, text = "", type = "") {
   element.textContent = text;
@@ -55,7 +93,15 @@ function showPanel(name, step) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, { credentials: "same-origin", ...options });
+  let response;
+  try {
+    response = await fetch(path, { credentials: "same-origin", ...options });
+  } catch (cause) {
+    const error = new Error("The server could not be reached. Check the internet connection.");
+    error.networkError = true;
+    error.cause = cause;
+    throw error;
+  }
   let payload = null;
   const contentType = response.headers.get("content-type") || "";
   if (contentType.includes("application/json")) payload = await response.json();
@@ -76,6 +122,278 @@ function assessmentHeaders() {
   };
 }
 
+function saveAssessmentSession() {
+  if (!state.assessmentId || !state.token) return;
+  localStorage.setItem("kanokware_assessment_id", state.assessmentId);
+  localStorage.setItem("kanokware_session_token", state.token);
+  sessionStorage.setItem("kanokware_assessment_id", state.assessmentId);
+  sessionStorage.setItem("kanokware_session_token", state.token);
+}
+
+function clearAssessmentSession() {
+  localStorage.removeItem("kanokware_assessment_id");
+  localStorage.removeItem("kanokware_session_token");
+  sessionStorage.removeItem("kanokware_assessment_id");
+  sessionStorage.removeItem("kanokware_session_token");
+  state.assessmentId = null;
+  state.token = null;
+}
+
+function formatDuration(seconds) {
+  const value = Math.max(0, Math.round(Number(seconds || 0)));
+  const minutes = Math.floor(value / 60);
+  const remainder = value % 60;
+  return minutes ? `${minutes}m ${remainder}s` : `${remainder}s`;
+}
+
+function setConnectionOverlay(mode, payload = {}) {
+  const overlay = $("#connection-overlay");
+  if (!overlay) return;
+  if (mode === "online") {
+    overlay.classList.add("hidden");
+    overlay.classList.remove("locked", "reconnecting");
+    return;
+  }
+  overlay.classList.remove("hidden", "locked", "reconnecting");
+  if (mode === "locked") overlay.classList.add("locked");
+  if (mode === "reconnecting") overlay.classList.add("reconnecting");
+  const title = $("#connection-title");
+  const text = $("#connection-text");
+  const chip = $("#connection-status-chip");
+  const retry = $("#retry-connection-button");
+  const interruptionCount = Number(payload.interruption_count || 0);
+  const totalOffline = Number(payload.total_offline_seconds || 0) + Number(payload.current_offline_seconds || 0);
+  if ($("#connection-interruptions")) $("#connection-interruptions").textContent = interruptionCount;
+  if ($("#connection-offline-time")) $("#connection-offline-time").textContent = formatDuration(totalOffline);
+  if ($("#connection-resume-time")) {
+    $("#connection-resume-time").textContent = payload.resume_seconds_remaining == null
+      ? "—"
+      : formatDuration(payload.resume_seconds_remaining);
+  }
+  if (mode === "locked") {
+    chip.textContent = "Locked";
+    title.textContent = "Assessment locked for lecturer review";
+    text.textContent = payload.lock_reason
+      ? payload.lock_reason.replaceAll("_", " ")
+      : "The permitted interruption or offline limit was exceeded.";
+    retry.classList.add("hidden");
+  } else if (mode === "reconnecting") {
+    chip.textContent = "Reconnecting";
+    title.textContent = "Restoring the assessment";
+    text.textContent = "Checking the connection and reverifying the camera before continuing.";
+    retry.classList.add("hidden");
+  } else {
+    chip.textContent = "Interrupted";
+    title.textContent = "Connection interrupted";
+    text.textContent = "Answers are temporarily disabled. The server-side question clock continues while Kanokware attempts to reconnect.";
+    retry.classList.remove("hidden");
+  }
+}
+
+function openRecoveryDb() {
+  if (state.recoveryDbPromise) return state.recoveryDbPromise;
+  state.recoveryDbPromise = new Promise((resolve, reject) => {
+    if (!globalThis.indexedDB) {
+      resolve(null);
+      return;
+    }
+    const request = indexedDB.open(RECOVERY_DB_NAME, RECOVERY_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(RECOVERY_STORE)) {
+        const store = db.createObjectStore(RECOVERY_STORE, { keyPath: "id" });
+        store.createIndex("assessment_id", "assessment_id", { unique: false });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  }).catch(() => null);
+  return state.recoveryDbPromise;
+}
+
+async function persistMonitoringPayload(payload) {
+  const db = await openRecoveryDb();
+  if (!db || !state.assessmentId) return;
+  const record = {
+    ...payload,
+    id: payload._queue_id,
+    assessment_id: state.assessmentId,
+    created_at: Date.now(),
+  };
+  await new Promise((resolve) => {
+    const tx = db.transaction(RECOVERY_STORE, "readwrite");
+    tx.objectStore(RECOVERY_STORE).put(record);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => resolve();
+  });
+}
+
+async function deletePersistedMonitoringPayload(id) {
+  const db = await openRecoveryDb();
+  if (!db || !id) return;
+  await new Promise((resolve) => {
+    const tx = db.transaction(RECOVERY_STORE, "readwrite");
+    tx.objectStore(RECOVERY_STORE).delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => resolve();
+  });
+}
+
+async function loadPersistedMonitoringPayloads() {
+  const db = await openRecoveryDb();
+  if (!db || !state.assessmentId) return [];
+  return new Promise((resolve) => {
+    const tx = db.transaction(RECOVERY_STORE, "readonly");
+    const index = tx.objectStore(RECOVERY_STORE).index("assessment_id");
+    const request = index.getAll(state.assessmentId);
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => resolve([]);
+  });
+}
+
+function cameraIsVerified() {
+  const track = state.cameraStream?.getVideoTracks?.()[0];
+  return Boolean(
+    track?.readyState === "live" &&
+    state.monitoringSupported &&
+    state.lastMonitoringResultAt > 0 &&
+    performance.now() - state.lastMonitoringResultAt < MONITOR_RESULT_TIMEOUT_MS
+  );
+}
+
+function clearHeartbeatTimer() {
+  if (state.heartbeatTimer) clearInterval(state.heartbeatTimer);
+  state.heartbeatTimer = null;
+}
+
+async function sendHeartbeat({ cameraVerified = false, reason = "periodic" } = {}) {
+  if (!state.assessmentId || !state.token || state.heartbeatBusy) return null;
+  state.heartbeatBusy = true;
+  try {
+    const result = await api(`/api/assessments/${state.assessmentId}/heartbeat`, {
+      method: "POST",
+      headers: assessmentHeaders(),
+      body: JSON.stringify({
+        client_instance_id: state.clientInstanceId,
+        camera_verified: Boolean(cameraVerified),
+        reason,
+      }),
+    });
+    state.connectionStatus = result.status;
+    const interval = Number(result.heartbeat_interval_seconds || 5);
+    state.heartbeatIntervalMs = Math.max(3000, interval * 1000);
+    return result;
+  } finally {
+    state.heartbeatBusy = false;
+  }
+}
+
+function startHeartbeatLoop() {
+  clearHeartbeatTimer();
+  state.heartbeatTimer = window.setInterval(async () => {
+    if (!state.testActive || !state.assessmentId || !state.token) return;
+    try {
+      const result = await sendHeartbeat({ cameraVerified: false, reason: "periodic" });
+      if (!result) return;
+      if (result.status === "locked") {
+        disableOptions();
+        setConnectionOverlay("locked", result);
+      } else if (result.status === "interrupted") {
+        disableOptions();
+        setConnectionOverlay("interrupted", result);
+      }
+    } catch (error) {
+      if (error.networkError) markConnectionInterrupted("network_failure");
+    }
+  }, state.heartbeatIntervalMs);
+}
+
+function markConnectionInterrupted(reason = "network_failure") {
+  if (!state.testActive) return;
+  if (!state.offlineStartedAt) state.offlineStartedAt = Date.now();
+  state.connectionStatus = "offline";
+  disableOptions();
+  setConnectionOverlay("interrupted", {
+    interruption_count: 0,
+    current_offline_seconds: Math.floor((Date.now() - state.offlineStartedAt) / 1000),
+  });
+  queueMonitoringPayload({
+    event_type: "connection_interrupted",
+    duration_ms: 0,
+    question_position: state.currentPosition || null,
+    severity: "critical",
+    corrected: false,
+    message: reason === "offline"
+      ? "The browser reported that the internet connection was lost."
+      : "The assessment could not communicate with the server.",
+  });
+}
+
+async function recoverAssessment(reason = "reconnect") {
+  if (!state.assessmentId || !state.token || state.resumeInProgress) return;
+  state.resumeInProgress = true;
+  setConnectionOverlay("reconnecting");
+  try {
+    await startCamera();
+    await runMonitoringPreflight();
+    await startSuspiciousMonitoring();
+    const result = await sendHeartbeat({ cameraVerified: true, reason });
+    if (!result) throw new Error("The assessment state could not be restored.");
+    if (result.status === "locked") {
+      state.connectionStatus = "locked";
+      disableOptions();
+      setConnectionOverlay("locked", result);
+      return;
+    }
+    if (result.status === "completed") {
+      setConnectionOverlay("online");
+      await loadResult();
+      return;
+    }
+    if (result.status !== "in_progress") {
+      setConnectionOverlay("interrupted", result);
+      return;
+    }
+    state.connectionStatus = "online";
+    state.offlineStartedAt = null;
+    setConnectionOverlay("online");
+    await flushMonitoringEventQueue();
+    startHeartbeatLoop();
+    await loadQuestion();
+  } catch (error) {
+    if (error.status === 401 || error.status === 404) {
+      clearAssessmentSession();
+      state.testActive = false;
+      stopCamera();
+      showPanel("upload", 1);
+      setMessage($("#upload-message"), "The saved assessment session is no longer available. Contact the lecturer if another attempt is required.", "error");
+      return;
+    }
+    markConnectionInterrupted("network_failure");
+    setConnectionOverlay("interrupted");
+  } finally {
+    state.resumeInProgress = false;
+  }
+}
+
+async function reportExplicitInterruption(reason = "pagehide") {
+  if (!state.testActive || !state.assessmentId || !state.token) return;
+  try {
+    await fetch(`/api/assessments/${state.assessmentId}/interrupt`, {
+      method: "POST",
+      headers: assessmentHeaders(),
+      body: JSON.stringify({
+        client_instance_id: state.clientInstanceId,
+        reason,
+      }),
+      credentials: "same-origin",
+      keepalive: true,
+    });
+  } catch (_) {
+    // Missing heartbeats will still identify the interruption on the server.
+  }
+}
+
 function setWebcamStatus(message, mode = "active") {
   const monitor = $(".webcam-monitor");
   const status = $("#webcam-status");
@@ -89,40 +407,58 @@ function setWebcamStatus(message, mode = "active") {
 
 const MONITORING_RULES = {
   no_face: {
-    thresholdMs: 4000,
-    severity: "warning",
+    thresholdMs: 1000,
+    severity: "critical",
     title: "Face not visible",
-    message: "Please position your face clearly inside the camera frame.",
+    message: "Return to the camera view and keep your face clearly visible.",
   },
   multiple_faces: {
-    thresholdMs: 2000,
+    thresholdMs: 700,
     severity: "critical",
     title: "More than one face detected",
-    message: "Please ensure that you are the only person visible during the assessment.",
+    message: "Only the student taking the assessment should remain visible.",
   },
   looking_away: {
-    thresholdMs: 2500,
+    thresholdMs: 1200,
     severity: "warning",
-    title: "Please face the screen",
-    message: "Your head appears turned away or your face is outside the central camera area.",
+    title: "Please face the assessment screen",
+    message: "Your head position indicates sustained attention away from the assessment.",
   },
   excessive_movement: {
-    thresholdMs: 1500,
+    thresholdMs: 1200,
     severity: "warning",
-    title: "Excessive face movement detected",
-    message: "Please keep your face reasonably steady and remain focused on the assessment screen.",
+    title: "Excessive head movement detected",
+    message: "Keep your head reasonably steady and remain focused on the assessment.",
   },
   low_light: {
-    thresholdMs: 4000,
+    thresholdMs: 2500,
     severity: "warning",
-    title: "Lighting is too low",
-    message: "Increase the lighting so your face remains clearly visible.",
+    title: "Lighting is insufficient",
+    message: "Improve the lighting so your face remains clearly visible.",
+  },
+  camera_covered: {
+    thresholdMs: 1200,
+    severity: "critical",
+    title: "Camera view obstructed",
+    message: "Remove anything blocking the camera and restore a clear view.",
+  },
+  camera_frozen: {
+    thresholdMs: 1800,
+    severity: "critical",
+    title: "Camera feed appears frozen",
+    message: "Restore a live camera feed to continue reliable monitoring.",
   },
   camera_interrupted: {
     thresholdMs: 0,
     severity: "critical",
     title: "Camera interrupted",
-    message: "Restore webcam access to continue reliable assessment monitoring.",
+    message: "Restore camera access to continue reliable monitoring.",
+  },
+  monitoring_unavailable: {
+    thresholdMs: 0,
+    severity: "critical",
+    title: "Automated monitoring interrupted",
+    message: "The visual monitoring engine stopped responding. Restore the camera or reload the assessment.",
   },
 };
 
@@ -134,6 +470,12 @@ function resetMonitoringStates() {
     ])
   );
   state.monitoringEventCount = 0;
+  state.latestFaceDetections = [];
+  state.lastMonitoringResultAt = 0;
+  state.detectionFailureCount = 0;
+  state.lastVideoCurrentTime = null;
+  state.videoFrozenSince = null;
+  state.lastFrameSignature = null;
   state.lastFaceMotionSample = null;
   state.faceMotionHistory = [];
   hideMonitoringWarning();
@@ -153,27 +495,83 @@ function hideMonitoringWarning() {
   if (box) box.classList.add("hidden");
 }
 
-async function postMonitoringEvent(eventType, durationMs, corrected = false, override = {}) {
-  if (!state.testActive || !state.assessmentId || !state.token) return;
-  const rule = MONITORING_RULES[eventType] || {};
-  try {
-    const result = await api(`/api/assessments/${state.assessmentId}/monitoring-event`, {
-      method: "POST",
-      headers: assessmentHeaders(),
-      body: JSON.stringify({
-        event_type: eventType,
-        duration_ms: Math.max(0, Math.round(durationMs || 0)),
-        question_position: state.currentPosition || null,
-        severity: override.severity || rule.severity || "warning",
-        corrected,
-        message: override.message || rule.message || null,
-      }),
-    });
-    if (Number.isFinite(Number(result?.monitoring_event_count))) {
-      state.monitoringEventCount = Number(result.monitoring_event_count);
+async function sendMonitoringPayload(payload) {
+  const result = await api(`/api/assessments/${state.assessmentId}/monitoring-event`, {
+    method: "POST",
+    headers: assessmentHeaders(),
+    body: JSON.stringify(payload),
+    keepalive: true,
+  });
+  if (Number.isFinite(Number(result?.monitoring_event_count))) {
+    state.monitoringEventCount = Number(result.monitoring_event_count);
+  }
+  return result;
+}
+
+function queueMonitoringPayload(payload) {
+  const existing = state.monitoringEventQueue.find(
+    (item) => item.event_type === payload.event_type && Boolean(item.corrected) === Boolean(payload.corrected)
+  );
+  if (existing) {
+    existing.duration_ms = Math.max(existing.duration_ms || 0, payload.duration_ms || 0);
+    existing.question_position = payload.question_position || existing.question_position;
+    existing.severity = new Set([existing.severity, payload.severity]).has("critical") ? "critical" : "warning";
+    existing.message = payload.message || existing.message;
+    persistMonitoringPayload(existing);
+    return;
+  }
+  const queued = {
+    ...payload,
+    _queue_id: payload._queue_id || globalThis.crypto?.randomUUID?.() || `event-${Date.now()}-${Math.random()}`,
+  };
+  state.monitoringEventQueue.push(queued);
+  persistMonitoringPayload(queued);
+  if (state.monitoringEventQueue.length > MONITOR_QUEUE_LIMIT) {
+    state.monitoringEventQueue.splice(0, state.monitoringEventQueue.length - MONITOR_QUEUE_LIMIT);
+  }
+}
+
+async function flushMonitoringEventQueue() {
+  if (!state.assessmentId || !state.token || !navigator.onLine) return;
+  const persisted = await loadPersistedMonitoringPayloads();
+  persisted.forEach((item) => {
+    if (!state.monitoringEventQueue.some((queued) => queued._queue_id === item.id)) {
+      const { id, assessment_id, created_at, ...payload } = item;
+      state.monitoringEventQueue.push({ ...payload, _queue_id: id });
     }
+  });
+  while (state.monitoringEventQueue.length) {
+    const item = state.monitoringEventQueue[0];
+    try {
+      const { _queue_id, ...payload } = item;
+      await sendMonitoringPayload(payload);
+      state.monitoringEventQueue.shift();
+      await deletePersistedMonitoringPayload(_queue_id);
+    } catch (_) {
+      break;
+    }
+  }
+}
+
+async function postMonitoringEvent(eventType, durationMs, corrected = false, override = {}) {
+  if (!state.assessmentId || !state.token) return;
+  const rule = MONITORING_RULES[eventType] || {};
+  const payload = {
+    event_type: eventType,
+    duration_ms: Math.max(0, Math.round(durationMs || 0)),
+    question_position: state.currentPosition || null,
+    severity: override.severity || rule.severity || "warning",
+    corrected,
+    message: override.message || rule.message || null,
+  };
+  if (!navigator.onLine || state.connectionStatus === "offline") {
+    queueMonitoringPayload(payload);
+    return;
+  }
+  try {
+    await sendMonitoringPayload(payload);
   } catch (_) {
-    // Monitoring warnings must not stop the timed assessment.
+    queueMonitoringPayload(payload);
   }
 }
 
@@ -189,6 +587,7 @@ function updateMonitoringCondition(eventType, active) {
     condition.lastDurationMs = duration;
     if (!condition.warned && duration >= rule.thresholdMs) {
       condition.warned = true;
+      state.monitoringEventCount += 1;
       showMonitoringWarning(rule);
       setWebcamStatus(rule.message, rule.severity === "critical" ? "interrupted" : "active");
       postMonitoringEvent(eventType, duration, false);
@@ -210,9 +609,7 @@ function updateMonitoringCondition(eventType, active) {
     showMonitoringWarning(MONITORING_RULES[anotherWarning[0]]);
   } else {
     hideMonitoringWarning();
-    setWebcamStatus(
-      "Camera active. No video or audio is recorded. Live face checks are running in this browser."
-    );
+    setWebcamStatus("Camera monitoring active.");
   }
 }
 
@@ -258,12 +655,12 @@ function faceLooksAway(detection) {
   const metrics = facePoseMetrics(detection);
   if (!metrics) return false;
   return (
-    metrics.xCenter < 0.30 ||
-    metrics.xCenter > 0.70 ||
-    metrics.yCenter < 0.22 ||
-    metrics.yCenter > 0.80 ||
-    metrics.width < 0.15 ||
-    (metrics.hasLandmarks && metrics.yawScore > 0.28)
+    metrics.xCenter < 0.24 ||
+    metrics.xCenter > 0.76 ||
+    metrics.yCenter < 0.17 ||
+    metrics.yCenter > 0.83 ||
+    metrics.width < 0.13 ||
+    (metrics.hasLandmarks && metrics.yawScore > 0.20)
   );
 }
 
@@ -293,34 +690,57 @@ function faceMovesExcessively(detection) {
   const speed = movementStep / (elapsed / 1000);
 
   state.faceMotionHistory.push({ at: now, movementStep, speed });
-  state.faceMotionHistory = state.faceMotionHistory.filter((item) => now - item.at <= 3500);
+  state.faceMotionHistory = state.faceMotionHistory.filter((item) => now - item.at <= 3000);
 
   const totalMovement = state.faceMotionHistory.reduce((sum, item) => sum + item.movementStep, 0);
-  const rapidSamples = state.faceMotionHistory.filter((item) => item.speed > 0.16).length;
+  const rapidSamples = state.faceMotionHistory.filter((item) => item.speed > 0.13).length;
   return (
     state.faceMotionHistory.length >= 3 &&
-    (totalMovement > 0.30 || rapidSamples >= 3)
+    (totalMovement > 0.20 || rapidSamples >= 2)
   );
 }
 
-function averageFrameBrightness(video) {
+function frameStatistics(video) {
   const canvas = $("#monitoring-canvas");
-  if (!canvas || !video.videoWidth || !video.videoHeight) return 255;
-  canvas.width = 96;
-  canvas.height = 72;
-  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!canvas || !video.videoWidth || !video.videoHeight) {
+    return { brightness: 255, variance: 255, difference: 255 };
+  }
+  canvas.width = 64;
+  canvas.height = 48;
+  const context = canvas.getContext("2d", { willReadFrequently: true, alpha: false });
   context.drawImage(video, 0, 0, canvas.width, canvas.height);
   const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
-  let total = 0;
-  for (let index = 0; index < pixels.length; index += 16) {
-    total += (pixels[index] + pixels[index + 1] + pixels[index + 2]) / 3;
+  const signature = [];
+  let sum = 0;
+  let sumSquares = 0;
+  for (let y = 0; y < canvas.height; y += 4) {
+    for (let x = 0; x < canvas.width; x += 4) {
+      const index = (y * canvas.width + x) * 4;
+      const value = pixels[index] * 0.2126 + pixels[index + 1] * 0.7152 + pixels[index + 2] * 0.0722;
+      signature.push(value);
+      sum += value;
+      sumSquares += value * value;
+    }
   }
-  return total / (pixels.length / 16);
+  const count = Math.max(1, signature.length);
+  const brightness = sum / count;
+  const variance = Math.max(0, sumSquares / count - brightness * brightness);
+  let difference = 255;
+  if (state.lastFrameSignature?.length === signature.length) {
+    difference = signature.reduce((total, value, index) => total + Math.abs(value - state.lastFrameSignature[index]), 0) / count;
+  }
+  state.lastFrameSignature = signature;
+  return { brightness, variance, difference };
 }
 
 function handleFaceDetectionResults(results) {
-  if (!state.testActive) return;
   const detections = Array.isArray(results?.detections) ? results.detections : [];
+  state.latestFaceDetections = detections;
+  state.monitoringResultVersion += 1;
+  state.lastMonitoringResultAt = performance.now();
+  state.detectionFailureCount = 0;
+  if (!state.testActive) return;
+  updateMonitoringCondition("monitoring_unavailable", false);
   updateMonitoringCondition("no_face", detections.length === 0);
   updateMonitoringCondition("multiple_faces", detections.length > 1);
   updateMonitoringCondition(
@@ -337,86 +757,175 @@ function handleFaceDetectionResults(results) {
   }
 }
 
-async function startSuspiciousMonitoring() {
-  stopSuspiciousMonitoring();
-  resetMonitoringStates();
-
-  if (typeof window.FaceDetection !== "function") {
-    state.monitoringSupported = false;
-    setWebcamStatus(
-      "Camera active. Face checks could not start. Camera interruption and tab switching are still monitored.",
-      "limited"
-    );
-    console.error("MediaPipe FaceDetection did not load from the local static assets.");
-    return;
-  }
-
-  state.monitoringSupported = true;
-  let detectionFailures = 0;
-  const detector = new window.FaceDetection({
-    locateFile: (file) => `${FACE_DETECTION_ASSET_BASE}/${file}`,
+function normaliseNativeDetections(detections, video) {
+  const width = Math.max(1, video.videoWidth || 1);
+  const height = Math.max(1, video.videoHeight || 1);
+  return (detections || []).map((detection) => {
+    const box = detection.boundingBox || {};
+    return {
+      boundingBox: {
+        xCenter: (Number(box.x || 0) + Number(box.width || 0) / 2) / width,
+        yCenter: (Number(box.y || 0) + Number(box.height || 0) / 2) / height,
+        width: Number(box.width || 0) / width,
+        height: Number(box.height || 0) / height,
+      },
+      landmarks: [],
+    };
   });
-  detector.setOptions({
-    model: "short",
-    selfieMode: true,
-    minDetectionConfidence: 0.55,
-  });
-  detector.onResults((results) => {
-    detectionFailures = 0;
-    handleFaceDetectionResults(results);
-  });
-  state.faceDetector = detector;
-  setWebcamStatus(
-    "Camera active. Live checks are active for face presence, multiple faces, looking away, excessive movement and lighting."
-  );
-
-  state.monitoringTimer = window.setInterval(async () => {
-    if (
-      !state.testActive ||
-      state.monitoringBusy ||
-      document.visibilityState === "hidden"
-    ) return;
-
-    const video = $("#webcam-preview");
-    const track = state.cameraStream?.getVideoTracks?.()[0];
-    if (!video || !track || track.readyState !== "live" || !video.videoWidth) {
-      updateMonitoringCondition("camera_interrupted", true);
-      return;
-    }
-
-    updateMonitoringCondition("camera_interrupted", false);
-    updateMonitoringCondition("low_light", averageFrameBrightness(video) < 38);
-    state.monitoringBusy = true;
-    try {
-      await detector.send({ image: video });
-    } catch (error) {
-      detectionFailures += 1;
-      console.error("Local MediaPipe face detection failed:", error);
-      if (detectionFailures >= FACE_DETECTION_MAX_FAILURES) {
-        state.monitoringSupported = false;
-        clearInterval(state.monitoringTimer);
-        state.monitoringTimer = null;
-        setWebcamStatus(
-          "Camera active. Face checks are unavailable in this browser. Camera interruption and tab switching remain monitored.",
-          "limited"
-        );
-      }
-    } finally {
-      state.monitoringBusy = false;
-    }
-  }, 650);
 }
 
-function stopSuspiciousMonitoring() {
+async function ensureMonitoringEngine() {
+  if (state.faceDetector) return state.faceDetector;
+  if (typeof window.FaceDetection === "function") {
+    const detector = new window.FaceDetection({
+      locateFile: (file) => `${FACE_DETECTION_ASSET_BASE}/${file}`,
+    });
+    detector.setOptions({ model: "short", selfieMode: true, minDetectionConfidence: 0.45 });
+    detector.onResults(handleFaceDetectionResults);
+    state.faceDetector = detector;
+    state.monitoringEngine = "mediapipe";
+    return detector;
+  }
+  if (typeof window.FaceDetector === "function") {
+    state.faceDetector = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 3 });
+    state.monitoringEngine = "native";
+    return state.faceDetector;
+  }
+  throw new Error("The automated face-monitoring engine is not supported by this browser.");
+}
+
+async function runFaceDetectionFrame(video) {
+  const detector = await ensureMonitoringEngine();
+  if (state.monitoringEngine === "native") {
+    const results = await detector.detect(video);
+    handleFaceDetectionResults({ detections: normaliseNativeDetections(results, video) });
+    return;
+  }
+  await detector.send({ image: video });
+}
+
+async function runMonitoringPreflight() {
+  const video = $("#webcam-preview");
+  const track = state.cameraStream?.getVideoTracks?.()[0];
+  if (!video || !track || track.readyState !== "live") throw new Error("A live camera feed is required.");
+  await ensureMonitoringEngine();
+  setWebcamStatus("Checking camera monitoring readiness.");
+  const deadline = performance.now() + MONITOR_PREFLIGHT_TIMEOUT_MS;
+  let oneFaceStreak = 0;
+  let resultCount = 0;
+  while (performance.now() < deadline) {
+    if (track.readyState !== "live" || track.muted) throw new Error("The camera feed became unavailable.");
+    if (!video.videoWidth || !video.videoHeight) { await new Promise((resolve) => setTimeout(resolve, 180)); continue; }
+    const before = state.monitoringResultVersion;
+    try {
+      await runFaceDetectionFrame(video);
+    } catch (error) {
+      state.detectionFailureCount += 1;
+      if (state.detectionFailureCount >= FACE_DETECTION_MAX_FAILURES) {
+        throw new Error(`Automated face monitoring could not start: ${error.message}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      continue;
+    }
+    if (state.monitoringResultVersion > before) resultCount += 1;
+    const faces = state.latestFaceDetections.length;
+    const stats = frameStatistics(video);
+    if (faces === 1 && stats.brightness >= 25) {
+      oneFaceStreak += 1;
+      setWebcamStatus("Camera monitoring check in progress.");
+    } else {
+      oneFaceStreak = 0;
+      if (faces === 0) setWebcamStatus("Position one face clearly inside the camera view.", "limited");
+      else if (faces > 1) setWebcamStatus("Only one face should be visible before starting.", "limited");
+      else setWebcamStatus("Improve the lighting before starting.", "limited");
+    }
+    if (oneFaceStreak >= 3 && resultCount >= 3) {
+      state.monitoringSupported = true;
+      setWebcamStatus("Camera monitoring ready.");
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 140));
+  }
+  throw new Error(resultCount ? "Monitoring could not confirm one clearly visible face." : "The face-monitoring engine did not return results. Reload the page or use a current Chrome or Edge browser.");
+}
+
+function clearMonitoringTimers() {
   if (state.monitoringTimer) clearInterval(state.monitoringTimer);
+  if (state.monitoringWatchdogTimer) clearInterval(state.monitoringWatchdogTimer);
+  if (state.monitoringFlushTimer) clearInterval(state.monitoringFlushTimer);
   state.monitoringTimer = null;
+  state.monitoringWatchdogTimer = null;
+  state.monitoringFlushTimer = null;
   state.monitoringBusy = false;
-  if (state.faceDetector?.close) {
+}
+
+async function monitoringTick() {
+  if (!state.testActive || state.monitoringBusy || document.visibilityState === "hidden") return;
+  const video = $("#webcam-preview");
+  const track = state.cameraStream?.getVideoTracks?.()[0];
+  if (!video || !track || track.readyState !== "live" || track.muted || !video.videoWidth) {
+    updateMonitoringCondition("camera_interrupted", true);
+    return;
+  }
+  updateMonitoringCondition("camera_interrupted", false);
+  const stats = frameStatistics(video);
+  updateMonitoringCondition("low_light", stats.brightness < 42);
+  updateMonitoringCondition("camera_covered", stats.brightness < 14 || (stats.variance < 5 && state.latestFaceDetections.length === 0));
+  const currentTime = Number(video.currentTime || 0);
+  if (state.lastVideoCurrentTime != null && Math.abs(currentTime - state.lastVideoCurrentTime) < 0.001) {
+    if (state.videoFrozenSince == null) state.videoFrozenSince = performance.now();
+  } else {
+    state.videoFrozenSince = null;
+  }
+  state.lastVideoCurrentTime = currentTime;
+  updateMonitoringCondition("camera_frozen", state.videoFrozenSince != null);
+  state.monitoringBusy = true;
+  try {
+    await runFaceDetectionFrame(video);
+    state.monitoringSupported = true;
+    state.detectionFailureCount = 0;
+  } catch (error) {
+    state.detectionFailureCount += 1;
+    console.error("Automated face monitoring failed:", error);
+    if (state.detectionFailureCount >= FACE_DETECTION_MAX_FAILURES) {
+      state.monitoringSupported = false;
+      updateMonitoringCondition("monitoring_unavailable", true);
+    }
+  } finally {
+    state.monitoringBusy = false;
+  }
+}
+
+async function startSuspiciousMonitoring() {
+  clearMonitoringTimers();
+  resetMonitoringStates();
+  await ensureMonitoringEngine();
+  state.lastMonitoringResultAt = performance.now();
+  state.detectionFailureCount = 0;
+  setWebcamStatus("Camera monitoring active.");
+  state.monitoringTimer = window.setInterval(monitoringTick, MONITOR_INTERVAL_MS);
+  state.monitoringWatchdogTimer = window.setInterval(() => {
+    if (!state.testActive) return;
+    updateMonitoringCondition("monitoring_unavailable", performance.now() - state.lastMonitoringResultAt > MONITOR_RESULT_TIMEOUT_MS);
+  }, 700);
+  state.monitoringFlushTimer = window.setInterval(flushMonitoringEventQueue, 1500);
+  await monitoringTick();
+}
+
+function stopSuspiciousMonitoring({ closeDetector = true } = {}) {
+  clearMonitoringTimers();
+  flushMonitoringEventQueue();
+  if (closeDetector && state.faceDetector?.close) {
     try { state.faceDetector.close(); } catch (_) {}
   }
-  state.faceDetector = null;
+  if (closeDetector) {
+    state.faceDetector = null;
+    state.monitoringEngine = null;
+  }
   state.lastFaceMotionSample = null;
   state.faceMotionHistory = [];
+  state.latestFaceDetections = [];
+  state.lastMonitoringResultAt = 0;
   hideMonitoringWarning();
 }
 
@@ -454,7 +963,7 @@ async function startCamera() {
     if (!state.testActive) return;
     updateMonitoringCondition("camera_interrupted", false);
   });
-  setWebcamStatus("Camera active. No video or audio is recorded. Live face checks will begin with the assessment.");
+  setWebcamStatus("Camera monitoring ready.");
   return stream;
 }
 
@@ -492,14 +1001,14 @@ async function captureSnapshotOnce(reason = "random") {
     const canvas = $("#webcam-canvas");
     const track = state.cameraStream?.getVideoTracks?.()[0];
     if (!video || !canvas || !track || track.readyState !== "live") {
-      setWebcamStatus("The still image could not be captured because the camera is unavailable.", "interrupted");
+      setWebcamStatus("Camera monitoring requires a live camera feed.", "interrupted");
       return false;
     }
     if (!video.videoWidth || !video.videoHeight) {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
     if (!video.videoWidth || !video.videoHeight) {
-      setWebcamStatus("The camera image was not ready for capture.", "interrupted");
+      setWebcamStatus("Camera monitoring requires a clear camera feed.", "interrupted");
       return false;
     }
 
@@ -524,7 +1033,7 @@ async function captureSnapshotOnce(reason = "random") {
     });
     state.snapshotCaptured = Boolean(result.captured);
     if (state.snapshotCaptured) {
-      setWebcamStatus("Still image captured. The camera remains active until the assessment ends.", "captured");
+      setWebcamStatus("Camera monitoring active.", "captured");
     }
     return state.snapshotCaptured;
   })();
@@ -532,7 +1041,7 @@ async function captureSnapshotOnce(reason = "random") {
   try {
     return await state.snapshotPromise;
   } catch (error) {
-    setWebcamStatus(`Still image capture failed: ${error.message}`, "interrupted");
+    setWebcamStatus(`Camera verification failed: ${error.message}`, "interrupted");
     return false;
   } finally {
     state.snapshotPromise = null;
@@ -690,11 +1199,8 @@ async function pollDocumentStatus() {
       clearTimeout(pollHandle);
       pollHandle = null;
       localStorage.removeItem("kanokware_document_id");
-      sessionStorage.removeItem("kanokware_assessment_id");
-      sessionStorage.removeItem("kanokware_session_token");
       state.documentId = null;
-      state.assessmentId = null;
-      state.token = null;
+      clearAssessmentSession();
       pollStartedAt = null;
       setProcessingSpinner(false);
       $("#processing-status").textContent = "The saved submission is no longer available.";
@@ -764,26 +1270,35 @@ $("#start-button").addEventListener("click", async () => {
   try {
     button.textContent = "Starting camera…";
     await startCamera();
+    button.textContent = "Checking monitoring…";
+    await runMonitoringPreflight();
     button.textContent = "Starting assessment…";
     const result = await api("/api/assessments/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ document_id: state.documentId }),
+      body: JSON.stringify({
+        document_id: state.documentId,
+        client_instance_id: state.clientInstanceId,
+      }),
     });
     state.assessmentId = result.assessment_id;
     state.token = result.session_token;
     state.snapshotCaptured = false;
     state.assessmentQuestionCount = Number(result.question_count || state.assessmentQuestionCount || 20);
     state.testActive = true;
-    sessionStorage.setItem("kanokware_assessment_id", state.assessmentId);
-    sessionStorage.setItem("kanokware_session_token", state.token);
+    saveAssessmentSession();
+    state.heartbeatIntervalMs = Math.max(3000, Number(result.heartbeat_interval_seconds || 5) * 1000);
+    state.connectionStatus = "online";
     showPanel("test", 3);
+    setConnectionOverlay("online");
     document.documentElement.requestFullscreen?.().catch(() => {});
     await startSuspiciousMonitoring();
+    await sendHeartbeat({ cameraVerified: true, reason: "start" });
+    startHeartbeatLoop();
     await loadQuestion();
   } catch (error) {
     stopCamera();
-    setMessage($("#mode-warning"), `Webcam access is required to start: ${error.message}`, "error");
+    setMessage($("#mode-warning"), `Camera monitoring could not start: ${error.message}`, "error");
     button.disabled = false;
   } finally {
     button.textContent = "Start assessment";
@@ -825,6 +1340,10 @@ function disableOptions() {
 
 async function loadQuestion() {
   if (!state.assessmentId || !state.token) return;
+  if (!navigator.onLine || state.connectionStatus === "offline") {
+    markConnectionInterrupted("offline");
+    return;
+  }
   clearSnapshotTimer();
   try {
     const result = await api(`/api/assessments/${state.assessmentId}/question`, {
@@ -834,6 +1353,22 @@ async function loadQuestion() {
       await loadResult();
       return;
     }
+    if (result.status === "locked") {
+      state.connectionStatus = "locked";
+      clearQuestionTimer();
+      disableOptions();
+      setConnectionOverlay("locked", result);
+      return;
+    }
+    if (result.status === "interrupted") {
+      state.connectionStatus = "interrupted";
+      clearQuestionTimer();
+      disableOptions();
+      setConnectionOverlay("interrupted", result);
+      return;
+    }
+    state.connectionStatus = "online";
+    setConnectionOverlay("online");
     if (state.currentPosition === result.position && result.remaining_ms < 250) {
       setTimeout(loadQuestion, 300);
       return;
@@ -863,15 +1398,31 @@ async function loadQuestion() {
       state.snapshotTimer = setTimeout(() => captureSnapshotOnce("random"), safeDelay);
     }
   } catch (error) {
+    if (error.networkError) {
+      markConnectionInterrupted("network_failure");
+      return;
+    }
+    if (error.status === 401 || error.status === 404) {
+      clearAssessmentSession();
+      state.testActive = false;
+      stopCamera();
+      showPanel("upload", 1);
+      setMessage($("#upload-message"), error.message, "error");
+      return;
+    }
     setMessage($("#test-message"), error.message, "error");
   }
 }
 
 async function submitAnswer(index, selectedButton) {
+  if (!navigator.onLine || state.connectionStatus !== "online") {
+    markConnectionInterrupted("offline");
+    return;
+  }
   clearQuestionTimer();
   disableOptions();
   selectedButton.classList.add("selected");
-  setMessage($("#test-message"), "Answer submitted.", "success");
+  setMessage($("#test-message"), "Submitting answer…");
   const pendingCapture = state.captureScheduledForCurrentQuestion && !state.snapshotCaptured
     ? captureSnapshotOnce("random")
     : Promise.resolve(false);
@@ -882,12 +1433,22 @@ async function submitAnswer(index, selectedButton) {
       body: JSON.stringify({ selected_index: index }),
     });
     await pendingCapture;
+    setMessage($("#test-message"), "Answer received.", "success");
     if (result.status === "completed") {
       await loadResult();
     } else {
       setTimeout(loadQuestion, 300);
     }
   } catch (error) {
+    if (error.networkError) {
+      markConnectionInterrupted("network_failure");
+      setMessage($("#test-message"), "The answer was not confirmed by the server. Reconnect to continue.", "error");
+      return;
+    }
+    if (error.status === 409 || error.status === 423) {
+      await recoverAssessment("manual_retry");
+      return;
+    }
     setMessage($("#test-message"), error.message, "error");
     setTimeout(loadQuestion, 500);
   }
@@ -896,6 +1457,7 @@ async function submitAnswer(index, selectedButton) {
 async function loadResult() {
   clearQuestionTimer();
   clearSnapshotTimer();
+  clearHeartbeatTimer();
   state.testActive = false;
   try {
     if (!state.snapshotCaptured) await captureSnapshotOnce("completion_fallback");
@@ -912,9 +1474,9 @@ async function loadResult() {
     $("#timeout-count").textContent = result.timed_out_count;
     $("#focus-count").textContent = result.focus_loss_count;
     $("#monitoring-count").textContent = result.monitoring_event_count || 0;
+    if ($("#interruption-count")) $("#interruption-count").textContent = result.interruption_count || 0;
     $("#result-disclaimer").textContent = result.disclaimer;
-    sessionStorage.removeItem("kanokware_assessment_id");
-    sessionStorage.removeItem("kanokware_session_token");
+    clearAssessmentSession();
   } catch (error) {
     setMessage($("#test-message"), error.message, "error");
   }
@@ -922,9 +1484,9 @@ async function loadResult() {
 
 $("#new-assessment-button").addEventListener("click", () => {
   stopCamera();
+  clearHeartbeatTimer();
   state.documentId = null;
-  state.assessmentId = null;
-  state.token = null;
+  clearAssessmentSession();
   state.currentPosition = null;
   state.snapshotCaptured = false;
   state.monitoringEventCount = 0;
@@ -950,6 +1512,8 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("blur", () => {
   if (!state.testActive) return;
+  showMonitoringWarning({ title: "Assessment window lost focus", message: "Return to the assessment window.", severity: "warning" });
+  postMonitoringEvent("window_blur", 0, false, { severity: "warning", message: "The assessment browser window lost focus." });
   fetch(`/api/assessments/${state.assessmentId}/focus-event`, {
     method: "POST",
     headers: assessmentHeaders(),
@@ -957,6 +1521,28 @@ window.addEventListener("blur", () => {
     keepalive: true,
   }).catch(() => {});
 });
+window.addEventListener("focus", () => {
+  if (!state.testActive) return;
+  postMonitoringEvent("window_blur", 0, true, { severity: "warning", message: "The assessment browser window regained focus." });
+  const activeWarning = Object.values(state.monitoringStates).some((condition) => condition.warned);
+  if (!activeWarning) hideMonitoringWarning();
+});
+
+window.addEventListener("offline", () => {
+  if (!state.testActive) return;
+  markConnectionInterrupted("offline");
+  reportExplicitInterruption("offline");
+});
+
+window.addEventListener("online", () => {
+  if (!state.testActive) return;
+  recoverAssessment("reconnect");
+});
+
+const retryConnectionButton = $("#retry-connection-button");
+if (retryConnectionButton) {
+  retryConnectionButton.addEventListener("click", () => recoverAssessment("manual_retry"));
+}
 
 async function loadLecturerSession(silent = false) {
   try {
@@ -1334,7 +1920,7 @@ function renderSubmissions(rows) {
   const body = $("#submissions-body");
   body.replaceChildren();
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="8" class="empty-state">No submissions found for the selected course.</td></tr>';
+    body.innerHTML = '<tr><td colspan="9" class="empty-state">No submissions found for the selected course.</td></tr>';
     return;
   }
   rows.forEach((item) => {
@@ -1348,6 +1934,7 @@ function renderSubmissions(rows) {
       <td></td>
       <td class="snapshot-cell"></td>
       <td class="monitoring-cell"></td>
+      <td class="interruption-cell"></td>
       <td><div class="action-row"></div></td>`;
     row.children[0].querySelector("strong").textContent = item.student_name;
     row.children[0].querySelector("small").textContent = item.student_id;
@@ -1359,7 +1946,8 @@ function renderSubmissions(rows) {
     row.children[4].textContent = item.decision || "—";
     renderSnapshotCell(row.children[5], item);
     renderMonitoringCell(row.children[6], item);
-    const actions = row.children[7].querySelector(".action-row");
+    renderInterruptionCell(row.children[7], item);
+    const actions = row.children[8].querySelector(".action-row");
     if (item.assessment_id) {
       const review = document.createElement("button");
       review.textContent = "Review";
@@ -1400,6 +1988,32 @@ function renderMonitoringCell(cell, item) {
   badge.textContent = count ? `${count} warning${count === 1 ? "" : "s"}` : "No warnings";
   if (critical) badge.classList.add("critical");
   else if (unresolved || count) badge.classList.add("warning");
+  cell.appendChild(badge);
+}
+
+function renderInterruptionCell(cell, item) {
+  cell.replaceChildren();
+  if (!item.assessment_id) {
+    cell.textContent = "No attempt";
+    return;
+  }
+  const count = Number(item.interruption_count || 0);
+  const offline = Number(item.total_offline_seconds || 0) + Number(item.current_offline_seconds || 0);
+  const badge = document.createElement("span");
+  badge.className = "interruption-indicator";
+  if (item.assessment_status === "locked") {
+    badge.textContent = "Locked";
+    badge.classList.add("critical");
+  } else if (item.assessment_status === "interrupted") {
+    badge.textContent = `Interrupted · ${formatDuration(offline)}`;
+    badge.classList.add("critical");
+  } else if (count) {
+    badge.textContent = `${count} interruption${count === 1 ? "" : "s"} · ${formatDuration(offline)}`;
+    badge.classList.add("warning");
+  } else {
+    badge.textContent = "Continuous";
+  }
+  if (item.interruption_excused) badge.classList.add("excused");
   cell.appendChild(badge);
 }
 
@@ -1447,6 +2061,8 @@ async function loadSnapshotImage(assessmentId, image) {
 async function reviewAssessment(assessmentId) {
   try {
     const result = await api(`/api/lecturer/assessments/${assessmentId}`);
+    state.currentReviewAssessmentId = assessmentId;
+    state.currentReviewSummary = result.summary;
     $("#review-panel").classList.remove("hidden");
     $("#review-title").textContent = `${result.summary.student_name} · ${result.summary.document_title}`;
     const summary = $("#review-summary");
@@ -1457,6 +2073,9 @@ async function reviewAssessment(assessmentId) {
       [result.summary.timed_out_count ?? "—", "timed out"],
       [result.summary.focus_loss_count ?? "—", "focus losses"],
       [result.summary.monitoring_event_count ?? 0, "webcam warnings"],
+      [result.summary.interruption_count ?? 0, "interruptions"],
+      [formatDuration(result.summary.total_offline_seconds || 0), "offline time"],
+      [result.summary.resume_count ?? 0, "resumes"],
     ];
     metrics.forEach(([value, label]) => {
       const block = document.createElement("div");
@@ -1465,6 +2084,26 @@ async function reviewAssessment(assessmentId) {
       block.querySelector("span").textContent = label;
       summary.appendChild(block);
     });
+    const interruptionPanel = $("#review-interruption");
+    const interruptionCount = Number(result.summary.interruption_count || 0);
+    const interruptedStatus = ["interrupted", "locked"].includes(result.summary.status);
+    interruptionPanel.classList.toggle("hidden", !interruptionCount && !interruptedStatus);
+    if (!interruptionPanel.classList.contains("hidden")) {
+      const title = result.summary.status === "locked"
+        ? "Assessment locked for review"
+        : result.summary.status === "interrupted"
+          ? "Assessment currently interrupted"
+          : "Assessment resumed after interruption";
+      $("#review-interruption-title").textContent = title;
+      const reason = (result.summary.lock_reason || result.summary.last_interruption_reason || "connection interruption").replaceAll("_", " ");
+      const note = result.summary.interruption_note ? ` Note: ${result.summary.interruption_note}` : "";
+      $("#review-interruption-text").textContent = `${interruptionCount} interruption(s), ${formatDuration(result.summary.total_offline_seconds || 0)} recorded offline, ${result.summary.resume_count || 0} successful resume(s). Reason: ${reason}.${note}`;
+      $("#allow-resume-button").classList.toggle("hidden", !interruptedStatus);
+      $("#finish-interrupted-button").classList.toggle("hidden", !interruptedStatus);
+      $("#excuse-interruption-button").textContent = result.summary.interruption_excused ? "Excused" : "Mark excused";
+      $("#excuse-interruption-button").disabled = Boolean(result.summary.interruption_excused);
+    }
+
     const monitoringPanel = $("#review-monitoring");
     const monitoringList = $("#review-monitoring-events");
     monitoringList.replaceChildren();
@@ -1514,6 +2153,38 @@ async function reviewAssessment(assessmentId) {
 }
 
 $("#close-review").addEventListener("click", () => $("#review-panel").classList.add("hidden"));
+
+async function lecturerInterruptionAction(action) {
+  const assessmentId = state.currentReviewAssessmentId;
+  if (!assessmentId) return;
+  const prompts = {
+    "allow-resume": "Optional note for allowing the student to resume:",
+    "finish-interrupted": "Optional note before ending and scoring all unanswered questions as timed out:",
+    "excuse-interruption": "Add a short reason for excusing the interruption:",
+  };
+  const note = prompt(prompts[action], "");
+  if (note === null) return;
+  if (action === "finish-interrupted" && !confirm("End this assessment and score every remaining unanswered question as timed out?")) return;
+  try {
+    await api(`/api/lecturer/assessments/${assessmentId}/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note: note.trim() || null }),
+    });
+    setMessage($("#lecturer-message"), action === "allow-resume"
+      ? "The student may resume after camera reverification."
+      : action === "finish-interrupted"
+        ? "The interrupted assessment was ended and scored."
+        : "The interruption was marked as excused.", "success");
+    await Promise.all([reviewAssessment(assessmentId), loadSubmissions()]);
+  } catch (error) {
+    handleLecturerError(error);
+  }
+}
+
+$("#allow-resume-button").addEventListener("click", () => lecturerInterruptionAction("allow-resume"));
+$("#finish-interrupted-button").addEventListener("click", () => lecturerInterruptionAction("finish-interrupted"));
+$("#excuse-interruption-button").addEventListener("click", () => lecturerInterruptionAction("excuse-interruption"));
 
 async function downloadReport(assessmentId, studentId) {
   try {
@@ -1775,16 +2446,16 @@ if (state.documentId && !state.assessmentId) {
 }
 if (state.assessmentId && state.token) {
   state.testActive = true;
+  saveAssessmentSession();
   showPanel("test", 3);
-  startCamera()
-    .then(startSuspiciousMonitoring)
-    .then(loadQuestion)
-    .catch((error) => {
-      state.testActive = false;
-      setMessage($("#test-message"), `Webcam access is required to resume: ${error.message}`, "error");
-    });
+  setConnectionOverlay("reconnecting");
+  recoverAssessment("page_load");
 }
 
 loadLecturerSession(true);
 if (state.platformKey) unlockPlatform(true);
-window.addEventListener("pagehide", stopCamera);
+window.addEventListener("pagehide", () => {
+  reportExplicitInterruption("pagehide");
+  clearHeartbeatTimer();
+  stopCamera();
+});
