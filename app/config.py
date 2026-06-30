@@ -52,5 +52,20 @@ class Settings:
     registration_enabled: bool = _as_bool(os.getenv("LECTURER_REGISTRATION_ENABLED"), False)
     account_setup_code_hours: int = int(os.getenv("ACCOUNT_SETUP_CODE_HOURS", "48"))
 
+    # Assessment continuity controls. The browser sends a heartbeat every few
+    # seconds. Missing heartbeats are treated as an interruption, while the
+    # server-side question clock continues to run.
+    heartbeat_interval_seconds: int = int(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "5"))
+    heartbeat_stale_seconds: int = int(os.getenv("HEARTBEAT_STALE_SECONDS", "20"))
+    assessment_resume_window_minutes: int = int(
+        os.getenv("ASSESSMENT_RESUME_WINDOW_MINUTES", "15")
+    )
+    max_assessment_interruptions: int = int(
+        os.getenv("MAX_ASSESSMENT_INTERRUPTION_COUNT", "2")
+    )
+    max_assessment_offline_seconds: int = int(
+        os.getenv("MAX_ASSESSMENT_OFFLINE_SECONDS", "300")
+    )
+
 
 settings = Settings()

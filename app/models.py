@@ -240,6 +240,23 @@ class Assessment(Base):
     focus_loss_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     question_count: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
 
+    # Connection continuity and secure-resume state. Heartbeats are the source
+    # of truth when the browser cannot report an abrupt exit or power loss.
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    interruption_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    interruption_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_offline_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    resume_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    resume_deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_resumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_interruption_reason: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lock_reason: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    interruption_excused: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    interruption_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    client_instance_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    camera_reverification_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
     document: Mapped[Document] = relationship(back_populates="assessments")
     items: Mapped[list["AssessmentItem"]] = relationship(
         back_populates="assessment",

@@ -57,6 +57,13 @@ def build_pdf_report(assessment: Assessment) -> bytes:
         ["Score", f"{assessment.score:.1f}%"],
         ["Decision", assessment.decision or "Not available"],
         ["Focus losses recorded", str(assessment.focus_loss_count)],
+        ["Connection interruptions", str(assessment.interruption_count)],
+        ["Successful resumes", str(assessment.resume_count)],
+        ["Total offline time", f"{assessment.total_offline_seconds} seconds"],
+        ["Interruption excused", "Yes" if assessment.interruption_excused else "No"],
+        ["Interruption note", assessment.interruption_note or "Not provided"],
+        ["Final connection status", assessment.status],
+        ["Lock reason", assessment.lock_reason or "Not applicable"],
         ["Webcam warning events", str(len(assessment.monitoring_events or []))],
         [
             "Unresolved warning events",

@@ -36,9 +36,16 @@ from .access_service import (
     require_document_access,
 )
 from .assessment_service import (
+    allow_assessment_resume,
+    assessment_state_payload,
     current_question,
+    finish_interrupted_assessment,
     get_assessment,
+    heartbeat_assessment,
+    interrupt_assessment,
+    refresh_interruption_state,
     result_payload,
+    set_interruption_excused,
     start_assessment,
     submit_answer,
 )
@@ -68,11 +75,14 @@ from .schemas import (
     AdminUserStatusRequest,
     ActivateAccountRequest,
     AnswerRequest,
+    AssessmentHeartbeatRequest,
+    AssessmentInterruptRequest,
     ChangePasswordRequest,
     CourseCollaboratorRequest,
     CourseCreateRequest,
     CourseSettingsRequest,
     FocusEventRequest,
+    InterruptionNoteRequest,
     MonitoringEventRequest,
     LecturerRegisterRequest,
     LoginRequest,
@@ -121,12 +131,17 @@ async def lifespan(_: FastAPI):
                 "Question generation was interrupted by a service restart. "
                 "Use Retry generation or upload the document again."
             )
-        if interrupted:
+        active_assessments = db.scalars(
+            select(Assessment).where(Assessment.status.in_(["in_progress", "interrupted"]))
+        ).all()
+        for assessment in active_assessments:
+            refresh_interruption_state(db, assessment, commit=False)
+        if interrupted or active_assessments:
             db.commit()
     yield
 
 
-app = FastAPI(title="Kanokware", version="0.7.0", lifespan=lifespan)
+app = FastAPI(title="Kanokware", version="0.8.0", lifespan=lifespan)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -989,7 +1004,9 @@ def retry_document_generation(
 
 @app.post("/api/assessments/start")
 def begin_assessment(payload: StartAssessmentRequest, db: Session = Depends(get_db)) -> dict[str, object]:
-    assessment, token = start_assessment(db, payload.document_id)
+    assessment, token = start_assessment(
+        db, payload.document_id, payload.client_instance_id
+    )
     return {
         "assessment_id": assessment.id,
         "session_token": token,
@@ -997,13 +1014,47 @@ def begin_assessment(payload: StartAssessmentRequest, db: Session = Depends(get_
         "pass_threshold": settings.pass_threshold,
         "webcam_required": settings.webcam_required,
         "monitoring_enabled": settings.webcam_required,
+        "heartbeat_interval_seconds": settings.heartbeat_interval_seconds,
+        "resume_window_minutes": settings.assessment_resume_window_minutes,
+        "max_interruptions": settings.max_assessment_interruptions,
+        "max_offline_seconds": settings.max_assessment_offline_seconds,
         "instructions": (
             f"Questions appear one at a time. Each question allows {settings.question_time_seconds} seconds. "
-            "You cannot return to an earlier question. The webcam remains active during the assessment. "
-            "No video or audio is recorded. Live face-presence checks run in the browser, one still image "
-            "is captured at a random point, and warning events are available to the assigned lecturer."
+            "You cannot return to an earlier question. Camera monitoring and connection continuity checks "
+            "remain active during the assessment. Interrupted sessions resume only after camera reverification."
         ),
     }
+
+
+@app.post("/api/assessments/{assessment_id}/heartbeat")
+def assessment_heartbeat(
+    assessment_id: str,
+    payload: AssessmentHeartbeatRequest,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    assessment = get_assessment(db, assessment_id, bearer_token(authorization))
+    return heartbeat_assessment(
+        db,
+        assessment,
+        client_instance_id=payload.client_instance_id,
+        camera_verified=payload.camera_verified,
+        reason=payload.reason,
+    )
+
+
+@app.post("/api/assessments/{assessment_id}/interrupt")
+def assessment_interrupt(
+    assessment_id: str,
+    payload: AssessmentInterruptRequest,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    assessment = get_assessment(db, assessment_id, bearer_token(authorization))
+    if assessment.client_instance_id and assessment.client_instance_id != payload.client_instance_id:
+        raise HTTPException(status_code=403, detail="The assessment browser identity does not match.")
+    interrupt_assessment(db, assessment, reason=payload.reason)
+    return assessment_state_payload(assessment)
 
 
 @app.get("/api/assessments/{assessment_id}/question")
@@ -1219,6 +1270,8 @@ def _submission_rows(db: Session, documents: list[Document]) -> list[dict[str, o
             .order_by(Assessment.started_at.desc())
             .limit(1)
         )
+        if latest:
+            refresh_interruption_state(db, latest)
         course = db.get(Course, document.course_id) if document.course_id else None
         rows.append({
             "document_id": document.id,
@@ -1241,6 +1294,17 @@ def _submission_rows(db: Session, documents: list[Document]) -> list[dict[str, o
             "monitoring_event_count": len(latest.monitoring_events) if latest else 0,
             "monitoring_unresolved_count": sum(1 for event in latest.monitoring_events if not event.corrected) if latest else 0,
             "monitoring_critical_count": sum(1 for event in latest.monitoring_events if event.severity == "critical") if latest else 0,
+            "interruption_count": latest.interruption_count if latest else 0,
+            "total_offline_seconds": latest.total_offline_seconds if latest else 0,
+            "current_offline_seconds": (
+                max(0, int((utcnow() - aware(latest.interruption_started_at)).total_seconds()))
+                if latest and latest.interruption_started_at else 0
+            ),
+            "resume_count": latest.resume_count if latest else 0,
+            "resume_deadline_at": latest.resume_deadline_at.isoformat() if latest and latest.resume_deadline_at else None,
+            "last_interruption_reason": latest.last_interruption_reason if latest else None,
+            "lock_reason": latest.lock_reason if latest else None,
+            "interruption_excused": latest.interruption_excused if latest else False,
         })
     return rows
 
@@ -1259,6 +1323,7 @@ def _assessment_for_lecturer(db: Session, user: User, assessment_id: str) -> Ass
     if not assessment:
         raise HTTPException(status_code=404, detail="Assessment not found.")
     require_document_access(db, user, assessment.document_id)
+    refresh_interruption_state(db, assessment)
     return assessment
 
 
@@ -1299,6 +1364,22 @@ def _assessment_detail(assessment: Assessment) -> dict[str, object]:
     summary["monitoring_event_count"] = len(monitoring_events)
     summary["monitoring_unresolved_count"] = sum(1 for event in monitoring_events if not event.corrected)
     summary["monitoring_critical_count"] = sum(1 for event in monitoring_events if event.severity == "critical")
+    summary.update({
+        "interruption_count": assessment.interruption_count,
+        "total_offline_seconds": assessment.total_offline_seconds,
+        "current_offline_seconds": (
+            max(0, int((utcnow() - aware(assessment.interruption_started_at)).total_seconds()))
+            if assessment.interruption_started_at else 0
+        ),
+        "resume_count": assessment.resume_count,
+        "resume_deadline_at": assessment.resume_deadline_at.isoformat() if assessment.resume_deadline_at else None,
+        "last_interruption_reason": assessment.last_interruption_reason,
+        "lock_reason": assessment.lock_reason,
+        "locked_at": assessment.locked_at.isoformat() if assessment.locked_at else None,
+        "camera_reverification_required": assessment.camera_reverification_required,
+        "interruption_excused": assessment.interruption_excused,
+        "interruption_note": assessment.interruption_note,
+    })
     return {
         "summary": summary,
         "questions": details,
@@ -1370,6 +1451,68 @@ def lecturer_pdf_report(
     db.commit()
     safe_id = assessment.document.student_id.replace("/", "-").replace("\\", "-")
     return Response(content=pdf, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="kanokware-{safe_id}.pdf"'})
+
+
+@app.post("/api/lecturer/assessments/{assessment_id}/allow-resume")
+def lecturer_allow_resume(
+    assessment_id: str,
+    payload: InterruptionNoteRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    assessment = _assessment_for_lecturer(db, user, assessment_id)
+    require_document_access(db, user, assessment.document_id, write=True)
+    allow_assessment_resume(db, assessment, payload.note)
+    audit(
+        db, request, "assessment_resume_allowed", user=user,
+        resource_type="assessment", resource_id=assessment.id,
+        detail={"note": payload.note},
+    )
+    db.commit()
+    return {"allowed": True, "state": assessment_state_payload(assessment)}
+
+
+@app.post("/api/lecturer/assessments/{assessment_id}/finish-interrupted")
+def lecturer_finish_interrupted(
+    assessment_id: str,
+    payload: InterruptionNoteRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    assessment = _assessment_for_lecturer(db, user, assessment_id)
+    require_document_access(db, user, assessment.document_id, write=True)
+    if payload.note:
+        assessment.interruption_note = payload.note.strip()
+    finish_interrupted_assessment(db, assessment)
+    audit(
+        db, request, "assessment_finished_after_interruption", user=user,
+        resource_type="assessment", resource_id=assessment.id,
+        detail={"note": payload.note},
+    )
+    db.commit()
+    return {"finished": True, "result": result_payload(assessment)}
+
+
+@app.post("/api/lecturer/assessments/{assessment_id}/excuse-interruption")
+def lecturer_excuse_interruption(
+    assessment_id: str,
+    payload: InterruptionNoteRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    assessment = _assessment_for_lecturer(db, user, assessment_id)
+    require_document_access(db, user, assessment.document_id, write=True)
+    set_interruption_excused(db, assessment, excused=True, note=payload.note)
+    audit(
+        db, request, "assessment_interruption_excused", user=user,
+        resource_type="assessment", resource_id=assessment.id,
+        detail={"note": payload.note},
+    )
+    db.commit()
+    return {"excused": True, "state": assessment_state_payload(assessment)}
 
 
 @app.delete("/api/lecturer/assessments/{assessment_id}")

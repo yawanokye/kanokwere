@@ -42,6 +42,29 @@ class GeneratedQuestionBank(BaseModel):
 
 class StartAssessmentRequest(BaseModel):
     document_id: str
+    client_instance_id: str = Field(min_length=16, max_length=120)
+
+
+class AssessmentHeartbeatRequest(BaseModel):
+    client_instance_id: str = Field(min_length=16, max_length=120)
+    camera_verified: bool = False
+    reason: Literal["periodic", "start", "reconnect", "resume", "page_load", "manual_retry"] = "periodic"
+
+
+class AssessmentInterruptRequest(BaseModel):
+    client_instance_id: str = Field(min_length=16, max_length=120)
+    reason: Literal[
+        "offline",
+        "pagehide",
+        "browser_exit",
+        "machine_sleep",
+        "camera_failure",
+        "network_failure",
+    ] = "browser_exit"
+
+
+class InterruptionNoteRequest(BaseModel):
+    note: str | None = Field(default=None, max_length=1000)
 
 
 class AnswerRequest(BaseModel):
@@ -123,7 +146,15 @@ class MonitoringEventRequest(BaseModel):
         "excessive_movement",
         "low_light",
         "camera_interrupted",
+        "camera_covered",
+        "camera_frozen",
+        "monitoring_unavailable",
+        "window_blur",
         "tab_hidden",
+        "connection_interrupted",
+        "assessment_resumed",
+        "resume_device_changed",
+        "assessment_locked",
     ]
     duration_ms: int = Field(default=0, ge=0, le=300000)
     question_position: int | None = Field(default=None, ge=1, le=50)

@@ -94,17 +94,27 @@ def _repair_assessment_columns() -> None:
         inspector = sa.inspect(connection)
         if "assessments" in set(inspector.get_table_names()):
             columns = {item["name"] for item in inspector.get_columns("assessments")}
-            if "question_count" not in columns:
-                print("Prestart: adding missing assessments.question_count", flush=True)
-                operations.add_column(
-                    "assessments",
-                    sa.Column(
-                        "question_count",
-                        sa.Integer(),
-                        nullable=False,
-                        server_default="20",
-                    ),
-                )
+            assessment_additions = [
+                sa.Column("question_count", sa.Integer(), nullable=False, server_default="20"),
+                sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=True),
+                sa.Column("interruption_started_at", sa.DateTime(timezone=True), nullable=True),
+                sa.Column("interruption_count", sa.Integer(), nullable=False, server_default="0"),
+                sa.Column("total_offline_seconds", sa.Integer(), nullable=False, server_default="0"),
+                sa.Column("resume_count", sa.Integer(), nullable=False, server_default="0"),
+                sa.Column("resume_deadline_at", sa.DateTime(timezone=True), nullable=True),
+                sa.Column("last_resumed_at", sa.DateTime(timezone=True), nullable=True),
+                sa.Column("last_interruption_reason", sa.String(length=80), nullable=True),
+                sa.Column("locked_at", sa.DateTime(timezone=True), nullable=True),
+                sa.Column("lock_reason", sa.String(length=120), nullable=True),
+                sa.Column("interruption_excused", sa.Boolean(), nullable=False, server_default=sa.false()),
+                sa.Column("interruption_note", sa.Text(), nullable=True),
+                sa.Column("client_instance_id", sa.String(length=120), nullable=True),
+                sa.Column("camera_reverification_required", sa.Boolean(), nullable=False, server_default=sa.false()),
+            ]
+            for column in assessment_additions:
+                if column.name not in columns:
+                    print(f"Prestart: adding missing assessments.{column.name}", flush=True)
+                    operations.add_column("assessments", column)
 
 
 def _verify_schema() -> None:
@@ -122,11 +132,32 @@ def _verify_schema() -> None:
     if "assessment_question_count" not in course_columns:
         raise RuntimeError("Database upgrade incomplete: courses.assessment_question_count is missing.")
     assessment_columns = {item["name"] for item in inspector.get_columns("assessments")}
-    if "question_count" not in assessment_columns:
-        raise RuntimeError("Database upgrade incomplete: assessments.question_count is missing.")
+    required_assessment_columns = {
+        "question_count",
+        "last_seen_at",
+        "interruption_started_at",
+        "interruption_count",
+        "total_offline_seconds",
+        "resume_count",
+        "resume_deadline_at",
+        "last_resumed_at",
+        "last_interruption_reason",
+        "locked_at",
+        "lock_reason",
+        "interruption_excused",
+        "interruption_note",
+        "client_instance_id",
+        "camera_reverification_required",
+    }
+    missing_assessment = sorted(required_assessment_columns - assessment_columns)
+    if missing_assessment:
+        raise RuntimeError(
+            "Database upgrade incomplete. Missing assessment columns: "
+            + ", ".join(missing_assessment)
+        )
     if "monitoring_events" not in tables:
         raise RuntimeError("Database upgrade incomplete: monitoring_events table is missing.")
-    print("Prestart: user, course, assessment, and monitoring schema verified.", flush=True)
+    print("Prestart: user, course, assessment continuity, and monitoring schema verified.", flush=True)
 
 
 def main() -> None:
