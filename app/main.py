@@ -5,6 +5,7 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import mimetypes
 
 from fastapi import (
     BackgroundTasks,
@@ -141,6 +142,9 @@ async def lifespan(_: FastAPI):
     yield
 
 
+mimetypes.add_type("text/javascript", ".mjs")
+mimetypes.add_type("application/wasm", ".wasm")
+
 app = FastAPI(title="Kanokware", version="0.8.1", lifespan=lifespan)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -154,19 +158,9 @@ async def security_headers(request: Request, call_next):
     response.headers["Referrer-Policy"] = "same-origin"
     response.headers["Permissions-Policy"] = "camera=(self), microphone=(), geolocation=()"
     response.headers["Cache-Control"] = "no-store" if request.url.path.startswith("/api/") else "no-cache"
-    # The locally bundled MediaPipe face-detection WASM loader uses dynamic
-    # JavaScript evaluation. Grant unsafe-eval only to the frontend document
-    # that runs the detector. API and other responses retain the stricter
-    # script policy.
-    frontend_document = request.url.path == "/" or request.url.path.endswith(".html")
-    script_sources = (
-        "'self' 'wasm-unsafe-eval' 'unsafe-eval'"
-        if frontend_document
-        else "'self' 'wasm-unsafe-eval'"
-    )
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; style-src 'self' 'unsafe-inline'; "
-        f"script-src {script_sources}; "
+        "script-src 'self' 'wasm-unsafe-eval'; "
         "img-src 'self' data: blob:; media-src 'self' blob:; "
         "connect-src 'self'; worker-src 'self' blob:; "
         "frame-ancestors 'none'"
