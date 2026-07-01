@@ -28,6 +28,9 @@ const state = {
   snapshotUrls: [],
   assessmentQuestionCount: 20,
   faceDetector: null,
+  faceDetectorPromise: null,
+  tasksVisionModulePromise: null,
+  lastDetectionTimestampMs: 0,
   monitoringTimer: null,
   monitoringBusy: false,
   monitoringStates: {},
@@ -60,7 +63,8 @@ const state = {
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
-const FACE_DETECTION_ASSET_BASE = "/static/vendor/mediapipe-face-detection";
+const MEDIAPIPE_TASKS_BASE = "/static/vendor/mediapipe-tasks-vision";
+const FACE_DETECTION_MODEL_URL = `${MEDIAPIPE_TASKS_BASE}/models/face_detection_short_range.tflite`;
 const FACE_DETECTION_MAX_FAILURES = 5;
 const MONITOR_INTERVAL_MS = 350;
 const MONITOR_RESULT_TIMEOUT_MS = 2600;
@@ -774,34 +778,127 @@ function normaliseNativeDetections(detections, video) {
   });
 }
 
+function normaliseTasksDetections(detections, video) {
+  const width = Math.max(1, Number(video.videoWidth || 1));
+  const height = Math.max(1, Number(video.videoHeight || 1));
+  return (detections || []).map((detection) => {
+    const box = detection?.boundingBox || {};
+    const originX = Number(box.originX ?? box.origin_x ?? 0);
+    const originY = Number(box.originY ?? box.origin_y ?? 0);
+    const boxWidth = Number(box.width || 0);
+    const boxHeight = Number(box.height || 0);
+    const keypoints = Array.isArray(detection?.keypoints)
+      ? detection.keypoints.map((point) => ({
+          x: Number(point.x || 0),
+          y: Number(point.y || 0),
+        }))
+      : [];
+    return {
+      boundingBox: {
+        xCenter: (originX + boxWidth / 2) / width,
+        yCenter: (originY + boxHeight / 2) / height,
+        width: boxWidth / width,
+        height: boxHeight / height,
+      },
+      landmarks: keypoints,
+    };
+  });
+}
+
+async function loadTasksVisionModule() {
+  if (!state.tasksVisionModulePromise) {
+    state.tasksVisionModulePromise = import(
+      `${MEDIAPIPE_TASKS_BASE}/vision_bundle.mjs`
+    ).catch((error) => {
+      state.tasksVisionModulePromise = null;
+      throw error;
+    });
+  }
+  return state.tasksVisionModulePromise;
+}
+
+async function createTasksFaceDetector() {
+  const { FilesetResolver, FaceDetector } = await loadTasksVisionModule();
+  const vision = await FilesetResolver.forVisionTasks(
+    `${MEDIAPIPE_TASKS_BASE}/wasm`
+  );
+  const modelResponse = await fetch(FACE_DETECTION_MODEL_URL, {
+    credentials: "same-origin",
+    cache: "force-cache",
+  });
+  if (!modelResponse.ok) {
+    throw new Error(`Face model could not be loaded (${modelResponse.status}).`);
+  }
+  const modelBuffer = await modelResponse.arrayBuffer();
+  if (modelBuffer.byteLength < 1000) {
+    throw new Error("The local face model is incomplete.");
+  }
+  return FaceDetector.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetBuffer: new Uint8Array(modelBuffer),
+      delegate: "CPU",
+    },
+    runningMode: "VIDEO",
+    minDetectionConfidence: 0.45,
+    minSuppressionThreshold: 0.30,
+  });
+}
+
 async function ensureMonitoringEngine() {
   if (state.faceDetector) return state.faceDetector;
-  if (typeof window.FaceDetection === "function") {
-    const detector = new window.FaceDetection({
-      locateFile: (file) => `${FACE_DETECTION_ASSET_BASE}/${file}`,
-    });
-    detector.setOptions({ model: "short", selfieMode: true, minDetectionConfidence: 0.45 });
-    detector.onResults(handleFaceDetectionResults);
-    state.faceDetector = detector;
-    state.monitoringEngine = "mediapipe";
-    return detector;
+  if (state.faceDetectorPromise) return state.faceDetectorPromise;
+
+  state.faceDetectorPromise = (async () => {
+    let tasksError = null;
+    try {
+      const detector = await createTasksFaceDetector();
+      state.faceDetector = detector;
+      state.monitoringEngine = "mediapipe_tasks";
+      state.lastDetectionTimestampMs = 0;
+      return detector;
+    } catch (error) {
+      tasksError = error;
+      console.error("MediaPipe Tasks Face Detector failed to initialise:", error);
+    }
+
+    if (typeof window.FaceDetector === "function") {
+      state.faceDetector = new window.FaceDetector({
+        fastMode: true,
+        maxDetectedFaces: 3,
+      });
+      state.monitoringEngine = "native";
+      return state.faceDetector;
+    }
+
+    const detail = tasksError?.message ? ` ${tasksError.message}` : "";
+    throw new Error(`The automated face-monitoring engine could not be initialised.${detail}`);
+  })();
+
+  try {
+    return await state.faceDetectorPromise;
+  } catch (error) {
+    state.faceDetectorPromise = null;
+    throw error;
   }
-  if (typeof window.FaceDetector === "function") {
-    state.faceDetector = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 3 });
-    state.monitoringEngine = "native";
-    return state.faceDetector;
-  }
-  throw new Error("The automated face-monitoring engine is not supported by this browser.");
 }
 
 async function runFaceDetectionFrame(video) {
   const detector = await ensureMonitoringEngine();
   if (state.monitoringEngine === "native") {
     const results = await detector.detect(video);
-    handleFaceDetectionResults({ detections: normaliseNativeDetections(results, video) });
+    handleFaceDetectionResults({
+      detections: normaliseNativeDetections(results, video),
+    });
     return;
   }
-  await detector.send({ image: video });
+
+  const now = performance.now();
+  const timestampMs = Math.max(now, state.lastDetectionTimestampMs + 1);
+  state.lastDetectionTimestampMs = timestampMs;
+  const result = detector.detectForVideo(video, timestampMs);
+  handleFaceDetectionResults({
+    detections: normaliseTasksDetections(result?.detections, video),
+  });
 }
 
 async function runMonitoringPreflight() {
@@ -920,7 +1017,9 @@ function stopSuspiciousMonitoring({ closeDetector = true } = {}) {
   }
   if (closeDetector) {
     state.faceDetector = null;
+    state.faceDetectorPromise = null;
     state.monitoringEngine = null;
+    state.lastDetectionTimestampMs = 0;
   }
   state.lastFaceMotionSample = null;
   state.faceMotionHistory = [];
