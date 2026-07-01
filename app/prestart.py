@@ -11,6 +11,19 @@ from .database import Base, engine
 from . import models  # noqa: F401
 
 
+MONITORING_ASSET_DIR = BASE_DIR / "app" / "static" / "vendor" / "mediapipe-tasks-vision"
+REQUIRED_MONITORING_ASSETS = {
+    "vision_bundle.mjs",
+    "models/face_detection_short_range.tflite",
+    "wasm/vision_wasm_internal.js",
+    "wasm/vision_wasm_internal.wasm",
+    "wasm/vision_wasm_module_internal.js",
+    "wasm/vision_wasm_module_internal.wasm",
+    "wasm/vision_wasm_nosimd_internal.js",
+    "wasm/vision_wasm_nosimd_internal.wasm",
+}
+
+
 REQUIRED_USER_COLUMNS = {
     "id",
     "institution_id",
@@ -160,10 +173,26 @@ def _verify_schema() -> None:
     print("Prestart: user, course, assessment continuity, and monitoring schema verified.", flush=True)
 
 
+def _verify_monitoring_assets() -> None:
+    missing = sorted(
+        relative_path
+        for relative_path in REQUIRED_MONITORING_ASSETS
+        if not (MONITORING_ASSET_DIR / relative_path).is_file()
+    )
+    if missing:
+        raise RuntimeError(
+            "Face-monitoring deployment is incomplete. Missing files: "
+            + ", ".join(missing)
+            + ". Upload the complete app/static/vendor/mediapipe-tasks-vision folder."
+        )
+    print("Prestart: MediaPipe Tasks Vision assets verified.", flush=True)
+
+
 def main() -> None:
     # Create tables that do not yet exist, repair known legacy schema gaps, then
     # apply versioned migrations. The final verification prevents Render from
     # starting the app against an incomplete database.
+    _verify_monitoring_assets()
     Base.metadata.create_all(bind=engine)
     _repair_legacy_user_columns()
     _repair_assessment_columns()

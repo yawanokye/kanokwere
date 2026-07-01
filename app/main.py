@@ -145,8 +145,19 @@ async def lifespan(_: FastAPI):
 mimetypes.add_type("text/javascript", ".mjs")
 mimetypes.add_type("application/wasm", ".wasm")
 
-app = FastAPI(title="Kanokware", version="0.8.1", lifespan=lifespan)
+app = FastAPI(title="Kanokware", version="0.8.2", lifespan=lifespan)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+MONITORING_ASSET_DIR = STATIC_DIR / "vendor" / "mediapipe-tasks-vision"
+MONITORING_ASSETS = {
+    "vision_bundle.mjs": "application/javascript",
+    "models/face_detection_short_range.tflite": "application/octet-stream",
+    "wasm/vision_wasm_internal.js": "application/javascript",
+    "wasm/vision_wasm_internal.wasm": "application/wasm",
+    "wasm/vision_wasm_module_internal.js": "application/javascript",
+    "wasm/vision_wasm_module_internal.wasm": "application/wasm",
+    "wasm/vision_wasm_nosimd_internal.js": "application/javascript",
+    "wasm/vision_wasm_nosimd_internal.wasm": "application/wasm",
+}
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -157,7 +168,12 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "same-origin"
     response.headers["Permissions-Policy"] = "camera=(self), microphone=(), geolocation=()"
-    response.headers["Cache-Control"] = "no-store" if request.url.path.startswith("/api/") else "no-cache"
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    elif request.url.path.startswith("/monitoring-assets/"):
+        response.headers["Cache-Control"] = "public, max-age=3600, must-revalidate"
+    else:
+        response.headers["Cache-Control"] = "no-cache"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; style-src 'self' 'unsafe-inline'; "
         "script-src 'self' 'wasm-unsafe-eval'; "
@@ -176,6 +192,44 @@ def home() -> FileResponse:
 @app.get("/favicon.ico", include_in_schema=False)
 def favicon() -> Response:
     return Response(status_code=204)
+
+
+def _missing_monitoring_assets() -> list[str]:
+    return [
+        relative_path
+        for relative_path in MONITORING_ASSETS
+        if not (MONITORING_ASSET_DIR / relative_path).is_file()
+    ]
+
+
+@app.get("/api/monitoring/assets-status", include_in_schema=False)
+def monitoring_assets_status() -> dict[str, object]:
+    missing = _missing_monitoring_assets()
+    return {
+        "ready": not missing,
+        "missing": missing,
+        "asset_base": "/monitoring-assets",
+    }
+
+
+@app.get("/monitoring-assets/{asset_path:path}", include_in_schema=False)
+def monitoring_asset(asset_path: str) -> FileResponse:
+    normalized = asset_path.strip("/")
+    media_type = MONITORING_ASSETS.get(normalized)
+    if media_type is None:
+        raise HTTPException(status_code=404, detail="Monitoring asset not found.")
+
+    file_path = (MONITORING_ASSET_DIR / normalized).resolve()
+    asset_root = MONITORING_ASSET_DIR.resolve()
+    if asset_root not in file_path.parents or not file_path.is_file():
+        logger.error("Monitoring asset missing from deployment: %s", normalized)
+        raise HTTPException(status_code=404, detail="Monitoring asset is missing from this deployment.")
+
+    return FileResponse(
+        file_path,
+        media_type=media_type,
+        headers={"X-Content-Type-Options": "nosniff"},
+    )
 
 
 @app.get("/health")
