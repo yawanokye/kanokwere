@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from alembic import command
+import os
+from pathlib import Path
+import shutil
+import zipfile
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
@@ -11,7 +15,11 @@ from .database import Base, engine
 from . import models  # noqa: F401
 
 
-MONITORING_ASSET_DIR = BASE_DIR / "app" / "static" / "vendor" / "mediapipe-tasks-vision"
+REPOSITORY_MONITORING_ASSET_DIR = BASE_DIR / "app" / "static" / "vendor" / "mediapipe-tasks-vision"
+RUNTIME_MONITORING_ASSET_DIR = Path(
+    os.getenv("KANOKWARE_MONITORING_ASSET_DIR", "/tmp/kanokware-mediapipe-tasks-vision")
+)
+MONITORING_ASSET_BUNDLE = BASE_DIR / "app" / "vendor" / "mediapipe-tasks-vision-assets.zip"
 REQUIRED_MONITORING_ASSETS = {
     "vision_bundle.mjs",
     "models/face_detection_short_range.tflite",
@@ -173,17 +181,69 @@ def _verify_schema() -> None:
     print("Prestart: user, course, assessment continuity, and monitoring schema verified.", flush=True)
 
 
-def _verify_monitoring_assets() -> None:
-    missing = sorted(
+def _missing_assets(asset_dir: Path) -> list[str]:
+    return sorted(
         relative_path
         for relative_path in REQUIRED_MONITORING_ASSETS
-        if not (MONITORING_ASSET_DIR / relative_path).is_file()
+        if not (asset_dir / relative_path).is_file()
     )
+
+
+def _extract_monitoring_assets() -> Path:
+    repository_missing = _missing_assets(REPOSITORY_MONITORING_ASSET_DIR)
+    if not repository_missing:
+        return REPOSITORY_MONITORING_ASSET_DIR
+
+    if not MONITORING_ASSET_BUNDLE.is_file():
+        raise RuntimeError(
+            "Face-monitoring deployment is incomplete. The bundled asset archive is missing: "
+            "app/vendor/mediapipe-tasks-vision-assets.zip"
+        )
+
+    if RUNTIME_MONITORING_ASSET_DIR.exists():
+        shutil.rmtree(RUNTIME_MONITORING_ASSET_DIR)
+    RUNTIME_MONITORING_ASSET_DIR.mkdir(parents=True, exist_ok=True)
+
+    with zipfile.ZipFile(MONITORING_ASSET_BUNDLE, "r") as archive:
+        archive_names = set(archive.namelist())
+        for relative_path in sorted(REQUIRED_MONITORING_ASSETS):
+            candidates = (
+                relative_path,
+                f"mediapipe-tasks-vision/{relative_path}",
+            )
+            member = next((name for name in candidates if name in archive_names), None)
+            if member is None:
+                raise RuntimeError(
+                    "The bundled face-monitoring archive is incomplete. Missing: "
+                    + relative_path
+                )
+            destination = RUNTIME_MONITORING_ASSET_DIR / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(member, "r") as source, destination.open("wb") as target:
+                shutil.copyfileobj(source, target)
+
+    runtime_missing = _missing_assets(RUNTIME_MONITORING_ASSET_DIR)
+    if runtime_missing:
+        raise RuntimeError(
+            "Face-monitoring asset extraction failed. Missing files: "
+            + ", ".join(runtime_missing)
+        )
+
+    print(
+        "Prestart: MediaPipe Tasks Vision assets extracted to "
+        + str(RUNTIME_MONITORING_ASSET_DIR),
+        flush=True,
+    )
+    return RUNTIME_MONITORING_ASSET_DIR
+
+
+def _verify_monitoring_assets() -> None:
+    asset_dir = _extract_monitoring_assets()
+    missing = _missing_assets(asset_dir)
     if missing:
         raise RuntimeError(
             "Face-monitoring deployment is incomplete. Missing files: "
             + ", ".join(missing)
-            + ". Upload the complete app/static/vendor/mediapipe-tasks-vision folder."
         )
     print("Prestart: MediaPipe Tasks Vision assets verified.", flush=True)
 

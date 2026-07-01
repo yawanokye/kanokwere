@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -147,7 +148,10 @@ mimetypes.add_type("application/wasm", ".wasm")
 
 app = FastAPI(title="Kanokware", version="0.8.2", lifespan=lifespan)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-MONITORING_ASSET_DIR = STATIC_DIR / "vendor" / "mediapipe-tasks-vision"
+REPOSITORY_MONITORING_ASSET_DIR = STATIC_DIR / "vendor" / "mediapipe-tasks-vision"
+RUNTIME_MONITORING_ASSET_DIR = Path(
+    os.getenv("KANOKWARE_MONITORING_ASSET_DIR", "/tmp/kanokware-mediapipe-tasks-vision")
+)
 MONITORING_ASSETS = {
     "vision_bundle.mjs": "application/javascript",
     "models/face_detection_short_range.tflite": "application/octet-stream",
@@ -158,6 +162,16 @@ MONITORING_ASSETS = {
     "wasm/vision_wasm_nosimd_internal.js": "application/javascript",
     "wasm/vision_wasm_nosimd_internal.wasm": "application/wasm",
 }
+
+
+def _resolve_monitoring_asset_dir() -> Path:
+    for candidate in (RUNTIME_MONITORING_ASSET_DIR, REPOSITORY_MONITORING_ASSET_DIR):
+        if all((candidate / relative_path).is_file() for relative_path in MONITORING_ASSETS):
+            return candidate
+    return RUNTIME_MONITORING_ASSET_DIR
+
+
+MONITORING_ASSET_DIR = _resolve_monitoring_asset_dir()
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
