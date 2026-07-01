@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from alembic import command
+import hashlib
 import os
 from pathlib import Path
 import shutil
+import time
+import urllib.error
+import urllib.request
 import zipfile
 from alembic.config import Config
 from alembic.migration import MigrationContext
@@ -20,6 +24,15 @@ RUNTIME_MONITORING_ASSET_DIR = Path(
     os.getenv("KANOKWARE_MONITORING_ASSET_DIR", "/tmp/kanokware-mediapipe-tasks-vision")
 )
 MONITORING_ASSET_BUNDLE = BASE_DIR / "app" / "vendor" / "mediapipe-tasks-vision-assets.zip"
+FACE_MODEL_RELATIVE_PATH = "models/face_detection_short_range.tflite"
+FACE_MODEL_URL = os.getenv(
+    "KANOKWARE_FACE_MODEL_URL",
+    "https://storage.googleapis.com/mediapipe-models/face_detector/"
+    "blaze_face_short_range/float16/1/blaze_face_short_range.tflite",
+)
+LEGACY_FACE_MODEL_SHA256 = "3bc182eb9f33925d9e58b5c8d59308a760f4adea8f282370e428c51212c26633"
+EXPECTED_FACE_MODEL_SIZE = 229746
+
 REQUIRED_MONITORING_ASSETS = {
     "vision_bundle.mjs",
     "models/face_detection_short_range.tflite",
@@ -181,6 +194,92 @@ def _verify_schema() -> None:
     print("Prestart: user, course, assessment continuity, and monitoring schema verified.", flush=True)
 
 
+def _face_model_is_compatible(model_path: Path) -> bool:
+    """Return True only for the MediaPipe Tasks-compatible BlazeFace model.
+
+    The legacy MediaPipe Solutions model has the same purpose and a nearly
+    identical filename, but it does not contain the input normalization
+    metadata required by MediaPipe Tasks Vision.
+    """
+    if not model_path.is_file():
+        return False
+    try:
+        payload = model_path.read_bytes()
+    except OSError:
+        return False
+    if len(payload) != EXPECTED_FACE_MODEL_SIZE:
+        return False
+    if len(payload) < 8 or payload[4:8] != b"TFL3":
+        return False
+    digest = hashlib.sha256(payload).hexdigest()
+    return digest != LEGACY_FACE_MODEL_SHA256
+
+
+def _download_tasks_face_model(destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".download")
+    last_error: Exception | None = None
+
+    for attempt in range(1, 4):
+        try:
+            request = urllib.request.Request(
+                FACE_MODEL_URL,
+                headers={
+                    "User-Agent": "Kanokware/0.8 face-monitoring setup",
+                    "Accept": "application/octet-stream,*/*",
+                },
+            )
+            with urllib.request.urlopen(request, timeout=60) as response, temporary.open("wb") as target:
+                shutil.copyfileobj(response, target)
+
+            if not _face_model_is_compatible(temporary):
+                size = temporary.stat().st_size if temporary.exists() else 0
+                raise RuntimeError(
+                    "Downloaded face model is not the MediaPipe Tasks-compatible "
+                    f"BlazeFace model (received {size} bytes)."
+                )
+
+            temporary.replace(destination)
+            print(
+                "Prestart: downloaded MediaPipe Tasks-compatible BlazeFace model "
+                f"to {destination}",
+                flush=True,
+            )
+            return
+        except (OSError, urllib.error.URLError, RuntimeError) as exc:
+            last_error = exc
+            if temporary.exists():
+                temporary.unlink(missing_ok=True)
+            if attempt < 3:
+                time.sleep(attempt * 2)
+
+    raise RuntimeError(
+        "Could not download the MediaPipe Tasks-compatible BlazeFace model. "
+        "Check Render outbound network access or set KANOKWARE_FACE_MODEL_URL "
+        "to a reachable copy of the official model. "
+        f"Last error: {last_error}"
+    )
+
+
+def _ensure_tasks_face_model(asset_dir: Path) -> None:
+    model_path = asset_dir / FACE_MODEL_RELATIVE_PATH
+    if _face_model_is_compatible(model_path):
+        print("Prestart: MediaPipe Tasks-compatible face model verified.", flush=True)
+        return
+
+    if model_path.is_file():
+        digest = hashlib.sha256(model_path.read_bytes()).hexdigest()
+        if digest == LEGACY_FACE_MODEL_SHA256:
+            print(
+                "Prestart: replacing legacy face model that lacks Tasks normalization metadata.",
+                flush=True,
+            )
+        else:
+            print("Prestart: replacing incompatible face model.", flush=True)
+
+    _download_tasks_face_model(model_path)
+
+
 def _missing_assets(asset_dir: Path) -> list[str]:
     return sorted(
         relative_path
@@ -192,6 +291,7 @@ def _missing_assets(asset_dir: Path) -> list[str]:
 def _extract_monitoring_assets() -> Path:
     repository_missing = _missing_assets(REPOSITORY_MONITORING_ASSET_DIR)
     if not repository_missing:
+        _ensure_tasks_face_model(REPOSITORY_MONITORING_ASSET_DIR)
         return REPOSITORY_MONITORING_ASSET_DIR
 
     if not MONITORING_ASSET_BUNDLE.is_file():
@@ -229,6 +329,7 @@ def _extract_monitoring_assets() -> Path:
             + ", ".join(runtime_missing)
         )
 
+    _ensure_tasks_face_model(RUNTIME_MONITORING_ASSET_DIR)
     print(
         "Prestart: MediaPipe Tasks Vision assets extracted to "
         + str(RUNTIME_MONITORING_ASSET_DIR),
@@ -239,6 +340,7 @@ def _extract_monitoring_assets() -> Path:
 
 def _verify_monitoring_assets() -> None:
     asset_dir = _extract_monitoring_assets()
+    _ensure_tasks_face_model(asset_dir)
     missing = _missing_assets(asset_dir)
     if missing:
         raise RuntimeError(
