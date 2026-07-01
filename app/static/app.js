@@ -834,7 +834,7 @@ async function loadTasksVisionModule() {
       let lastError = null;
       for (const base of candidates) {
         try {
-          const module = await import(`${base}/vision_bundle.mjs?v=20260701-assets2`);
+          const module = await import(`${base}/vision_bundle.mjs?v=20260701-model-metadata-fix1`);
           state.tasksVisionAssetBase = base;
           return module;
         } catch (error) {
@@ -856,7 +856,7 @@ async function createTasksFaceDetector() {
   const assetBase = state.tasksVisionAssetBase || MEDIAPIPE_TASKS_BASES[0];
   const vision = await FilesetResolver.forVisionTasks(`${assetBase}/wasm`);
   const modelResponse = await fetch(
-    `${assetBase}/models/face_detection_short_range.tflite?v=20260701-assets2`,
+    `${assetBase}/models/face_detection_short_range.tflite?v=20260701-model-metadata-fix1`,
     {
       credentials: "same-origin",
       cache: "no-cache",
@@ -906,7 +906,13 @@ async function ensureMonitoringEngine() {
       return state.faceDetector;
     }
 
-    const detail = tasksError?.message ? ` ${tasksError.message}` : "";
+    const rawDetail = tasksError?.message ? String(tasksError.message) : "";
+    const metadataFailure = /NormalizationOptions metadata|Input tensor has type float32/i.test(rawDetail);
+    const detail = metadataFailure
+      ? " The deployed face model is incompatible with MediaPipe Tasks. Redeploy the corrected model package."
+      : rawDetail
+        ? ` ${rawDetail}`
+        : "";
     throw new Error(`The automated face-monitoring engine could not be initialised.${detail}`);
   })();
 
