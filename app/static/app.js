@@ -63,8 +63,11 @@ const state = {
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
-const MEDIAPIPE_TASKS_BASE = "/static/vendor/mediapipe-tasks-vision";
-const FACE_DETECTION_MODEL_URL = `${MEDIAPIPE_TASKS_BASE}/models/face_detection_short_range.tflite`;
+const MONITORING_ASSET_STATUS_URL = "/api/monitoring/assets-status";
+const MEDIAPIPE_TASKS_BASES = [
+  "/monitoring-assets",
+  "/static/vendor/mediapipe-tasks-vision",
+];
 const FACE_DETECTION_MAX_FAILURES = 5;
 const MONITOR_INTERVAL_MS = 350;
 const MONITOR_RESULT_TIMEOUT_MS = 2600;
@@ -805,11 +808,42 @@ function normaliseTasksDetections(detections, video) {
   });
 }
 
+async function verifyMonitoringAssets() {
+  const response = await fetch(MONITORING_ASSET_STATUS_URL, {
+    credentials: "same-origin",
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(`Monitoring asset check failed (${response.status}).`);
+  }
+  const status = await response.json();
+  if (!status.ready) {
+    const missing = Array.isArray(status.missing) ? status.missing.join(", ") : "unknown files";
+    throw new Error(`Monitoring files are missing from the deployment: ${missing}`);
+  }
+  return status.asset_base || MEDIAPIPE_TASKS_BASES[0];
+}
+
 async function loadTasksVisionModule() {
   if (!state.tasksVisionModulePromise) {
-    state.tasksVisionModulePromise = import(
-      `${MEDIAPIPE_TASKS_BASE}/vision_bundle.mjs`
-    ).catch((error) => {
+    state.tasksVisionModulePromise = (async () => {
+      const preferredBase = await verifyMonitoringAssets();
+      const candidates = [preferredBase, ...MEDIAPIPE_TASKS_BASES].filter(
+        (value, index, values) => value && values.indexOf(value) === index
+      );
+      let lastError = null;
+      for (const base of candidates) {
+        try {
+          const module = await import(`${base}/vision_bundle.mjs?v=20260701-assets2`);
+          state.tasksVisionAssetBase = base;
+          return module;
+        } catch (error) {
+          lastError = error;
+          console.error(`Face-monitoring module failed from ${base}:`, error);
+        }
+      }
+      throw lastError || new Error("The face-monitoring module could not be loaded.");
+    })().catch((error) => {
       state.tasksVisionModulePromise = null;
       throw error;
     });
@@ -819,13 +853,15 @@ async function loadTasksVisionModule() {
 
 async function createTasksFaceDetector() {
   const { FilesetResolver, FaceDetector } = await loadTasksVisionModule();
-  const vision = await FilesetResolver.forVisionTasks(
-    `${MEDIAPIPE_TASKS_BASE}/wasm`
+  const assetBase = state.tasksVisionAssetBase || MEDIAPIPE_TASKS_BASES[0];
+  const vision = await FilesetResolver.forVisionTasks(`${assetBase}/wasm`);
+  const modelResponse = await fetch(
+    `${assetBase}/models/face_detection_short_range.tflite?v=20260701-assets2`,
+    {
+      credentials: "same-origin",
+      cache: "no-cache",
+    }
   );
-  const modelResponse = await fetch(FACE_DETECTION_MODEL_URL, {
-    credentials: "same-origin",
-    cache: "force-cache",
-  });
   if (!modelResponse.ok) {
     throw new Error(`Face model could not be loaded (${modelResponse.status}).`);
   }
