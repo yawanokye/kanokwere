@@ -34,6 +34,8 @@ services:
         value: "false"
       - key: PASS_THRESHOLD
         value: "80"
+      - key: KANOKWARE_MONITORING_ASSET_DIR
+        value: /tmp/kanokware-mediapipe-tasks-vision
       - key: QUESTION_TIME_SECONDS
         value: "30"
       - key: MAX_UPLOAD_MB

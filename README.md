@@ -190,3 +190,7 @@ Students receive a concise consent notice that camera monitoring is active and t
 ## Assessment continuity
 
 Kanokware sends a heartbeat during active assessments. Abrupt browser closure, network loss, sleep, or power loss is detected from missing heartbeats even when the browser cannot report the event. Submitted answers remain stored. The current server-side question timer continues, and secure resume requires the same browser profile plus camera reverification.
+
+## Bundled face-monitoring assets
+
+The repository includes `app/vendor/mediapipe-tasks-vision-assets.zip`. During startup, `app.prestart` extracts the required model and WebAssembly files to `/tmp/kanokware-mediapipe-tasks-vision`. This avoids missing nested binary files in GitHub deployments.

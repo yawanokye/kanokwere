@@ -8,3 +8,7 @@ Kanokware includes MediaPipe Face Detection version 0.4.1657300184 for browser-s
 - Source: https://github.com/google-ai-edge/mediapipe
 
 The included model and WebAssembly files are served locally by Kanokware. No assessment video is sent to a third-party face-detection service.
+
+## MediaPipe Tasks Vision
+
+Bundled package: `@mediapipe/tasks-vision 0.10.35`, Apache License 2.0.
