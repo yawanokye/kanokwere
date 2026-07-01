@@ -94,3 +94,11 @@ Behaviour:
 - The same browser can resume within 15 minutes after camera reverification.
 - More than two interruptions or more than five minutes total offline locks the attempt.
 - Lecturers can allow resume, end and score the attempt, mark the interruption excused, or reset the attempt.
+
+
+## MediaPipe Tasks face-model metadata fix
+
+The startup process now replaces the legacy Face Detection model with the official
+MediaPipe Tasks-compatible BlazeFace short-range model. This fixes the
+`NormalizationOptions metadata` initialisation failure. Render must have outbound
+access to `storage.googleapis.com` during startup.

@@ -36,6 +36,9 @@ services:
         value: "80"
       - key: KANOKWARE_MONITORING_ASSET_DIR
         value: /tmp/kanokware-mediapipe-tasks-vision
+
+      - key: KANOKWARE_FACE_MODEL_URL
+        value: https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite
       - key: QUESTION_TIME_SECONDS
         value: "30"
       - key: MAX_UPLOAD_MB
