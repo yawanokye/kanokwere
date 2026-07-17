@@ -37,6 +37,32 @@ def sample_document() -> str:
     return " ".join(sentences)
 
 
+
+
+def understanding_fields(**overrides: str) -> dict[str, str]:
+    values = {
+        "understanding_summary": (
+            "This work evaluates institutional learning outcomes through a structured method, "
+            "and the student can explain how the evidence supports the conclusions reached."
+        ),
+        "key_decisions": (
+            "The approach was selected because it connects the evidence to the stated learning "
+            "outcomes and permits consistent interpretation of the findings."
+        ),
+        "main_contribution": (
+            "The work contributes a structured assessment of institutional learning outcomes and "
+            "shows how the evidence can guide academic decisions."
+        ),
+        "stated_limitation": (
+            "The evidence is limited by the scope and institutional context of the material used "
+            "for the assessment."
+        ),
+        "ai_use_level": "none",
+        "ai_use_details": "",
+    }
+    values.update(overrides)
+    return values
+
 def create_lecturer(client: TestClient, email: str, full_name: str = "Test Lecturer") -> tuple[dict, str]:
     response = client.post(
         "/api/platform/users",
@@ -110,6 +136,7 @@ def test_admin_created_lecturer_activation_course_and_complete_assessment():
                 "student_id": "TEST/001",
                 "title": "A Test of Document Ownership",
                 "course_code": enrollment_code,
+                **understanding_fields(),
             },
             files={"file": ("work.txt", sample_document().encode("utf-8"), "text/plain")},
         )
@@ -309,6 +336,7 @@ def test_heartbeat_interruption_resume_lock_and_lecturer_override():
                 "student_id": "TEST/CONT/001",
                 "title": "Continuity Assessment Document",
                 "course_code": enrollment_code,
+                **understanding_fields(),
             },
             files={"file": ("continuity.txt", sample_document().encode("utf-8"), "text/plain")},
         )
@@ -411,3 +439,400 @@ def test_heartbeat_interruption_resume_lock_and_lecturer_override():
         )
         assert resumed_after_override.status_code == 200, resumed_after_override.text
         assert resumed_after_override.json()["status"] == "in_progress"
+
+
+
+def _complete_assessment(client: TestClient, document_id: str, client_id: str) -> tuple[str, dict]:
+    started = client.post(
+        "/api/assessments/start",
+        json={"document_id": document_id, "client_instance_id": client_id},
+    )
+    assert started.status_code == 200, started.text
+    assessment_id = started.json()["assessment_id"]
+    headers = {"Authorization": f"Bearer {started.json()['session_token']}"}
+    count = started.json()["question_count"]
+    for position in range(1, count + 1):
+        question = client.get(f"/api/assessments/{assessment_id}/question", headers=headers)
+        assert question.status_code == 200, question.text
+        assert question.json()["position"] == position
+        detail = client.get(f"/api/admin/assessments/{assessment_id}", headers=ADMIN_HEADERS)
+        assert detail.status_code == 200, detail.text
+        correct_index = next(
+            item["correct_index"]
+            for item in detail.json()["questions"]
+            if item["position"] == position
+        )
+        answered = client.post(
+            f"/api/assessments/{assessment_id}/answer",
+            headers=headers,
+            json={"selected_index": correct_index},
+        )
+        assert answered.status_code == 200, answered.text
+    result = client.get(f"/api/assessments/{assessment_id}/result", headers=headers)
+    assert result.status_code == 200, result.text
+    return assessment_id, result.json()
+
+
+def test_optional_learning_process_version_history_adaptive_questions_and_rubric():
+    with TestClient(app) as client:
+        _, setup_code = create_lecturer(client, "phase1@test.edu", "Phase One Lecturer")
+        activate_lecturer(client, "phase1@test.edu", setup_code)
+
+        course_response = client.post(
+            "/api/lecturer/courses",
+            json={
+                "course_code": "RES 950",
+                "title": "Learning Assurance Project",
+                "academic_year": "2026/2027",
+                "semester": "Second Semester",
+                "assessment_question_count": 5,
+                "checkpoint_question_count": 3,
+                "milestones_enabled": True,
+                "version_history_enabled": True,
+                "milestone_titles": ["Proposal checkpoint", "Analysis checkpoint"],
+            },
+        )
+        assert course_response.status_code == 201, course_response.text
+        course = course_response.json()["course"]
+        assert course["milestones_enabled"] is True
+        assert course["version_history_enabled"] is True
+        assert course["final_justification_required"] is True
+        assert len(course["milestones"]) == 2
+        enrollment_code = course["enrollment_code"]
+        milestone_id = course["milestones"][0]["id"]
+
+        resolved = client.get("/api/courses/resolve", params={"code": enrollment_code})
+        assert resolved.status_code == 200, resolved.text
+        assert resolved.json()["milestones_enabled"] is True
+        assert resolved.json()["version_history_enabled"] is True
+
+        milestone_upload = client.post(
+            "/api/documents",
+            data={
+                "student_name": "Learning Student",
+                "student_id": "LEARN/001",
+                "title": "Evidence of Learning Project",
+                "course_code": enrollment_code,
+                "submission_stage": "milestone",
+                "milestone_id": milestone_id,
+                **understanding_fields(
+                    ai_use_level="limited",
+                    ai_use_details=(
+                        "AI was used only to suggest an outline. The student checked the outline "
+                        "against the course material and rewrote every section independently."
+                    ),
+                ),
+            },
+            files={"file": ("milestone.txt", sample_document().encode("utf-8"), "text/plain")},
+        )
+        assert milestone_upload.status_code == 202, milestone_upload.text
+        assert milestone_upload.json()["submission_stage"] == "milestone"
+        assert milestone_upload.json()["version_number"] == 1
+        assert milestone_upload.json()["assessment_question_count"] == 3
+        milestone_document_id = milestone_upload.json()["document_id"]
+
+        milestone_status = client.get(f"/api/documents/{milestone_document_id}/status")
+        assert milestone_status.status_code == 200
+        assert milestone_status.json()["assessment_question_count"] == 3
+        milestone_assessment_id, milestone_result = _complete_assessment(
+            client, milestone_document_id, "phase1-browser-milestone"
+        )
+        assert milestone_result["question_count"] == 3
+        assert milestone_result["score"] == 100.0
+
+        final_upload = client.post(
+            "/api/documents",
+            data={
+                "student_name": "Learning Student",
+                "student_id": "LEARN/001",
+                "title": "Evidence of Learning Project",
+                "course_code": enrollment_code,
+                "submission_stage": "final",
+                **understanding_fields(),
+            },
+            files={"file": ("final.txt", (sample_document() + " Final evidence and reflection.").encode("utf-8"), "text/plain")},
+        )
+        assert final_upload.status_code == 202, final_upload.text
+        assert final_upload.json()["version_number"] == 2
+        assert final_upload.json()["assessment_question_count"] == 5
+        final_document_id = final_upload.json()["document_id"]
+        final_assessment_id, final_result = _complete_assessment(
+            client, final_document_id, "phase1-browser-final"
+        )
+        assert final_result["question_count"] == 5
+
+        detail = client.get(f"/api/lecturer/assessments/{final_assessment_id}")
+        assert detail.status_code == 200, detail.text
+        payload = detail.json()
+        assert payload["summary"]["version_number"] == 2
+        assert len(payload["version_history"]) == 2
+        assert payload["version_comparison"] is not None
+        assert payload["justification"]["understanding_summary"]
+        assert all(item["category"] for item in payload["questions"])
+        assert any(item.get("adaptive_reason") for item in payload["questions"][1:])
+
+        scores = [
+            {
+                "criterion_key": criterion["key"],
+                "score": criterion["max_score"],
+                "comment": "Criterion fully demonstrated in the submitted work and defence.",
+            }
+            for criterion in payload["rubric"]
+        ]
+        mark = client.post(
+            f"/api/lecturer/assessments/{final_assessment_id}/rubric-mark",
+            json={"scores": scores, "overall_comment": "Learning assurance established."},
+        )
+        assert mark.status_code == 200, mark.text
+        assert mark.json()["total_score"] == 100.0
+        assert len(mark.json()["assessment"]["mark_audit"]) == 1
+
+        changed_scores = list(scores)
+        changed_scores[0] = {**changed_scores[0], "score": float(changed_scores[0]["score"]) - 1}
+        changed = client.post(
+            f"/api/lecturer/assessments/{final_assessment_id}/rubric-mark",
+            json={
+                "scores": changed_scores,
+                "overall_comment": "Minor moderation adjustment.",
+                "change_reason": "Moderator adjusted the first criterion after review.",
+            },
+        )
+        assert changed.status_code == 200, changed.text
+        assert len(changed.json()["assessment"]["mark_audit"]) == 2
+
+        progress = client.get(f"/api/lecturer/courses/{course['id']}/learning-progress")
+        assert progress.status_code == 200, progress.text
+        assert any(student["student_id"] == "LEARN/001" for student in progress.json()["students"])
+
+        # Optionality check: a final-only course accepts a final submission but rejects milestones.
+        final_only = client.post(
+            "/api/lecturer/courses",
+            json={
+                "course_code": "RES 951",
+                "title": "Final Submission Only",
+                "academic_year": "2026/2027",
+                "semester": "Second Semester",
+                "assessment_question_count": 5,
+                "milestones_enabled": False,
+                "version_history_enabled": False,
+            },
+        )
+        assert final_only.status_code == 201, final_only.text
+        final_only_course = final_only.json()["course"]
+        assert final_only_course["milestones_enabled"] is False
+        assert final_only_course["version_history_enabled"] is False
+        rejected = client.post(
+            "/api/documents",
+            data={
+                "student_name": "Final Only Student",
+                "student_id": "FINAL/001",
+                "title": "Final Only Assignment",
+                "course_code": final_only_course["enrollment_code"],
+                "submission_stage": "milestone",
+                "milestone_id": milestone_id,
+                **understanding_fields(),
+            },
+            files={"file": ("final-only.txt", sample_document().encode("utf-8"), "text/plain")},
+        )
+        assert rejected.status_code == 409
+
+
+def test_phase2_optional_modules_end_to_end():
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/platform/users",
+            headers=ADMIN_HEADERS,
+            json={
+                "full_name": "Phase Two Administrator",
+                "email": "phase2@phase2.edu",
+                "institution_name": "Phase Two University",
+                "department": "Graduate Studies",
+                "role": "institution_admin",
+            },
+        )
+        assert created.status_code == 201, created.text
+        activate_lecturer(client, "phase2@phase2.edu", created.json()["setup_code"])
+
+        course_response = client.post(
+            "/api/lecturer/courses",
+            json={
+                "course_code": "RES 950",
+                "title": "Advanced Learning Assurance",
+                "academic_year": "2026/2027",
+                "semester": "Second Semester",
+                "assessment_question_count": 5,
+                "version_history_enabled": True,
+                "oral_defence_enabled": True,
+                "oral_defence_question_count": 5,
+                "practical_tasks_enabled": True,
+                "practical_task_count": 2,
+                "supervisor_meetings_enabled": True,
+                "cross_version_analysis_enabled": True,
+                "random_moderation_enabled": True,
+                "moderation_sample_percent": 100,
+                "moderation_variance_threshold": 10,
+                "marker_anomaly_detection_enabled": True,
+            },
+        )
+        assert course_response.status_code == 201, course_response.text
+        course = course_response.json()["course"]
+        assert course["oral_defence_enabled"] is True
+        assert course["practical_tasks_enabled"] is True
+        assert course["supervisor_meetings_enabled"] is True
+        assert course["cross_version_analysis_enabled"] is True
+        assert course["random_moderation_enabled"] is True
+        assert course["marker_anomaly_detection_enabled"] is True
+
+        first_upload = client.post(
+            "/api/documents",
+            data={
+                "student_name": "Phase Two Student",
+                "student_id": "P2/001",
+                "title": "Learning Assurance Project",
+                "course_code": course["enrollment_code"],
+                **understanding_fields(),
+            },
+            files={"file": ("version1.txt", sample_document().encode("utf-8"), "text/plain")},
+        )
+        assert first_upload.status_code == 202, first_upload.text
+
+        second_text = sample_document() + " " + " ".join(
+            f"Additional analysis {index} explains a revised practical implication and new evidence."
+            for index in range(1, 30)
+        )
+        second_upload = client.post(
+            "/api/documents",
+            data={
+                "student_name": "Phase Two Student",
+                "student_id": "P2/001",
+                "title": "Learning Assurance Project",
+                "course_code": course["enrollment_code"],
+                **understanding_fields(),
+            },
+            files={"file": ("version2.txt", second_text.encode("utf-8"), "text/plain")},
+        )
+        assert second_upload.status_code == 202, second_upload.text
+        document_id = second_upload.json()["document_id"]
+        assert second_upload.json()["version_number"] == 2
+
+        started = client.post(
+            "/api/assessments/start",
+            json={"document_id": document_id, "client_instance_id": "phase2-browser-instance-0001"},
+        )
+        assert started.status_code == 200, started.text
+        assessment_id = started.json()["assessment_id"]
+        student_headers = {"Authorization": f"Bearer {started.json()['session_token']}"}
+
+        for position in range(1, 6):
+            question = client.get(f"/api/assessments/{assessment_id}/question", headers=student_headers)
+            assert question.status_code == 200, question.text
+            detail = client.get(f"/api/admin/assessments/{assessment_id}", headers=ADMIN_HEADERS)
+            correct_index = next(
+                item["correct_index"] for item in detail.json()["questions"] if item["position"] == position
+            )
+            answered = client.post(
+                f"/api/assessments/{assessment_id}/answer",
+                headers=student_headers,
+                json={"selected_index": correct_index},
+            )
+            assert answered.status_code == 200, answered.text
+
+        oral = client.post(
+            f"/api/lecturer/assessments/{assessment_id}/oral-defence/start",
+            json={"question_count": 5},
+        )
+        assert oral.status_code == 200, oral.text
+        oral_questions = oral.json()["oral_defence"]["questions"]
+        assert len(oral_questions) == 5
+        oral_complete = client.post(
+            f"/api/lecturer/assessments/{assessment_id}/oral-defence/complete",
+            json={
+                "scores": [
+                    {"question_id": item["id"], "score": 4, "comment": "Adequate defence"}
+                    for item in oral_questions
+                ],
+                "outcome": "satisfactory",
+                "notes": "The student defended the main decisions.",
+            },
+        )
+        assert oral_complete.status_code == 200, oral_complete.text
+        assert oral_complete.json()["oral_defence"]["total_score"] == 80.0
+
+        tasks = client.post(
+            f"/api/lecturer/assessments/{assessment_id}/practical-tasks/generate",
+            json={"count": 2},
+        )
+        assert tasks.status_code == 200, tasks.text
+        assert len(tasks.json()["practical_tasks"]) == 2
+        first_task = tasks.json()["practical_tasks"][0]
+        task_score = client.post(
+            f"/api/lecturer/practical-tasks/{first_task['id']}/score",
+            json={
+                "student_response": "The student reproduced the selected analytical step and explained each stage accurately.",
+                "score": 18,
+                "notes": "Minor prompting was required.",
+            },
+        )
+        assert task_score.status_code == 200, task_score.text
+        assert task_score.json()["practical_task"]["status"] == "completed"
+
+        meeting = client.post(
+            f"/api/lecturer/courses/{course['id']}/supervisor-meetings",
+            json={
+                "student_id": "P2/001",
+                "document_id": document_id,
+                "meeting_at": "2026-07-17T10:00:00Z",
+                "meeting_type": "progress_review",
+                "summary": "The student explained the revised analysis and responded to questions about the evidence.",
+                "decisions": "Retain the revised structure.",
+                "action_items": "Clarify the practical implication before final approval.",
+            },
+        )
+        assert meeting.status_code == 201, meeting.text
+
+        analysis = client.post(f"/api/lecturer/documents/{document_id}/version-analysis")
+        assert analysis.status_code == 200, analysis.text
+        assert analysis.json()["cross_version_analysis"]["current_version_number"] == 2
+
+        rubric = course["rubric"]
+        rubric_mark = client.post(
+            f"/api/lecturer/assessments/{assessment_id}/rubric-mark",
+            json={
+                "scores": [
+                    {
+                        "criterion_key": item["key"],
+                        "score": float(item["max_score"]) * 0.8,
+                        "comment": "Meets the criterion.",
+                    }
+                    for item in rubric
+                ],
+                "overall_comment": "Strong evidence of understanding.",
+            },
+        )
+        assert rubric_mark.status_code == 200, rubric_mark.text
+        detail = rubric_mark.json()["assessment"]
+        assert detail["moderation"]["status"] == "selected"
+
+        moderation = client.post(
+            f"/api/lecturer/assessments/{assessment_id}/moderation/complete",
+            json={
+                "moderated_mark": 82,
+                "decision": "adjusted",
+                "notes": "The moderated score reflects stronger oral and practical evidence.",
+            },
+        )
+        assert moderation.status_code == 200, moderation.text
+        assert moderation.json()["moderation"]["status"] == "completed"
+
+        anomalies = client.get(f"/api/lecturer/courses/{course['id']}/marker-anomalies?refresh=true")
+        assert anomalies.status_code == 200, anomalies.text
+        assert anomalies.json()["anomalies"] == []
+
+        final_detail = client.get(f"/api/lecturer/assessments/{assessment_id}")
+        assert final_detail.status_code == 200, final_detail.text
+        body = final_detail.json()
+        assert body["oral_defence"]["status"] == "completed"
+        assert len(body["practical_tasks"]) == 2
+        assert len(body["supervisor_meetings"]) == 1
+        assert body["cross_version_analysis"] is not None
+        assert body["moderation"]["status"] == "completed"
