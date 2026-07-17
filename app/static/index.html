@@ -72,8 +72,23 @@
           <form id="upload-form" class="form-grid">
             <label class="full-width">
               Course enrolment code
-              <input name="course_code" type="text" maxlength="24" required autocomplete="off" placeholder="e.g. KANO-3LH9PW">
+              <span class="inline-field-action">
+                <input name="course_code" id="student-course-code" type="text" maxlength="24" required autocomplete="off" placeholder="e.g. KANO-3LH9PW">
+                <button id="verify-course-code" class="secondary-button" type="button">Check requirements</button>
+              </span>
               <small>Obtain this code from your lecturer or supervisor.</small>
+            </label>
+            <div id="course-requirements-card" class="course-requirements-card full-width hidden" aria-live="polite"></div>
+            <label id="submission-stage-field" class="full-width hidden">
+              Submission stage
+              <select name="submission_stage" id="submission-stage">
+                <option value="final">Final submission</option>
+                <option value="milestone">Learning milestone</option>
+              </select>
+            </label>
+            <label id="milestone-field" class="full-width hidden">
+              Learning milestone
+              <select name="milestone_id" id="student-milestone"><option value="">Select milestone</option></select>
             </label>
             <label>
               Student name
@@ -86,6 +101,39 @@
             <label class="full-width">
               Document title
               <input name="title" type="text" maxlength="300" required placeholder="Enter the assignment, project, dissertation, or thesis title">
+            </label>
+            <div class="full-width justification-intro">
+              <span class="eyebrow">Required understanding justification</span>
+              <p>Explain the work in your own words. This is required whether or not the lecturer uses milestones or version tracking.</p>
+            </div>
+            <label class="full-width">
+              What is the work about and what did you do?
+              <textarea name="understanding_summary" rows="4" minlength="60" maxlength="4000" required placeholder="Summarise the purpose, approach and main argument or task in your own words."></textarea>
+            </label>
+            <label class="full-width">
+              Which key decisions did you make, and why?
+              <textarea name="key_decisions" rows="4" minlength="60" maxlength="4000" required placeholder="Explain important choices, methods, evidence, structure or reasoning."></textarea>
+            </label>
+            <label>
+              Main contribution, result or conclusion
+              <textarea name="main_contribution" rows="4" minlength="40" maxlength="3000" required></textarea>
+            </label>
+            <label>
+              One important limitation
+              <textarea name="stated_limitation" rows="4" minlength="30" maxlength="2500" required></textarea>
+            </label>
+            <label>
+              AI-use declaration
+              <select name="ai_use_level" id="ai-use-level" required>
+                <option value="none">No generative AI used</option>
+                <option value="limited">Limited support, such as ideas or language improvement</option>
+                <option value="substantial">Substantial assistance used</option>
+                <option value="required">AI use was required by the lecturer</option>
+              </select>
+            </label>
+            <label id="ai-use-details-field" class="hidden">
+              Explain how AI was used and how you checked the output
+              <textarea name="ai_use_details" rows="4" maxlength="3000"></textarea>
             </label>
             <label class="file-drop full-width" id="file-drop">
               <input name="file" id="file-input" type="file" accept=".pdf,.docx,.txt" required>
@@ -312,10 +360,38 @@
                 <label>Course title<input name="title" type="text" maxlength="240" required placeholder="Research Methods"></label>
                 <label>Academic year<input name="academic_year" type="text" maxlength="40" required placeholder="2026/2027"></label>
                 <label>Semester<input name="semester" type="text" maxlength="80" required placeholder="First Semester"></label>
-                <label>Assessment questions
+                <label>Final assessment questions
                   <input name="assessment_question_count" type="number" min="5" max="20" value="20" required>
-                  <small>Select between 5 and 20 questions. A new random subset is used for each attempt.</small>
+                  <small>Select between 5 and 20 questions. A new higher-order subset is used for each attempt.</small>
                 </label>
+                <label>Milestone checkpoint questions
+                  <input name="checkpoint_question_count" type="number" min="3" max="10" value="3" required>
+                </label>
+                <label class="checkbox-setting"><input name="milestones_enabled" type="checkbox"> <span>Track learning milestones in Kanokware</span></label>
+                <label class="checkbox-setting"><input name="version_history_enabled" type="checkbox"> <span>Keep document version history in Kanokware</span></label>
+                <fieldset class="phase2-options">
+                  <legend>Optional Phase 2 assurance modules</legend>
+                  <label class="checkbox-setting"><input name="oral_defence_enabled" type="checkbox"> <span>Oral defence or viva</span></label>
+                  <label>Oral-defence questions<input name="oral_defence_question_count" type="number" min="3" max="10" value="5"></label>
+                  <label class="checkbox-setting"><input name="practical_tasks_enabled" type="checkbox"> <span>Practical reproduction or application tasks</span></label>
+                  <label>Practical tasks per assessment<input name="practical_task_count" type="number" min="1" max="5" value="1"></label>
+                  <label class="checkbox-setting"><input name="supervisor_meetings_enabled" type="checkbox"> <span>Supervisor meeting records</span></label>
+                  <label class="checkbox-setting"><input name="cross_version_analysis_enabled" type="checkbox"> <span>Advanced cross-version analysis</span></label>
+                  <label class="checkbox-setting"><input name="random_moderation_enabled" type="checkbox"> <span>Random moderation</span></label>
+                  <label>Moderation sample (%)<input name="moderation_sample_percent" type="number" min="1" max="100" value="10"></label>
+                  <label>Moderation variance alert<input name="moderation_variance_threshold" type="number" min="1" max="50" step="0.5" value="10"></label>
+                  <label class="checkbox-setting"><input name="marker_anomaly_detection_enabled" type="checkbox"> <span>Marker anomaly detection</span></label>
+                  <small>Each module is independent and may remain off. Existing Phase 1 options are also optional.</small>
+                </fieldset>
+                <label id="milestone-titles-field" class="hidden">Milestone titles
+                  <textarea name="milestone_titles_text" rows="5" placeholder="One milestone per line, for example:
+Problem definition
+Approach or method
+Draft development
+Final preparation"></textarea>
+                  <small>Optional. Default milestones are created when this is left blank.</small>
+                </label>
+                <p class="muted">The final understanding justification and AI-use declaration remain compulsory even when milestones and version history are turned off.</p>
                 <button class="primary-button" type="submit">Create course</button>
               </form>
             </section>
@@ -338,8 +414,38 @@
             </div>
             <div class="table-scroll">
               <table>
-                <thead><tr><th>Course</th><th>Period</th><th>Enrolment code</th><th>Questions</th><th>Lecturers</th><th>Submissions</th><th>Actions</th></tr></thead>
-                <tbody id="courses-body"><tr><td colspan="7" class="empty-state">No courses loaded.</td></tr></tbody>
+                <thead><tr><th>Course</th><th>Period</th><th>Enrolment code</th><th>Questions</th><th>Learning process</th><th>Lecturers</th><th>Submissions</th><th>Actions</th></tr></thead>
+                <tbody id="courses-body"><tr><td colspan="8" class="empty-state">No courses loaded.</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="admin-table-card">
+            <div class="table-heading">
+              <div><h2>Student learning progress</h2><small>Monitor milestone evidence, versions, mastery scores and intervention alerts.</small></div>
+              <div class="table-tools">
+                <select id="progress-course-filter"><option value="">Select a course</option></select>
+                <button id="refresh-progress" class="text-button" type="button">Refresh</button>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>Student</th><th>Milestones</th><th>Versions</th><th>Final</th><th>Latest mastery</th><th>AI use</th><th>Alerts</th><th>Last activity</th></tr></thead>
+                <tbody id="learning-progress-body"><tr><td colspan="8" class="empty-state">Select a course to view learning progress.</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section id="marker-anomaly-panel" class="admin-table-card hidden">
+            <div class="table-heading">
+              <div><h2 id="marker-anomaly-title">Marker integrity analytics</h2><small>Automated indicators support moderation and do not establish misconduct.</small></div>
+              <button id="refresh-marker-anomalies" class="text-button" type="button">Run analysis</button>
+            </div>
+            <div id="marker-anomaly-message" class="message" role="status"></div>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>Marker</th><th>Indicator</th><th>Evidence</th><th>Status</th><th>Actions</th></tr></thead>
+                <tbody id="marker-anomaly-body"><tr><td colspan="5" class="empty-state">Select Marker analytics for an enabled course.</td></tr></tbody>
               </table>
             </div>
           </section>
@@ -378,10 +484,80 @@
                 <button id="excuse-interruption-button" class="text-button" type="button">Mark excused</button>
               </div>
             </div>
+            <div id="review-learning-evidence" class="review-learning-evidence">
+              <div class="table-heading"><h3>Student justification and learning evidence</h3></div>
+              <div id="review-justification" class="evidence-grid"></div>
+              <div id="review-versions" class="version-history"></div>
+            </div>
+            <section id="review-phase2" class="phase2-review hidden">
+              <div class="table-heading"><div><h3>Optional Phase 2 assurance evidence</h3><small>Only modules enabled for this course are shown.</small></div></div>
+
+              <div id="oral-defence-panel" class="phase2-module hidden">
+                <div class="table-heading"><div><h4>Oral defence</h4><small>Prepare document-specific defence questions and record examiner scores.</small></div><button id="prepare-oral-defence" type="button" class="secondary-button">Prepare questions</button></div>
+                <form id="oral-defence-form" class="stack-form hidden">
+                  <div id="oral-defence-questions"></div>
+                  <label>Outcome<select name="outcome"><option value="satisfactory">Satisfactory</option><option value="satisfactory_with_conditions">Satisfactory with conditions</option><option value="further_verification">Further verification</option><option value="unsatisfactory">Unsatisfactory</option></select></label>
+                  <label>Examiner notes<textarea name="notes" rows="3" maxlength="3000"></textarea></label>
+                  <button class="primary-button" type="submit">Save oral-defence result</button>
+                </form>
+                <div id="oral-defence-result" class="phase2-output"></div>
+              </div>
+
+              <div id="practical-task-panel" class="phase2-module hidden">
+                <div class="table-heading"><div><h4>Practical reproduction tasks</h4><small>Verify that the student can reproduce, correct or apply part of the work.</small></div><button id="prepare-practical-tasks" type="button" class="secondary-button">Prepare tasks</button></div>
+                <div id="practical-task-list" class="phase2-list"></div>
+              </div>
+
+              <div id="supervisor-meeting-panel" class="phase2-module hidden">
+                <div class="table-heading"><div><h4>Supervisor meeting records</h4><small>Optional records of progress, decisions and agreed actions.</small></div></div>
+                <form id="supervisor-meeting-form" class="stack-form compact-form">
+                  <label>Meeting date and time<input name="meeting_at" type="datetime-local" required></label>
+                  <label>Meeting type<select name="meeting_type"><option value="supervision">Supervision</option><option value="progress_review">Progress review</option><option value="oral_checkpoint">Oral checkpoint</option><option value="remedial">Remedial</option><option value="other">Other</option></select></label>
+                  <label>Summary<textarea name="summary" rows="3" minlength="20" maxlength="5000" required></textarea></label>
+                  <label>Decisions<textarea name="decisions" rows="2" maxlength="3000"></textarea></label>
+                  <label>Action items<textarea name="action_items" rows="2" maxlength="3000"></textarea></label>
+                  <label>Next meeting<input name="next_meeting_at" type="datetime-local"></label>
+                  <button class="secondary-button" type="submit">Record meeting</button>
+                </form>
+                <div id="supervisor-meeting-list" class="phase2-list"></div>
+              </div>
+
+              <div id="cross-version-panel" class="phase2-module hidden">
+                <div class="table-heading"><div><h4>Cross-version analysis</h4><small>Examines structural changes, insertions, references and textual similarity.</small></div><button id="run-version-analysis" type="button" class="secondary-button">Run analysis</button></div>
+                <div id="cross-version-result" class="phase2-output"></div>
+              </div>
+
+              <div id="moderation-panel" class="phase2-module hidden">
+                <div class="table-heading"><div><h4>Random moderation</h4><small>Only assessments selected by the course sampling rule require moderation.</small></div></div>
+                <div id="moderation-status" class="phase2-output"></div>
+                <form id="moderation-form" class="stack-form compact-form hidden">
+                  <label>Moderated mark<input name="moderated_mark" type="number" min="0" max="100" step="0.5" required></label>
+                  <label>Decision<select name="decision"><option value="confirmed">Confirm original mark</option><option value="adjusted">Adjust mark</option><option value="return_to_marker">Return to marker</option><option value="escalated">Escalate</option></select></label>
+                  <label>Moderation notes<textarea name="notes" rows="3" minlength="10" maxlength="3000" required></textarea></label>
+                  <button class="primary-button" type="submit">Complete moderation</button>
+                </form>
+              </div>
+            </section>
+
+            <div id="review-alerts" class="review-alerts hidden">
+              <div class="table-heading"><h3>Learning intervention alerts</h3></div>
+              <div id="review-alert-list" class="alert-list"></div>
+            </div>
+            <div id="review-rubric" class="review-rubric">
+              <div class="table-heading"><div><h3>Learning-assurance rubric</h3><small>An overall mark cannot be saved without criterion-level scores.</small></div></div>
+              <form id="rubric-mark-form" class="rubric-form">
+                <div id="rubric-criteria"></div>
+                <label>Overall comment<textarea name="overall_comment" rows="3" maxlength="2000"></textarea></label>
+                <label id="rubric-change-reason-field" class="hidden">Reason for changing the existing mark<textarea name="change_reason" rows="2" maxlength="1000"></textarea></label>
+                <div class="form-actions"><strong id="rubric-total">Total: 0/100</strong><button class="primary-button" type="submit">Save rubric mark</button></div>
+              </form>
+              <div id="mark-audit-list" class="mark-audit-list"></div>
+            </div>
             <div id="review-monitoring" class="review-monitoring hidden">
               <div class="table-heading"><h3>Webcam monitoring events</h3></div>
               <div id="review-monitoring-events" class="monitoring-event-list"></div>
             </div>
+            <div class="table-heading"><h3>Adaptive question-level evidence</h3></div>
             <div id="review-questions" class="review-questions"></div>
           </section>
         </div>
@@ -466,6 +642,6 @@
     <strong>Kanokware</strong>
     <span>Ownership confidence supports academic judgement. It does not replace due process.</span>
   </footer>
-  <script src="/static/app.js?v=20260701-model-metadata-fix1" defer></script>
+  <script src="/static/app.js?v=20260717-phase2" defer></script>
 </body>
 </html>

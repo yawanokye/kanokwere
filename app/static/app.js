@@ -58,6 +58,9 @@ const state = {
   currentReviewAssessmentId: null,
   currentReviewSummary: null,
   recoveryDbPromise: null,
+  resolvedCourse: null,
+  currentReviewData: null,
+  currentAnomalyCourseId: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -1207,6 +1210,67 @@ $$('[data-password-toggle]').forEach((button) => {
   });
 });
 
+function renderResolvedCourse(course) {
+  state.resolvedCourse = course;
+  const card = $("#course-requirements-card");
+  if (!card) return;
+  card.classList.remove("hidden");
+  const processParts = [];
+  processParts.push(course.milestones_enabled ? "Kanokware milestones enabled" : "Final submission only");
+  processParts.push(course.version_history_enabled ? "Version history enabled" : "Version history not required");
+  card.innerHTML = `<strong></strong><span></span><small></small>`;
+  card.querySelector("strong").textContent = course.course;
+  card.querySelector("span").textContent = `${course.lecturer || "Assigned lecturer"} · ${course.institution || "Institution"}`;
+  card.querySelector("small").textContent = `${processParts.join(" · ")} · Final justification required`;
+
+  const stageField = $("#submission-stage-field");
+  const stage = $("#submission-stage");
+  const milestoneField = $("#milestone-field");
+  const milestoneSelect = $("#student-milestone");
+  stageField?.classList.toggle("hidden", !course.milestones_enabled);
+  if (!course.milestones_enabled) stage.value = "final";
+  milestoneSelect.replaceChildren(new Option("Select milestone", ""));
+  (course.milestones || []).forEach((item) => milestoneSelect.appendChild(new Option(item.title, item.id)));
+  milestoneField?.classList.toggle("hidden", !course.milestones_enabled || stage.value !== "milestone");
+}
+
+async function resolveStudentCourse(showErrors = true) {
+  const input = $("#student-course-code");
+  const code = input?.value.trim();
+  if (!code || code.length < 6) {
+    state.resolvedCourse = null;
+    $("#course-requirements-card")?.classList.add("hidden");
+    if (showErrors) setMessage($("#upload-message"), "Enter a valid course enrolment code.", "warning");
+    return null;
+  }
+  try {
+    const result = await api(`/api/courses/resolve?code=${encodeURIComponent(code)}`);
+    renderResolvedCourse(result);
+    if (showErrors) setMessage($("#upload-message"), "Course requirements confirmed.", "success");
+    return result;
+  } catch (error) {
+    state.resolvedCourse = null;
+    $("#course-requirements-card")?.classList.add("hidden");
+    if (showErrors) setMessage($("#upload-message"), error.message, "error");
+    return null;
+  }
+}
+
+$("#verify-course-code")?.addEventListener("click", () => resolveStudentCourse(true));
+$("#student-course-code")?.addEventListener("change", () => resolveStudentCourse(false));
+$("#submission-stage")?.addEventListener("change", (event) => {
+  const milestone = event.target.value === "milestone";
+  $("#milestone-field")?.classList.toggle("hidden", !milestone);
+  $("#student-milestone").required = milestone;
+});
+$("#ai-use-level")?.addEventListener("change", (event) => {
+  const details = $("#ai-use-details-field");
+  const textarea = details?.querySelector("textarea");
+  const required = event.target.value !== "none";
+  details?.classList.toggle("hidden", !required);
+  if (textarea) textarea.required = required;
+});
+
 const fileInput = $("#file-input");
 const fileDrop = $("#file-drop");
 fileInput.addEventListener("change", () => {
@@ -1234,7 +1298,10 @@ $("#upload-form").addEventListener("submit", async (event) => {
   button.textContent = "Uploading…";
   setMessage($("#upload-message"));
   try {
+    const course = state.resolvedCourse || await resolveStudentCourse(false);
+    if (!course) throw new Error("Confirm the course enrolment code before uploading.");
     const formData = new FormData(event.currentTarget);
+    if (!course.milestones_enabled) formData.set("submission_stage", "final");
     const result = await api("/api/documents", { method: "POST", body: formData });
     state.documentId = result.document_id;
     pollStartedAt = Date.now();
@@ -1878,18 +1945,50 @@ $("#lecturer-logout").addEventListener("click", async () => {
   setMessage($("#lecturer-auth-message"), "You have signed out.", "success");
 });
 
+const milestonesEnabledInput = document.querySelector('#course-create-form input[name="milestones_enabled"]');
+milestonesEnabledInput?.addEventListener("change", (event) => {
+  $("#milestone-titles-field")?.classList.toggle("hidden", !event.target.checked);
+});
+
 $("#course-create-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = event.submitter;
   button.disabled = true;
   setMessage($("#lecturer-message"), "Creating course…");
   try {
+    const raw = formJson(event.currentTarget);
+    const milestoneTitles = String(raw.milestone_titles_text || "")
+      .split(/\n+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const payload = {
+      course_code: raw.course_code,
+      title: raw.title,
+      academic_year: raw.academic_year,
+      semester: raw.semester,
+      assessment_question_count: Number(raw.assessment_question_count || 20),
+      checkpoint_question_count: Number(raw.checkpoint_question_count || 3),
+      milestones_enabled: Boolean(event.currentTarget.elements.milestones_enabled.checked),
+      version_history_enabled: Boolean(event.currentTarget.elements.version_history_enabled.checked),
+      oral_defence_enabled: Boolean(event.currentTarget.elements.oral_defence_enabled.checked),
+      oral_defence_question_count: Number(raw.oral_defence_question_count || 5),
+      practical_tasks_enabled: Boolean(event.currentTarget.elements.practical_tasks_enabled.checked),
+      practical_task_count: Number(raw.practical_task_count || 1),
+      supervisor_meetings_enabled: Boolean(event.currentTarget.elements.supervisor_meetings_enabled.checked),
+      cross_version_analysis_enabled: Boolean(event.currentTarget.elements.cross_version_analysis_enabled.checked),
+      random_moderation_enabled: Boolean(event.currentTarget.elements.random_moderation_enabled.checked),
+      moderation_sample_percent: Number(raw.moderation_sample_percent || 10),
+      moderation_variance_threshold: Number(raw.moderation_variance_threshold || 10),
+      marker_anomaly_detection_enabled: Boolean(event.currentTarget.elements.marker_anomaly_detection_enabled.checked),
+      milestone_titles: milestoneTitles,
+    };
     const result = await api("/api/lecturer/courses", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(formJson(event.currentTarget)),
+      body: JSON.stringify(payload),
     });
     event.target?.reset?.();
+    $("#milestone-titles-field")?.classList.add("hidden");
     setMessage($("#lecturer-message"), `Course created. Student enrolment code: ${result.course.enrollment_code}`, "success");
     await loadCourses();
   } catch (error) {
@@ -1923,6 +2022,8 @@ $("#collaborator-form").addEventListener("submit", async (event) => {
 $("#refresh-courses").addEventListener("click", loadCourses);
 $("#refresh-submissions").addEventListener("click", loadSubmissions);
 $("#submission-course-filter").addEventListener("change", loadSubmissions);
+$("#refresh-progress")?.addEventListener("click", loadLearningProgress);
+$("#progress-course-filter")?.addEventListener("change", loadLearningProgress);
 
 async function loadCourses() {
   try {
@@ -1938,24 +2039,30 @@ async function loadCourses() {
 function populateCourseSelectors(courses) {
   const collaborator = $("#collaborator-course");
   const filter = $("#submission-course-filter");
+  const progress = $("#progress-course-filter");
   const selectedFilter = filter.value;
+  const selectedProgress = progress?.value || "";
   collaborator.replaceChildren(new Option("Select course", ""));
   filter.replaceChildren(new Option("All my courses", ""));
+  progress?.replaceChildren(new Option("Select a course", ""));
   courses.forEach((course) => {
     const label = `${course.course_code} · ${course.title}`;
     if (["owner", "institution_admin"].includes(course.my_access_level)) {
       collaborator.appendChild(new Option(label, course.id));
     }
     filter.appendChild(new Option(label, course.id));
+    progress?.appendChild(new Option(label, course.id));
   });
   if (courses.some((course) => course.id === selectedFilter)) filter.value = selectedFilter;
+  if (progress && courses.some((course) => course.id === selectedProgress)) progress.value = selectedProgress;
 }
+
 
 function renderCourses(courses) {
   const body = $("#courses-body");
   body.replaceChildren();
   if (!courses.length) {
-    body.innerHTML = '<tr><td colspan="7" class="empty-state">Create your first course to receive student submissions.</td></tr>';
+    body.innerHTML = '<tr><td colspan="8" class="empty-state">Create your first course to receive student submissions.</td></tr>';
     return;
   }
   courses.forEach((course) => {
@@ -1964,7 +2071,8 @@ function renderCourses(courses) {
       <td><strong></strong><small></small></td>
       <td><strong></strong><small></small></td>
       <td><code class="enrollment-code"></code></td>
-      <td><strong class="question-count"></strong><small>per attempt</small></td>
+      <td><strong class="question-count"></strong><small></small></td>
+      <td class="process-cell"></td>
       <td class="course-lecturers"></td>
       <td></td>
       <td><div class="action-row"></div></td>`;
@@ -1973,10 +2081,23 @@ function renderCourses(courses) {
     row.children[1].querySelector("strong").textContent = course.academic_year;
     row.children[1].querySelector("small").textContent = course.semester;
     row.children[2].querySelector("code").textContent = course.enrollment_code;
-    row.children[3].querySelector("strong").textContent = String(course.assessment_question_count || 20);
-    row.children[4].textContent = course.lecturers.map((item) => `${item.full_name} (${item.access_level.replaceAll("_", " ")})`).join(", ");
-    row.children[5].textContent = String(course.submission_count);
-    const actions = row.children[6].querySelector(".action-row");
+    row.children[3].querySelector("strong").textContent = `${course.assessment_question_count || 20} final`;
+    row.children[3].querySelector("small").textContent = `${course.checkpoint_question_count || 3} per milestone`;
+    const process = [];
+    process.push(course.milestones_enabled ? `${course.milestones.length} milestone(s)` : "Milestones off");
+    process.push(course.version_history_enabled ? "Versions on" : "Versions off");
+    const phase2Labels = [];
+    if (course.oral_defence_enabled) phase2Labels.push("Viva");
+    if (course.practical_tasks_enabled) phase2Labels.push("Practical");
+    if (course.supervisor_meetings_enabled) phase2Labels.push("Meetings");
+    if (course.cross_version_analysis_enabled) phase2Labels.push("Version analysis");
+    if (course.random_moderation_enabled) phase2Labels.push(`${course.moderation_sample_percent}% moderation`);
+    if (course.marker_anomaly_detection_enabled) phase2Labels.push("Marker analytics");
+    if (phase2Labels.length) process.push(`Phase 2: ${phase2Labels.join(", ")}`);
+    row.children[4].textContent = process.join(" · ");
+    row.children[5].textContent = course.lecturers.map((item) => `${item.full_name} (${item.access_level.replaceAll("_", " ")})`).join(", ");
+    row.children[6].textContent = String(course.submission_count);
+    const actions = row.children[7].querySelector(".action-row");
     const copy = document.createElement("button");
     copy.textContent = "Copy code";
     copy.addEventListener("click", async () => {
@@ -1984,11 +2105,29 @@ function renderCourses(courses) {
       setMessage($("#lecturer-message"), `${course.enrollment_code} copied.`, "success");
     });
     actions.appendChild(copy);
+    const progress = document.createElement("button");
+    progress.textContent = "Progress";
+    progress.addEventListener("click", async () => {
+      $("#progress-course-filter").value = course.id;
+      await loadLearningProgress();
+      $("#learning-progress-body").closest("section")?.scrollIntoView({ behavior: "smooth" });
+    });
+    actions.appendChild(progress);
     if (["owner", "institution_admin"].includes(course.my_access_level)) {
       const questions = document.createElement("button");
-      questions.textContent = "Set questions";
-      questions.addEventListener("click", () => updateCourseQuestionCount(course));
+      questions.textContent = "Settings";
+      questions.addEventListener("click", () => updateCourseLearningSettings(course));
       actions.appendChild(questions);
+      const milestone = document.createElement("button");
+      milestone.textContent = "Add milestone";
+      milestone.addEventListener("click", () => addCourseMilestone(course));
+      actions.appendChild(milestone);
+      if (course.marker_anomaly_detection_enabled) {
+        const analytics = document.createElement("button");
+        analytics.textContent = "Marker analytics";
+        analytics.addEventListener("click", () => loadMarkerAnomalies(course, true));
+        actions.appendChild(analytics);
+      }
       const regenerate = document.createElement("button");
       regenerate.textContent = "New code";
       regenerate.addEventListener("click", () => regenerateCourseCode(course));
@@ -1998,29 +2137,108 @@ function renderCourses(courses) {
   });
 }
 
-async function updateCourseQuestionCount(course) {
-  const entered = prompt(
-    `How many questions should each ${course.course_code} assessment contain? Enter 5 to 20.`,
-    String(course.assessment_question_count || 20)
-  );
-  if (entered == null) return;
-  const count = Number(entered);
-  if (!Number.isInteger(count) || count < 5 || count > 20) {
-    setMessage($("#lecturer-message"), "Enter a whole number from 5 to 20.", "error");
+async function updateCourseLearningSettings(course) {
+  const finalCountInput = prompt(`Final assessment questions for ${course.course_code}, 5 to 20:`, String(course.assessment_question_count || 20));
+  if (finalCountInput == null) return;
+  const finalCount = Number(finalCountInput);
+  if (!Number.isInteger(finalCount) || finalCount < 5 || finalCount > 20) {
+    setMessage($("#lecturer-message"), "Final questions must be a whole number from 5 to 20.", "error");
     return;
   }
+  const checkpointInput = prompt("Questions for each milestone checkpoint, 3 to 10:", String(course.checkpoint_question_count || 3));
+  if (checkpointInput == null) return;
+  const checkpointCount = Number(checkpointInput);
+  if (!Number.isInteger(checkpointCount) || checkpointCount < 3 || checkpointCount > 10) {
+    setMessage($("#lecturer-message"), "Checkpoint questions must be a whole number from 3 to 10.", "error");
+    return;
+  }
+  const milestonesEnabled = confirm("Select OK to enable Kanokware learning milestones. Select Cancel for final-submission-only or manually monitored learning process.");
+  const versionHistoryEnabled = confirm("Select OK to keep document version history in Kanokware. Select Cancel to leave version tracking off.");
+  const oralDefenceEnabled = confirm("Select OK to enable the optional oral-defence module.");
+  const oralCountInput = oralDefenceEnabled ? prompt("Oral-defence questions, 3 to 10:", String(course.oral_defence_question_count || 5)) : String(course.oral_defence_question_count || 5);
+  if (oralCountInput == null) return;
+  const oralCount = Number(oralCountInput);
+  if (!Number.isInteger(oralCount) || oralCount < 3 || oralCount > 10) {
+    setMessage($("#lecturer-message"), "Oral-defence questions must be a whole number from 3 to 10.", "error");
+    return;
+  }
+  const practicalTasksEnabled = confirm("Select OK to enable optional practical reproduction tasks.");
+  const practicalCountInput = practicalTasksEnabled ? prompt("Practical tasks per assessment, 1 to 5:", String(course.practical_task_count || 1)) : String(course.practical_task_count || 1);
+  if (practicalCountInput == null) return;
+  const practicalCount = Number(practicalCountInput);
+  if (!Number.isInteger(practicalCount) || practicalCount < 1 || practicalCount > 5) {
+    setMessage($("#lecturer-message"), "Practical task count must be a whole number from 1 to 5.", "error");
+    return;
+  }
+  const supervisorMeetingsEnabled = confirm("Select OK to enable optional supervisor meeting records.");
+  const crossVersionAnalysisEnabled = confirm("Select OK to enable optional advanced cross-version analysis.");
+  const randomModerationEnabled = confirm("Select OK to enable optional random moderation.");
+  const moderationPercentInput = randomModerationEnabled ? prompt("Percentage of marked assessments selected for moderation, 1 to 100:", String(course.moderation_sample_percent || 10)) : String(course.moderation_sample_percent || 10);
+  if (moderationPercentInput == null) return;
+  const moderationPercent = Number(moderationPercentInput);
+  if (!Number.isInteger(moderationPercent) || moderationPercent < 1 || moderationPercent > 100) {
+    setMessage($("#lecturer-message"), "Moderation percentage must be a whole number from 1 to 100.", "error");
+    return;
+  }
+  const varianceInput = randomModerationEnabled ? prompt("Mark variance requiring attention, 1 to 50 points:", String(course.moderation_variance_threshold || 10)) : String(course.moderation_variance_threshold || 10);
+  if (varianceInput == null) return;
+  const varianceThreshold = Number(varianceInput);
+  if (!Number.isFinite(varianceThreshold) || varianceThreshold < 1 || varianceThreshold > 50) {
+    setMessage($("#lecturer-message"), "Moderation variance threshold must be from 1 to 50.", "error");
+    return;
+  }
+  const markerAnomalyDetectionEnabled = confirm("Select OK to enable optional marker anomaly detection.");
   try {
     await api(`/api/lecturer/courses/${course.id}/settings`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ assessment_question_count: count }),
+      body: JSON.stringify({
+        assessment_question_count: finalCount,
+        checkpoint_question_count: checkpointCount,
+        milestones_enabled: milestonesEnabled,
+        version_history_enabled: versionHistoryEnabled,
+        oral_defence_enabled: oralDefenceEnabled,
+        oral_defence_question_count: oralCount,
+        practical_tasks_enabled: practicalTasksEnabled,
+        practical_task_count: practicalCount,
+        supervisor_meetings_enabled: supervisorMeetingsEnabled,
+        cross_version_analysis_enabled: crossVersionAnalysisEnabled,
+        random_moderation_enabled: randomModerationEnabled,
+        moderation_sample_percent: moderationPercent,
+        moderation_variance_threshold: varianceThreshold,
+        marker_anomaly_detection_enabled: markerAnomalyDetectionEnabled,
+      }),
     });
-    setMessage($("#lecturer-message"), `${course.course_code} will now use ${count} questions per assessment.`, "success");
+    setMessage($("#lecturer-message"), "Course learning-assurance settings updated.", "success");
     await loadCourses();
   } catch (error) {
     handleLecturerError(error);
   }
 }
+
+async function addCourseMilestone(course) {
+  const title = prompt(`New milestone title for ${course.course_code}:`, "");
+  if (title == null || !title.trim()) return;
+  const countInput = prompt("Checkpoint questions for this milestone, 3 to 10:", String(course.checkpoint_question_count || 3));
+  if (countInput == null) return;
+  const count = Number(countInput);
+  if (!Number.isInteger(count) || count < 3 || count > 10) {
+    setMessage($("#lecturer-message"), "Enter a whole number from 3 to 10.", "error");
+    return;
+  }
+  try {
+    await api(`/api/lecturer/courses/${course.id}/milestones`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: title.trim(), required: true, checkpoint_question_count: count }),
+    });
+    setMessage($("#lecturer-message"), "Learning milestone added.", "success");
+    await loadCourses();
+  } catch (error) {
+    handleLecturerError(error);
+  }
+}
+
 
 async function regenerateCourseCode(course) {
   if (!confirm(`Generate a new enrolment code for ${course.course_code}? The old code will stop working.`)) return;
@@ -2031,6 +2249,47 @@ async function regenerateCourseCode(course) {
   } catch (error) {
     handleLecturerError(error);
   }
+}
+
+async function loadLearningProgress() {
+  const courseId = $("#progress-course-filter")?.value;
+  const body = $("#learning-progress-body");
+  if (!courseId) {
+    body.innerHTML = '<tr><td colspan="8" class="empty-state">Select a course to view learning progress.</td></tr>';
+    return;
+  }
+  try {
+    const result = await api(`/api/lecturer/courses/${courseId}/learning-progress`);
+    renderLearningProgress(result.students || []);
+  } catch (error) {
+    handleLecturerError(error);
+  }
+}
+
+function renderLearningProgress(rows) {
+  const body = $("#learning-progress-body");
+  body.replaceChildren();
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="8" class="empty-state">No student learning evidence has been submitted for this course.</td></tr>';
+    return;
+  }
+  rows.forEach((item) => {
+    const row = document.createElement("tr");
+    row.innerHTML = `
+      <td><strong></strong><small></small></td>
+      <td></td><td></td><td></td><td></td><td></td><td></td><td></td>`;
+    row.children[0].querySelector("strong").textContent = item.student_name;
+    row.children[0].querySelector("small").textContent = item.student_id;
+    row.children[1].textContent = item.milestones_total ? `${item.milestones_completed}/${item.milestones_total}` : "Not tracked";
+    row.children[2].textContent = String(item.version_count || 1);
+    row.children[3].textContent = item.final_submitted ? "Submitted" : "Pending";
+    row.children[4].textContent = item.latest_score == null ? "—" : `${Number(item.latest_score).toFixed(0)}%`;
+    row.children[5].textContent = (item.latest_ai_use_level || "none").replaceAll("_", " ");
+    row.children[6].textContent = String(item.open_alert_count || 0);
+    if (item.open_alert_count) row.children[6].classList.add("attention-cell");
+    row.children[7].textContent = item.last_activity_at ? new Date(item.last_activity_at).toLocaleString() : "—";
+    body.appendChild(row);
+  });
 }
 
 async function loadSubmissions() {
@@ -2080,11 +2339,21 @@ function renderSubmissions(rows) {
     row.children[0].querySelector("strong").textContent = item.student_name;
     row.children[0].querySelector("small").textContent = item.student_id;
     row.children[1].querySelector("strong").textContent = item.title;
-    row.children[1].querySelector("small").textContent = `${item.course} · ${item.word_count.toLocaleString()} words`;
+    const stage = item.submission_stage === "milestone" ? (item.milestone || "Milestone") : "Final";
+    row.children[1].querySelector("small").textContent = `${item.course} · ${stage} · Version ${item.version_number || 1} · ${item.word_count.toLocaleString()} words · AI: ${(item.ai_use_level || "none").replaceAll("_", " ")}`;
     const status = row.children[2].querySelector("span");
     status.textContent = item.assessment_status || item.status;
     status.classList.add(item.assessment_status || item.status);
-    row.children[4].textContent = item.decision || "—";
+    row.children[4].replaceChildren();
+    const decision = document.createElement("span");
+    decision.textContent = item.decision || "—";
+    row.children[4].appendChild(decision);
+    if (item.learning_alert_count) {
+      const alertBadge = document.createElement("small");
+      alertBadge.className = item.learning_alert_critical_count ? "learning-alert-badge critical" : "learning-alert-badge";
+      alertBadge.textContent = `${item.learning_alert_count} learning alert${item.learning_alert_count === 1 ? "" : "s"}`;
+      row.children[4].appendChild(alertBadge);
+    }
     renderSnapshotCell(row.children[5], item);
     renderMonitoringCell(row.children[6], item);
     renderInterruptionCell(row.children[7], item);
@@ -2204,19 +2473,21 @@ async function reviewAssessment(assessmentId) {
     const result = await api(`/api/lecturer/assessments/${assessmentId}`);
     state.currentReviewAssessmentId = assessmentId;
     state.currentReviewSummary = result.summary;
+    state.currentReviewData = result;
     $("#review-panel").classList.remove("hidden");
     $("#review-title").textContent = `${result.summary.student_name} · ${result.summary.document_title}`;
+
     const summary = $("#review-summary");
     summary.replaceChildren();
     const metrics = [
-      [result.summary.score == null ? "In progress" : `${Number(result.summary.score).toFixed(0)}%`, "score"],
+      [result.summary.score == null ? "In progress" : `${Number(result.summary.score).toFixed(0)}%`, "mastery score"],
       [result.summary.correct_count ?? "—", "correct answers"],
-      [result.summary.timed_out_count ?? "—", "timed out"],
-      [result.summary.focus_loss_count ?? "—", "focus losses"],
+      [result.summary.submission_stage === "milestone" ? (result.summary.milestone || "Milestone") : "Final", "submission stage"],
+      [`Version ${result.summary.version_number || 1}`, "document version"],
+      [(result.summary.ai_use_level || "none").replaceAll("_", " "), "AI use"],
       [result.summary.monitoring_event_count ?? 0, "webcam warnings"],
       [result.summary.interruption_count ?? 0, "interruptions"],
       [formatDuration(result.summary.total_offline_seconds || 0), "offline time"],
-      [result.summary.resume_count ?? 0, "resumes"],
     ];
     metrics.forEach(([value, label]) => {
       const block = document.createElement("div");
@@ -2225,16 +2496,59 @@ async function reviewAssessment(assessmentId) {
       block.querySelector("span").textContent = label;
       summary.appendChild(block);
     });
+
+    const justification = $("#review-justification");
+    justification.replaceChildren();
+    const evidenceItems = [
+      ["Understanding summary", result.justification?.understanding_summary],
+      ["Key decisions and reasons", result.justification?.key_decisions],
+      ["Main contribution or finding", result.justification?.main_contribution],
+      ["Limitation identified", result.justification?.stated_limitation],
+      ["AI-use declaration", (result.justification?.ai_use_level || "none").replaceAll("_", " ")],
+      ["AI-use details", result.justification?.ai_use_details || "No AI use declared"],
+    ];
+    evidenceItems.forEach(([label, value]) => {
+      const card = document.createElement("article");
+      card.innerHTML = "<strong></strong><p></p>";
+      card.querySelector("strong").textContent = label;
+      card.querySelector("p").textContent = value || "Not provided";
+      justification.appendChild(card);
+    });
+
+    const versions = $("#review-versions");
+    versions.replaceChildren();
+    if ((result.version_history || []).length > 1) {
+      const heading = document.createElement("h4");
+      heading.textContent = "Version history";
+      versions.appendChild(heading);
+      const list = document.createElement("div");
+      list.className = "version-list";
+      result.version_history.forEach((item) => {
+        const line = document.createElement("div");
+        line.innerHTML = "<strong></strong><span></span>";
+        line.querySelector("strong").textContent = `Version ${item.version_number} · ${item.submission_stage === "milestone" ? (item.milestone || "Milestone") : "Final"}`;
+        line.querySelector("span").textContent = `${Number(item.word_count || 0).toLocaleString()} words · ${item.created_at ? new Date(item.created_at).toLocaleString() : ""}`;
+        list.appendChild(line);
+      });
+      versions.appendChild(list);
+      if (result.version_comparison) {
+        const comparison = document.createElement("p");
+        comparison.className = "version-comparison";
+        comparison.textContent = `Compared with the previous version: ${result.version_comparison.word_count_change >= 0 ? "+" : ""}${result.version_comparison.word_count_change} words and ${result.version_comparison.similarity_percent}% textual similarity.`;
+        versions.appendChild(comparison);
+      }
+    }
+
+    renderLearningAlerts(result.learning_alerts || []);
+    renderRubric(result.rubric || [], result.rubric_mark, result.mark_audit || []);
+    renderPhase2Modules(result);
+
     const interruptionPanel = $("#review-interruption");
     const interruptionCount = Number(result.summary.interruption_count || 0);
     const interruptedStatus = ["interrupted", "locked"].includes(result.summary.status);
     interruptionPanel.classList.toggle("hidden", !interruptionCount && !interruptedStatus);
     if (!interruptionPanel.classList.contains("hidden")) {
-      const title = result.summary.status === "locked"
-        ? "Assessment locked for review"
-        : result.summary.status === "interrupted"
-          ? "Assessment currently interrupted"
-          : "Assessment resumed after interruption";
+      const title = result.summary.status === "locked" ? "Assessment locked for review" : result.summary.status === "interrupted" ? "Assessment currently interrupted" : "Assessment resumed after interruption";
       $("#review-interruption-title").textContent = title;
       const reason = (result.summary.lock_reason || result.summary.last_interruption_reason || "connection interruption").replaceAll("_", " ");
       const note = result.summary.interruption_note ? ` Note: ${result.summary.interruption_note}` : "";
@@ -2272,9 +2586,10 @@ async function reviewAssessment(assessmentId) {
       card.className = "review-question";
       const outcome = item.timed_out ? "Timed out" : item.is_correct ? "Correct" : item.is_correct === false ? "Incorrect" : "Not answered";
       card.innerHTML = `
-        <h3></h3><div class="review-meta"><span class="${item.is_correct ? "correct" : "incorrect"}">${outcome}</span><span>${item.difficulty}</span><span>${item.response_ms == null ? "No time" : `${(item.response_ms / 1000).toFixed(1)}s`}</span><span></span></div>
+        <h3></h3><div class="review-meta"><span class="${item.is_correct ? "correct" : "incorrect"}">${outcome}</span><span></span><span>${item.response_ms == null ? "No time" : `${(item.response_ms / 1000).toFixed(1)}s`}</span><span></span></div>
         <ol class="review-options"></ol><div class="source-evidence"><strong>Supporting passage</strong><br><span></span></div>`;
       card.querySelector("h3").textContent = `${item.position}. ${item.stem}`;
+      card.querySelectorAll(".review-meta span")[1].textContent = `${item.category.replaceAll("_", " ")} · ${item.difficulty}${item.adaptive_reason ? ` · ${item.adaptive_reason.replaceAll("_", " ")}` : ""}`;
       card.querySelector(".review-meta span:last-child").textContent = item.source_location;
       const optionList = card.querySelector(".review-options");
       item.options.forEach((option, optionIndex) => {
@@ -2292,6 +2607,509 @@ async function reviewAssessment(assessmentId) {
     handleLecturerError(error);
   }
 }
+
+function renderLearningAlerts(alerts) {
+  const panel = $("#review-alerts");
+  const list = $("#review-alert-list");
+  list.replaceChildren();
+  panel.classList.toggle("hidden", alerts.length === 0);
+  alerts.forEach((alert) => {
+    const card = document.createElement("article");
+    card.className = `learning-alert-card ${alert.severity}`;
+    card.innerHTML = `<div><strong></strong><p></p><small></small></div><div class="action-row"></div>`;
+    card.querySelector("strong").textContent = alert.alert_type.replaceAll("_", " ");
+    card.querySelector("p").textContent = alert.message;
+    card.querySelector("small").textContent = `${alert.status.replaceAll("_", " ")} · ${alert.created_at ? new Date(alert.created_at).toLocaleString() : ""}`;
+    const actions = card.querySelector(".action-row");
+    if (alert.status !== "resolved") {
+      const acknowledge = document.createElement("button");
+      acknowledge.type = "button";
+      acknowledge.textContent = alert.status === "acknowledged" ? "Acknowledged" : "Acknowledge";
+      acknowledge.disabled = alert.status === "acknowledged";
+      acknowledge.addEventListener("click", () => updateLearningAlert(alert.id, "acknowledged"));
+      actions.appendChild(acknowledge);
+      const resolve = document.createElement("button");
+      resolve.type = "button";
+      resolve.textContent = "Resolve";
+      resolve.addEventListener("click", () => updateLearningAlert(alert.id, "resolved"));
+      actions.appendChild(resolve);
+    }
+    list.appendChild(card);
+  });
+}
+
+async function updateLearningAlert(alertId, status) {
+  const note = prompt(status === "resolved" ? "How was this concern addressed?" : "Optional lecturer note:", "");
+  if (note === null) return;
+  try {
+    await api(`/api/lecturer/learning-alerts/${alertId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status, note: note.trim() || null }),
+    });
+    await Promise.all([reviewAssessment(state.currentReviewAssessmentId), loadSubmissions(), loadLearningProgress()]);
+  } catch (error) {
+    handleLecturerError(error);
+  }
+}
+
+function renderRubric(rubric, mark, auditRows) {
+  const container = $("#rubric-criteria");
+  container.replaceChildren();
+  const existing = new Map((mark?.criteria || []).map((item) => [item.key, item]));
+  rubric.forEach((criterion) => {
+    const saved = existing.get(criterion.key);
+    const row = document.createElement("div");
+    row.className = "rubric-row";
+    row.innerHTML = `<div><strong></strong><small></small></div><label>Score<input type="number" step="0.5" min="0"><span></span></label><label>Comment<textarea rows="2" maxlength="1000"></textarea></label>`;
+    row.dataset.criterionKey = criterion.key;
+    row.querySelector("strong").textContent = criterion.label;
+    row.querySelector("small").textContent = criterion.description || "";
+    const score = row.querySelector('input[type="number"]');
+    score.max = String(criterion.max_score);
+    score.value = saved?.score ?? "";
+    row.querySelector("label span").textContent = `/ ${criterion.max_score}`;
+    row.querySelector("textarea").value = saved?.comment || "";
+    score.addEventListener("input", updateRubricTotal);
+    container.appendChild(row);
+  });
+  $("#rubric-mark-form").elements.overall_comment.value = mark?.overall_comment || "";
+  $("#rubric-change-reason-field").classList.toggle("hidden", !mark);
+  $("#rubric-mark-form").elements.change_reason.required = Boolean(mark);
+  updateRubricTotal();
+  const audit = $("#mark-audit-list");
+  audit.replaceChildren();
+  if (auditRows.length) {
+    const heading = document.createElement("h4");
+    heading.textContent = "Mark-change audit trail";
+    audit.appendChild(heading);
+    auditRows.forEach((item) => {
+      const line = document.createElement("p");
+      line.textContent = `${item.created_at ? new Date(item.created_at).toLocaleString() : ""}: ${item.previous_total == null ? "Initial" : item.previous_total} → ${item.new_total}. ${item.reason || ""}`;
+      audit.appendChild(line);
+    });
+  }
+}
+
+function updateRubricTotal() {
+  const total = $$("#rubric-criteria .rubric-row input").reduce((sum, input) => sum + Number(input.value || 0), 0);
+  $("#rubric-total").textContent = `Total: ${total.toFixed(1)}/100`;
+}
+
+
+$("#rubric-mark-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const assessmentId = state.currentReviewAssessmentId;
+  if (!assessmentId) return;
+  const rows = $$("#rubric-criteria .rubric-row");
+  const scores = rows.map((row) => ({
+    criterion_key: row.dataset.criterionKey,
+    score: Number(row.querySelector('input[type="number"]').value),
+    comment: row.querySelector("textarea").value.trim() || null,
+  }));
+  if (scores.some((item) => !Number.isFinite(item.score))) {
+    setMessage($("#lecturer-message"), "Enter a score for every rubric criterion.", "error");
+    return;
+  }
+  const button = event.submitter;
+  button.disabled = true;
+  try {
+    await api(`/api/lecturer/assessments/${assessmentId}/rubric-mark`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scores,
+        overall_comment: event.currentTarget.elements.overall_comment.value.trim() || null,
+        change_reason: event.currentTarget.elements.change_reason.value.trim() || null,
+      }),
+    });
+    setMessage($("#lecturer-message"), "Criterion-level rubric mark saved and added to the audit trail.", "success");
+    await reviewAssessment(assessmentId);
+  } catch (error) {
+    handleLecturerError(error);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+
+function localDateTimeValue(date = new Date()) {
+  const offset = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+}
+
+function renderPhase2Modules(result) {
+  const settings = result.phase2_settings || {};
+  const anyEnabled = [
+    settings.oral_defence_enabled,
+    settings.practical_tasks_enabled,
+    settings.supervisor_meetings_enabled,
+    settings.cross_version_analysis_enabled,
+    settings.random_moderation_enabled,
+  ].some(Boolean);
+  $("#review-phase2").classList.toggle("hidden", !anyEnabled);
+
+  renderOralDefenceModule(settings, result.oral_defence);
+  renderPracticalTasksModule(settings, result.practical_tasks || []);
+  renderSupervisorMeetingModule(settings, result.supervisor_meetings || []);
+  renderCrossVersionModule(settings, result.cross_version_analysis, result.version_history || []);
+  renderModerationModule(settings, result.moderation);
+}
+
+function renderOralDefenceModule(settings, oralDefence) {
+  const panel = $("#oral-defence-panel");
+  panel.classList.toggle("hidden", !settings.oral_defence_enabled);
+  if (!settings.oral_defence_enabled) return;
+  const prepare = $("#prepare-oral-defence");
+  const form = $("#oral-defence-form");
+  const list = $("#oral-defence-questions");
+  const output = $("#oral-defence-result");
+  list.replaceChildren();
+  output.replaceChildren();
+  prepare.classList.toggle("hidden", Boolean(oralDefence));
+  form.classList.toggle("hidden", !oralDefence);
+  if (!oralDefence) {
+    output.textContent = `Not yet prepared. The course setting allows ${settings.oral_defence_question_count || 5} defence questions.`;
+    return;
+  }
+  const saved = new Map((oralDefence.scores || []).map((item) => [item.question_id, item]));
+  (oralDefence.questions || []).forEach((question, index) => {
+    const savedScore = saved.get(question.id);
+    const card = document.createElement("article");
+    card.className = "oral-question phase2-card";
+    card.dataset.questionId = question.id;
+    card.innerHTML = `<div><strong></strong><small></small></div><label>Score<input type="number" min="0" step="0.5"><span></span></label><label>Comment<textarea rows="2" maxlength="1000"></textarea></label>`;
+    card.querySelector("strong").textContent = `${index + 1}. ${question.prompt}`;
+    card.querySelector("small").textContent = question.focus.replaceAll("_", " ");
+    const scoreInput = card.querySelector('input[type="number"]');
+    scoreInput.max = String(question.max_score || 5);
+    scoreInput.value = savedScore?.score ?? "";
+    card.querySelector("label span").textContent = `/ ${question.max_score || 5}`;
+    card.querySelector("textarea").value = savedScore?.comment || "";
+    list.appendChild(card);
+  });
+  form.elements.outcome.value = oralDefence.outcome || "satisfactory";
+  form.elements.notes.value = oralDefence.notes || "";
+  if (oralDefence.status === "completed") {
+    output.textContent = `Recorded score: ${Number(oralDefence.total_score || 0).toFixed(1)}%. Outcome: ${(oralDefence.outcome || "").replaceAll("_", " ")}.`;
+  }
+}
+
+function renderPracticalTasksModule(settings, tasks) {
+  const panel = $("#practical-task-panel");
+  panel.classList.toggle("hidden", !settings.practical_tasks_enabled);
+  if (!settings.practical_tasks_enabled) return;
+  const prepare = $("#prepare-practical-tasks");
+  const list = $("#practical-task-list");
+  list.replaceChildren();
+  prepare.classList.toggle("hidden", tasks.length > 0);
+  if (!tasks.length) {
+    list.textContent = `No task prepared. The course setting allows ${settings.practical_task_count || 1} practical task(s).`;
+    return;
+  }
+  tasks.forEach((task) => {
+    const card = document.createElement("article");
+    card.className = "phase2-card practical-task-card";
+    card.innerHTML = `<div><strong></strong><small></small><p></p></div><form class="stack-form compact-form"><label>Student response or performance summary<textarea name="student_response" rows="3" minlength="20" maxlength="6000" required></textarea></label><label>Score<input name="score" type="number" min="0" step="0.5" required><span></span></label><label>Lecturer notes<textarea name="notes" rows="2" maxlength="2000"></textarea></label><button class="secondary-button" type="submit">Save practical-task score</button></form>`;
+    card.querySelector("strong").textContent = `Task ${task.sequence}: ${task.task_type.replaceAll("_", " ")}`;
+    card.querySelector("small").textContent = task.status.replaceAll("_", " ");
+    card.querySelector("p").textContent = task.prompt;
+    const form = card.querySelector("form");
+    form.elements.student_response.value = task.student_response || "";
+    form.elements.score.max = String(task.max_score || 20);
+    form.elements.score.value = task.score ?? "";
+    form.querySelector("label span").textContent = `/ ${task.max_score || 20}`;
+    form.elements.notes.value = task.notes || "";
+    form.addEventListener("submit", (event) => savePracticalTask(event, task.id));
+    list.appendChild(card);
+  });
+}
+
+function renderSupervisorMeetingModule(settings, meetings) {
+  const panel = $("#supervisor-meeting-panel");
+  panel.classList.toggle("hidden", !settings.supervisor_meetings_enabled);
+  if (!settings.supervisor_meetings_enabled) return;
+  const form = $("#supervisor-meeting-form");
+  if (!form.elements.meeting_at.value) form.elements.meeting_at.value = localDateTimeValue();
+  const list = $("#supervisor-meeting-list");
+  list.replaceChildren();
+  if (!meetings.length) {
+    list.textContent = "No supervisor meeting has been recorded for this student and course.";
+    return;
+  }
+  meetings.forEach((meeting) => {
+    const card = document.createElement("article");
+    card.className = "phase2-card";
+    card.innerHTML = `<strong></strong><small></small><p></p><div class="meeting-details"></div>`;
+    card.querySelector("strong").textContent = meeting.meeting_type.replaceAll("_", " ");
+    card.querySelector("small").textContent = meeting.meeting_at ? new Date(meeting.meeting_at).toLocaleString() : "Date unavailable";
+    card.querySelector("p").textContent = meeting.summary;
+    const details = [];
+    if (meeting.decisions) details.push(`Decisions: ${meeting.decisions}`);
+    if (meeting.action_items) details.push(`Actions: ${meeting.action_items}`);
+    if (meeting.next_meeting_at) details.push(`Next: ${new Date(meeting.next_meeting_at).toLocaleString()}`);
+    card.querySelector(".meeting-details").textContent = details.join(" · ");
+    list.appendChild(card);
+  });
+}
+
+function renderCrossVersionModule(settings, analysis, versions) {
+  const panel = $("#cross-version-panel");
+  panel.classList.toggle("hidden", !settings.cross_version_analysis_enabled);
+  if (!settings.cross_version_analysis_enabled) return;
+  const button = $("#run-version-analysis");
+  const output = $("#cross-version-result");
+  output.replaceChildren();
+  const hasPrevious = versions.length > 1;
+  button.disabled = !hasPrevious;
+  button.title = hasPrevious ? "Run or refresh analysis" : "A previous version is required";
+  if (!analysis) {
+    output.textContent = hasPrevious ? "No advanced comparison has been saved yet." : "A previous version is required before this module can run.";
+    return;
+  }
+  const card = document.createElement("article");
+  card.className = `phase2-card risk-${analysis.risk_level || "low"}`;
+  const flags = (analysis.flags || []).map((item) => item.message).join(" ") || "No automated risk flags.";
+  card.innerHTML = `<strong></strong><p></p><div class="phase2-metrics"></div><small></small>`;
+  card.querySelector("strong").textContent = `${String(analysis.risk_level || "low").toUpperCase()} change risk`;
+  card.querySelector("p").textContent = flags;
+  const metrics = card.querySelector(".phase2-metrics");
+  [
+    [`${analysis.similarity_percent ?? 0}%`, "similarity"],
+    [analysis.word_count_change >= 0 ? `+${analysis.word_count_change}` : analysis.word_count_change, "word change"],
+    [`${analysis.inserted_or_replaced_percent ?? 0}%`, "inserted/replaced"],
+    [(analysis.added_headings || []).length, "new headings"],
+  ].forEach(([value, label]) => {
+    const metric = document.createElement("span");
+    metric.innerHTML = `<strong></strong><small></small>`;
+    metric.querySelector("strong").textContent = value;
+    metric.querySelector("small").textContent = label;
+    metrics.appendChild(metric);
+  });
+  card.querySelector("small:last-child").textContent = `New concepts: ${(analysis.new_keywords || []).join(", ") || "None identified"}`;
+  output.appendChild(card);
+}
+
+function renderModerationModule(settings, moderation) {
+  const panel = $("#moderation-panel");
+  panel.classList.toggle("hidden", !settings.random_moderation_enabled);
+  if (!settings.random_moderation_enabled) return;
+  const status = $("#moderation-status");
+  const form = $("#moderation-form");
+  if (!moderation) {
+    status.textContent = `This assessment has not been selected by the ${settings.moderation_sample_percent || 10}% moderation sample.`;
+    form.classList.add("hidden");
+    return;
+  }
+  status.textContent = moderation.status === "completed"
+    ? `Moderation completed. Original ${moderation.original_mark}; moderated ${moderation.moderated_mark}; variance ${Number(moderation.variance || 0).toFixed(1)}. Decision: ${(moderation.decision || "").replaceAll("_", " ")}.`
+    : `Selected for moderation: ${moderation.selected_reason}. Original rubric mark: ${moderation.original_mark}.`;
+  form.classList.toggle("hidden", moderation.status === "completed");
+  if (moderation.status !== "completed") {
+    form.elements.moderated_mark.value = moderation.original_mark;
+    form.elements.notes.value = moderation.notes || "";
+  }
+}
+
+async function loadMarkerAnomalies(course, refresh = false) {
+  state.currentAnomalyCourseId = course.id;
+  $("#marker-anomaly-panel").classList.remove("hidden");
+  $("#marker-anomaly-title").textContent = `Marker integrity analytics · ${course.course_code}`;
+  setMessage($("#marker-anomaly-message"), "Analysing marking patterns…");
+  try {
+    const result = await api(`/api/lecturer/courses/${course.id}/marker-anomalies?refresh=${refresh ? "true" : "false"}`);
+    renderMarkerAnomalies(result.anomalies || []);
+    setMessage($("#marker-anomaly-message"), result.anomalies?.length ? "Indicators found for review." : "No anomaly indicators were found with the available marking data.", result.anomalies?.length ? "warning" : "success");
+    $("#marker-anomaly-panel").scrollIntoView({ behavior: "smooth" });
+  } catch (error) {
+    handleLecturerError(error);
+  }
+}
+
+function renderMarkerAnomalies(alerts) {
+  const body = $("#marker-anomaly-body");
+  body.replaceChildren();
+  if (!alerts.length) {
+    body.innerHTML = '<tr><td colspan="5" class="empty-state">No anomaly indicators were identified. At least four marked assessments per marker are required for most checks.</td></tr>';
+    return;
+  }
+  alerts.forEach((alert) => {
+    const row = document.createElement("tr");
+    row.innerHTML = `<td></td><td><strong></strong><small></small></td><td></td><td></td><td><div class="action-row"></div></td>`;
+    row.children[0].textContent = alert.marker_name || "Unknown marker";
+    row.children[1].querySelector("strong").textContent = alert.anomaly_type.replaceAll("_", " ");
+    row.children[1].querySelector("small").textContent = alert.severity;
+    row.children[2].textContent = alert.details;
+    row.children[3].textContent = alert.status;
+    const actions = row.children[4].querySelector(".action-row");
+    if (alert.status !== "resolved") {
+      ["acknowledged", "resolved"].forEach((status) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = status === "resolved" ? "Resolve" : "Acknowledge";
+        button.addEventListener("click", () => updateMarkerAnomaly(alert.id, status));
+        actions.appendChild(button);
+      });
+    }
+    body.appendChild(row);
+  });
+}
+
+async function updateMarkerAnomaly(alertId, status) {
+  const note = prompt(status === "resolved" ? "How was this indicator reviewed or resolved?" : "Optional review note:", "");
+  if (note === null) return;
+  try {
+    await api(`/api/lecturer/marker-anomalies/${alertId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status, note: note.trim() || null }),
+    });
+    const course = state.courses.find((item) => item.id === state.currentAnomalyCourseId);
+    if (course) await loadMarkerAnomalies(course, false);
+  } catch (error) {
+    handleLecturerError(error);
+  }
+}
+
+$("#refresh-marker-anomalies")?.addEventListener("click", async () => {
+  const course = state.courses.find((item) => item.id === state.currentAnomalyCourseId);
+  if (course) await loadMarkerAnomalies(course, true);
+});
+
+$("#prepare-oral-defence")?.addEventListener("click", async () => {
+  if (!state.currentReviewAssessmentId) return;
+  try {
+    await api(`/api/lecturer/assessments/${state.currentReviewAssessmentId}/oral-defence/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question_count: state.currentReviewData?.phase2_settings?.oral_defence_question_count || null }),
+    });
+    await reviewAssessment(state.currentReviewAssessmentId);
+  } catch (error) {
+    handleLecturerError(error);
+  }
+});
+
+$("#oral-defence-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.currentReviewAssessmentId) return;
+  const scores = $$("#oral-defence-questions .oral-question").map((card) => ({
+    question_id: card.dataset.questionId,
+    score: Number(card.querySelector('input[type="number"]').value),
+    comment: card.querySelector("textarea").value.trim() || null,
+  }));
+  if (scores.some((item) => !Number.isFinite(item.score))) {
+    setMessage($("#lecturer-message"), "Enter a score for every oral-defence question.", "error");
+    return;
+  }
+  try {
+    await api(`/api/lecturer/assessments/${state.currentReviewAssessmentId}/oral-defence/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scores, outcome: event.currentTarget.elements.outcome.value, notes: event.currentTarget.elements.notes.value.trim() || null }),
+    });
+    setMessage($("#lecturer-message"), "Oral-defence result saved.", "success");
+    await reviewAssessment(state.currentReviewAssessmentId);
+  } catch (error) {
+    handleLecturerError(error);
+  }
+});
+
+$("#prepare-practical-tasks")?.addEventListener("click", async () => {
+  if (!state.currentReviewAssessmentId) return;
+  try {
+    await api(`/api/lecturer/assessments/${state.currentReviewAssessmentId}/practical-tasks/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ count: state.currentReviewData?.phase2_settings?.practical_task_count || null }),
+    });
+    await reviewAssessment(state.currentReviewAssessmentId);
+  } catch (error) {
+    handleLecturerError(error);
+  }
+});
+
+async function savePracticalTask(event, taskId) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  try {
+    await api(`/api/lecturer/practical-tasks/${taskId}/score`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        student_response: form.elements.student_response.value.trim(),
+        score: Number(form.elements.score.value),
+        notes: form.elements.notes.value.trim() || null,
+      }),
+    });
+    setMessage($("#lecturer-message"), "Practical-task evidence saved.", "success");
+    await reviewAssessment(state.currentReviewAssessmentId);
+  } catch (error) {
+    handleLecturerError(error);
+  }
+}
+
+$("#supervisor-meeting-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const summary = state.currentReviewSummary;
+  if (!summary?.course_id) return;
+  const form = event.currentTarget;
+  try {
+    await api(`/api/lecturer/courses/${summary.course_id}/supervisor-meetings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        student_id: summary.student_id,
+        document_id: summary.document_id,
+        meeting_at: new Date(form.elements.meeting_at.value).toISOString(),
+        meeting_type: form.elements.meeting_type.value,
+        summary: form.elements.summary.value.trim(),
+        decisions: form.elements.decisions.value.trim() || null,
+        action_items: form.elements.action_items.value.trim() || null,
+        next_meeting_at: form.elements.next_meeting_at.value ? new Date(form.elements.next_meeting_at.value).toISOString() : null,
+      }),
+    });
+    form.reset();
+    form.elements.meeting_at.value = localDateTimeValue();
+    setMessage($("#lecturer-message"), "Supervisor meeting recorded.", "success");
+    await reviewAssessment(state.currentReviewAssessmentId);
+  } catch (error) {
+    handleLecturerError(error);
+  }
+});
+
+$("#run-version-analysis")?.addEventListener("click", async () => {
+  const documentId = state.currentReviewSummary?.document_id;
+  if (!documentId) return;
+  try {
+    await api(`/api/lecturer/documents/${documentId}/version-analysis`, { method: "POST" });
+    setMessage($("#lecturer-message"), "Cross-version analysis updated.", "success");
+    await reviewAssessment(state.currentReviewAssessmentId);
+  } catch (error) {
+    handleLecturerError(error);
+  }
+});
+
+$("#moderation-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.currentReviewAssessmentId) return;
+  const form = event.currentTarget;
+  try {
+    await api(`/api/lecturer/assessments/${state.currentReviewAssessmentId}/moderation/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        moderated_mark: Number(form.elements.moderated_mark.value),
+        decision: form.elements.decision.value,
+        notes: form.elements.notes.value.trim(),
+      }),
+    });
+    setMessage($("#lecturer-message"), "Moderation record completed.", "success");
+    await reviewAssessment(state.currentReviewAssessmentId);
+  } catch (error) {
+    handleLecturerError(error);
+  }
+});
 
 $("#close-review").addEventListener("click", () => $("#review-panel").classList.add("hidden"));
 
