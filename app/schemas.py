@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -20,6 +21,14 @@ class GeneratedQuestion(BaseModel):
     options: list[str] = Field(min_length=4, max_length=4)
     correct_option_index: int = Field(ge=0, le=3)
     difficulty: Literal["recall", "understanding", "application"]
+    category: Literal[
+        "document_knowledge",
+        "decision_defence",
+        "interpretation",
+        "counterfactual",
+        "error_correction",
+        "transfer_application",
+    ]
     seconds: int = Field(ge=30, le=30)
     source_quote: str = Field(min_length=8, max_length=500)
     source_location: str = Field(min_length=2, max_length=255)
@@ -132,10 +141,95 @@ class CourseCreateRequest(BaseModel):
     academic_year: str = Field(min_length=4, max_length=40)
     semester: str = Field(min_length=2, max_length=80)
     assessment_question_count: int = Field(default=20, ge=5, le=20)
+    checkpoint_question_count: int = Field(default=3, ge=3, le=10)
+    milestones_enabled: bool = False
+    version_history_enabled: bool = False
+
+    # Optional Phase 2 modules.
+    oral_defence_enabled: bool = False
+    oral_defence_question_count: int = Field(default=5, ge=3, le=10)
+    practical_tasks_enabled: bool = False
+    practical_task_count: int = Field(default=1, ge=1, le=5)
+    supervisor_meetings_enabled: bool = False
+    cross_version_analysis_enabled: bool = False
+    random_moderation_enabled: bool = False
+    moderation_sample_percent: int = Field(default=10, ge=1, le=100)
+    moderation_variance_threshold: float = Field(default=10.0, ge=1, le=50)
+    marker_anomaly_detection_enabled: bool = False
+
+    milestone_titles: list[str] = Field(default_factory=list, max_length=12)
+
+    @field_validator("milestone_titles")
+    @classmethod
+    def clean_milestone_titles(cls, value: list[str]) -> list[str]:
+        cleaned = [item.strip() for item in value if item.strip()]
+        if len({item.casefold() for item in cleaned}) != len(cleaned):
+            raise ValueError("Milestone titles must be unique.")
+        if any(len(item) > 180 for item in cleaned):
+            raise ValueError("Each milestone title must be 180 characters or fewer.")
+        return cleaned
 
 
 class CourseSettingsRequest(BaseModel):
-    assessment_question_count: int = Field(ge=5, le=20)
+    assessment_question_count: int | None = Field(default=None, ge=5, le=20)
+    checkpoint_question_count: int | None = Field(default=None, ge=3, le=10)
+    milestones_enabled: bool | None = None
+    version_history_enabled: bool | None = None
+    oral_defence_enabled: bool | None = None
+    oral_defence_question_count: int | None = Field(default=None, ge=3, le=10)
+    practical_tasks_enabled: bool | None = None
+    practical_task_count: int | None = Field(default=None, ge=1, le=5)
+    supervisor_meetings_enabled: bool | None = None
+    cross_version_analysis_enabled: bool | None = None
+    random_moderation_enabled: bool | None = None
+    moderation_sample_percent: int | None = Field(default=None, ge=1, le=100)
+    moderation_variance_threshold: float | None = Field(default=None, ge=1, le=50)
+    marker_anomaly_detection_enabled: bool | None = None
+
+
+class CourseMilestoneCreateRequest(BaseModel):
+    title: str = Field(min_length=2, max_length=180)
+    description: str | None = Field(default=None, max_length=1000)
+    required: bool = True
+    checkpoint_question_count: int = Field(default=3, ge=3, le=10)
+
+
+class RubricCriterionRequest(BaseModel):
+    key: str = Field(pattern=r"^[a-z0-9_]{2,40}$")
+    label: str = Field(min_length=2, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    max_score: float = Field(gt=0, le=100)
+
+
+class CourseRubricRequest(BaseModel):
+    criteria: list[RubricCriterionRequest] = Field(min_length=2, max_length=10)
+
+    @field_validator("criteria")
+    @classmethod
+    def validate_rubric(cls, value: list[RubricCriterionRequest]) -> list[RubricCriterionRequest]:
+        if len({item.key for item in value}) != len(value):
+            raise ValueError("Rubric criterion keys must be unique.")
+        total = round(sum(item.max_score for item in value), 2)
+        if total != 100:
+            raise ValueError("Rubric maximum scores must total 100.")
+        return value
+
+
+class RubricScoreRequest(BaseModel):
+    criterion_key: str = Field(pattern=r"^[a-z0-9_]{2,40}$")
+    score: float = Field(ge=0, le=100)
+    comment: str | None = Field(default=None, max_length=1000)
+
+
+class RubricMarkRequest(BaseModel):
+    scores: list[RubricScoreRequest] = Field(min_length=2, max_length=10)
+    overall_comment: str | None = Field(default=None, max_length=2000)
+    change_reason: str | None = Field(default=None, max_length=1000)
+
+
+class LearningAlertActionRequest(BaseModel):
+    status: Literal["acknowledged", "resolved"]
+    note: str | None = Field(default=None, max_length=1000)
 
 
 class MonitoringEventRequest(BaseModel):
@@ -161,6 +255,54 @@ class MonitoringEventRequest(BaseModel):
     severity: Literal["warning", "critical"] = "warning"
     corrected: bool = False
     message: str | None = Field(default=None, max_length=300)
+
+
+class OralDefenceStartRequest(BaseModel):
+    question_count: int | None = Field(default=None, ge=3, le=10)
+
+
+class OralDefenceQuestionScoreRequest(BaseModel):
+    question_id: str = Field(min_length=3, max_length=80)
+    score: float = Field(ge=0, le=10)
+    comment: str | None = Field(default=None, max_length=1000)
+
+
+class OralDefenceCompleteRequest(BaseModel):
+    scores: list[OralDefenceQuestionScoreRequest] = Field(min_length=3, max_length=10)
+    outcome: Literal["satisfactory", "satisfactory_with_conditions", "further_verification", "unsatisfactory"]
+    notes: str | None = Field(default=None, max_length=3000)
+
+
+class PracticalTaskGenerateRequest(BaseModel):
+    count: int | None = Field(default=None, ge=1, le=5)
+
+
+class PracticalTaskScoreRequest(BaseModel):
+    student_response: str = Field(min_length=20, max_length=6000)
+    score: float = Field(ge=0, le=100)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class SupervisorMeetingRequest(BaseModel):
+    student_id: str = Field(min_length=2, max_length=100)
+    document_id: str | None = None
+    meeting_at: datetime
+    meeting_type: Literal["supervision", "progress_review", "oral_checkpoint", "remedial", "other"] = "supervision"
+    summary: str = Field(min_length=20, max_length=5000)
+    decisions: str | None = Field(default=None, max_length=3000)
+    action_items: str | None = Field(default=None, max_length=3000)
+    next_meeting_at: datetime | None = None
+
+
+class ModerationCompleteRequest(BaseModel):
+    moderated_mark: float = Field(ge=0, le=100)
+    decision: Literal["confirmed", "adjusted", "return_to_marker", "escalated"]
+    notes: str = Field(min_length=10, max_length=3000)
+
+
+class MarkerAnomalyActionRequest(BaseModel):
+    status: Literal["acknowledged", "resolved"]
+    note: str | None = Field(default=None, max_length=2000)
 
 
 class CourseCollaboratorRequest(BaseModel):

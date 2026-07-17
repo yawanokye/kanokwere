@@ -54,6 +54,29 @@ from .assessment_service import (
 from .config import settings
 from .database import Base, SessionLocal, engine, get_db
 from .document_service import read_and_extract
+from .learning_service import (
+    alert_payload,
+    course_learning_progress,
+    default_rubric_json,
+    parse_rubric,
+    refresh_document_alerts,
+    version_comparison,
+)
+from .phase2_service import (
+    anomaly_payload,
+    complete_oral_defence,
+    course_phase2_settings,
+    ensure_random_moderation,
+    ensure_version_analysis,
+    moderation_payload,
+    oral_defence_payload,
+    practical_task_payload,
+    prepare_oral_defence,
+    prepare_practical_tasks,
+    scan_marker_anomalies,
+    supervisor_meeting_payload,
+    version_analysis_payload,
+)
 from .models import (
     Assessment,
     AssessmentItem,
@@ -61,12 +84,22 @@ from .models import (
     AuthSession,
     Course,
     CourseLecturer,
+    CourseMilestone,
     Document,
     Institution,
+    LearningAlert,
+    MarkAuditLog,
+    MarkerAnomalyAlert,
+    ModerationRecord,
     MonitoringEvent,
+    OralDefence,
     PasswordResetRequest,
+    PracticalTask,
     Question,
+    RubricMark,
+    SupervisorMeeting,
     User,
+    VersionAnalysis,
     WebcamSnapshot,
 )
 from .question_service import generate_question_bank, question_to_record
@@ -82,12 +115,23 @@ from .schemas import (
     ChangePasswordRequest,
     CourseCollaboratorRequest,
     CourseCreateRequest,
+    CourseMilestoneCreateRequest,
+    CourseRubricRequest,
     CourseSettingsRequest,
     FocusEventRequest,
+    LearningAlertActionRequest,
     InterruptionNoteRequest,
     MonitoringEventRequest,
     LecturerRegisterRequest,
+    MarkerAnomalyActionRequest,
+    ModerationCompleteRequest,
+    OralDefenceCompleteRequest,
+    OralDefenceStartRequest,
+    PracticalTaskGenerateRequest,
+    PracticalTaskScoreRequest,
+    RubricMarkRequest,
     LoginRequest,
+    SupervisorMeetingRequest,
     SelfServicePasswordResetRequest,
     StartAssessmentRequest,
     UserApprovalRequest,
@@ -146,7 +190,7 @@ async def lifespan(_: FastAPI):
 mimetypes.add_type("text/javascript", ".mjs")
 mimetypes.add_type("application/wasm", ".wasm")
 
-app = FastAPI(title="Kanokware", version="0.8.2", lifespan=lifespan)
+app = FastAPI(title="Kanokware", version="0.9.0", lifespan=lifespan)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 REPOSITORY_MONITORING_ASSET_DIR = STATIC_DIR / "vendor" / "mediapipe-tasks-vision"
 RUNTIME_MONITORING_ASSET_DIR = Path(
@@ -790,6 +834,24 @@ def _course_payload(db: Session, course: Course, current_user: User | None = Non
         "enrollment_code": course.enrollment_code,
         "status": course.status,
         "assessment_question_count": int(course.assessment_question_count or 20),
+        "checkpoint_question_count": int(course.checkpoint_question_count or 3),
+        "milestones_enabled": bool(course.milestones_enabled),
+        "version_history_enabled": bool(course.version_history_enabled),
+        "final_justification_required": bool(course.final_justification_required),
+        "ai_declaration_required": bool(course.ai_declaration_required),
+        **course_phase2_settings(course),
+        "milestones": [
+            {
+                "id": milestone.id,
+                "title": milestone.title,
+                "description": milestone.description,
+                "sequence": milestone.sequence,
+                "required": milestone.required,
+                "checkpoint_question_count": milestone.checkpoint_question_count,
+            }
+            for milestone in course.milestones
+        ],
+        "rubric": parse_rubric(course),
         "submission_count": int(submission_count),
         "my_access_level": my_access_level,
         "lecturers": [
@@ -825,12 +887,45 @@ def create_course(
         semester=payload.semester.strip(),
         enrollment_code=generate_enrollment_code(db),
         assessment_question_count=payload.assessment_question_count,
+        checkpoint_question_count=payload.checkpoint_question_count,
+        milestones_enabled=payload.milestones_enabled,
+        version_history_enabled=payload.version_history_enabled,
+        final_justification_required=True,
+        ai_declaration_required=True,
+        rubric_json=default_rubric_json(),
+        oral_defence_enabled=payload.oral_defence_enabled,
+        oral_defence_question_count=payload.oral_defence_question_count,
+        practical_tasks_enabled=payload.practical_tasks_enabled,
+        practical_task_count=payload.practical_task_count,
+        supervisor_meetings_enabled=payload.supervisor_meetings_enabled,
+        cross_version_analysis_enabled=payload.cross_version_analysis_enabled,
+        random_moderation_enabled=payload.random_moderation_enabled,
+        moderation_sample_percent=payload.moderation_sample_percent,
+        moderation_variance_threshold=payload.moderation_variance_threshold,
+        marker_anomaly_detection_enabled=payload.marker_anomaly_detection_enabled,
         created_by=user.id,
         status="active",
     )
     db.add(course)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="This course already exists for the selected academic period.") from exc
     db.add(CourseLecturer(course_id=course.id, lecturer_id=user.id, access_level="owner"))
+    milestone_titles = payload.milestone_titles
+    if payload.milestones_enabled and not milestone_titles:
+        milestone_titles = ["Problem or task definition", "Approach or method", "Draft development", "Final preparation"]
+    for sequence, title in enumerate(milestone_titles, start=1):
+        db.add(
+            CourseMilestone(
+                course_id=course.id,
+                title=title,
+                sequence=sequence,
+                required=True,
+                checkpoint_question_count=payload.checkpoint_question_count,
+            )
+        )
     audit(db, request, "course_created", user=user, resource_type="course", resource_id=course.id)
     try:
         db.commit()
@@ -892,7 +987,37 @@ def update_course_settings(
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     course = require_course_access(db, user, course_id, owner_only=True)
-    course.assessment_question_count = payload.assessment_question_count
+    changes: dict[str, object] = {}
+    if payload.assessment_question_count is not None:
+        course.assessment_question_count = payload.assessment_question_count
+        changes["assessment_question_count"] = payload.assessment_question_count
+    if payload.checkpoint_question_count is not None:
+        course.checkpoint_question_count = payload.checkpoint_question_count
+        changes["checkpoint_question_count"] = payload.checkpoint_question_count
+        for milestone in course.milestones:
+            milestone.checkpoint_question_count = payload.checkpoint_question_count
+    if payload.milestones_enabled is not None:
+        course.milestones_enabled = payload.milestones_enabled
+        changes["milestones_enabled"] = payload.milestones_enabled
+    if payload.version_history_enabled is not None:
+        course.version_history_enabled = payload.version_history_enabled
+        changes["version_history_enabled"] = payload.version_history_enabled
+    for field_name in (
+        "oral_defence_enabled",
+        "oral_defence_question_count",
+        "practical_tasks_enabled",
+        "practical_task_count",
+        "supervisor_meetings_enabled",
+        "cross_version_analysis_enabled",
+        "random_moderation_enabled",
+        "moderation_sample_percent",
+        "moderation_variance_threshold",
+        "marker_anomaly_detection_enabled",
+    ):
+        value = getattr(payload, field_name)
+        if value is not None:
+            setattr(course, field_name, value)
+            changes[field_name] = value
     audit(
         db,
         request,
@@ -900,11 +1025,155 @@ def update_course_settings(
         user=user,
         resource_type="course",
         resource_id=course.id,
-        detail={"assessment_question_count": payload.assessment_question_count},
+        detail=changes,
     )
     db.commit()
     db.refresh(course)
     return {"course": _course_payload(db, course, user)}
+
+
+def _require_grading_access(db: Session, user: User, course_id: str) -> Course:
+    course = require_course_access(db, user, course_id)
+    if user.role == "institution_admin" and user.institution_id == course.institution_id:
+        return course
+    access = db.scalar(
+        select(CourseLecturer.access_level).where(
+            CourseLecturer.course_id == course.id,
+            CourseLecturer.lecturer_id == user.id,
+        )
+    )
+    if access not in {"owner", "co_lecturer"}:
+        raise HTTPException(status_code=403, detail="This account has view-only access to the course.")
+    return course
+
+
+@app.post("/api/lecturer/courses/{course_id}/milestones", status_code=201)
+def create_course_milestone(
+    course_id: str,
+    payload: CourseMilestoneCreateRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    course = require_course_access(db, user, course_id, owner_only=True)
+    sequence = (db.scalar(select(func.max(CourseMilestone.sequence)).where(CourseMilestone.course_id == course.id)) or 0) + 1
+    milestone = CourseMilestone(
+        course_id=course.id,
+        title=payload.title.strip(),
+        description=payload.description.strip() if payload.description else None,
+        sequence=sequence,
+        required=payload.required,
+        checkpoint_question_count=payload.checkpoint_question_count,
+    )
+    course.milestones_enabled = True
+    db.add(milestone)
+    audit(db, request, "course_milestone_created", user=user, resource_type="course", resource_id=course.id, detail={"title": milestone.title})
+    db.commit()
+    db.refresh(course)
+    return {"course": _course_payload(db, course, user)}
+
+
+@app.delete("/api/lecturer/courses/{course_id}/milestones/{milestone_id}")
+def delete_course_milestone(
+    course_id: str,
+    milestone_id: str,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    course = require_course_access(db, user, course_id, owner_only=True)
+    milestone = db.get(CourseMilestone, milestone_id)
+    if not milestone or milestone.course_id != course.id:
+        raise HTTPException(status_code=404, detail="Milestone not found.")
+    linked = db.scalar(select(func.count(Document.id)).where(Document.milestone_id == milestone.id)) or 0
+    if linked:
+        raise HTTPException(status_code=409, detail="This milestone already has student submissions and cannot be deleted.")
+    db.delete(milestone)
+    audit(db, request, "course_milestone_deleted", user=user, resource_type="course", resource_id=course.id, detail={"title": milestone.title})
+    db.commit()
+    return {"deleted": True}
+
+
+@app.get("/api/lecturer/courses/{course_id}/rubric")
+def get_course_rubric(
+    course_id: str,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    course = require_course_access(db, user, course_id)
+    return {"course_id": course.id, "criteria": parse_rubric(course)}
+
+
+@app.put("/api/lecturer/courses/{course_id}/rubric")
+def update_course_rubric(
+    course_id: str,
+    payload: CourseRubricRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    course = require_course_access(db, user, course_id, owner_only=True)
+    criteria = [item.model_dump() for item in payload.criteria]
+    course.rubric_json = json.dumps(criteria, ensure_ascii=False)
+    audit(db, request, "course_rubric_updated", user=user, resource_type="course", resource_id=course.id, detail={"criteria_count": len(criteria)})
+    db.commit()
+    return {"course_id": course.id, "criteria": criteria}
+
+
+@app.get("/api/lecturer/courses/{course_id}/learning-progress")
+def learning_progress(
+    course_id: str,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    course = require_course_access(db, user, course_id)
+    return {
+        "course": _course_payload(db, course, user),
+        "students": course_learning_progress(db, course),
+    }
+
+
+@app.get("/api/courses/resolve")
+def resolve_course_code(
+    code: str = Query(min_length=6, max_length=24),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    course = db.scalar(
+        select(Course)
+        .options(selectinload(Course.milestones))
+        .where(func.upper(Course.enrollment_code) == code.strip().upper(), Course.status == "active")
+    )
+    if not course:
+        raise HTTPException(status_code=404, detail="The course enrolment code is invalid or inactive.")
+    owner = db.scalar(
+        select(User.full_name)
+        .join(CourseLecturer, CourseLecturer.lecturer_id == User.id)
+        .where(CourseLecturer.course_id == course.id, CourseLecturer.access_level == "owner")
+        .limit(1)
+    )
+    institution = db.get(Institution, course.institution_id)
+    return {
+        "course_id": course.id,
+        "course": f"{course.course_code} · {course.title}",
+        "institution": institution.name if institution else None,
+        "lecturer": owner,
+        "assessment_question_count": int(course.assessment_question_count or 20),
+        "checkpoint_question_count": int(course.checkpoint_question_count or 3),
+        "milestones_enabled": bool(course.milestones_enabled),
+        "version_history_enabled": bool(course.version_history_enabled),
+        "final_justification_required": True,
+        "ai_declaration_required": True,
+        "milestones": [
+            {
+                "id": milestone.id,
+                "title": milestone.title,
+                "sequence": milestone.sequence,
+                "required": milestone.required,
+                "checkpoint_question_count": milestone.checkpoint_question_count,
+            }
+            for milestone in course.milestones
+        ],
+    }
 
 
 @app.post("/api/lecturer/courses/{course_id}/regenerate-code")
@@ -965,17 +1234,49 @@ async def upload_document(
     student_id: str = Form(..., min_length=2, max_length=100),
     title: str = Form(..., min_length=3, max_length=300),
     course_code: str = Form(..., min_length=6, max_length=24),
+    submission_stage: str = Form(default="final", max_length=30),
+    milestone_id: str | None = Form(default=None),
+    understanding_summary: str = Form(..., min_length=60, max_length=4000),
+    key_decisions: str = Form(..., min_length=60, max_length=4000),
+    main_contribution: str = Form(..., min_length=40, max_length=3000),
+    stated_limitation: str = Form(..., min_length=30, max_length=2500),
+    ai_use_level: str = Form(default="none", max_length=30),
+    ai_use_details: str | None = Form(default=None, max_length=3000),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     course = db.scalar(
-        select(Course).where(
+        select(Course)
+        .options(selectinload(Course.milestones))
+        .where(
             func.upper(Course.enrollment_code) == course_code.strip().upper(),
             Course.status == "active",
         )
     )
     if not course:
         raise HTTPException(status_code=404, detail="The course enrolment code is invalid or inactive.")
+
+    stage = submission_stage.strip().lower()
+    if stage not in {"milestone", "final"}:
+        raise HTTPException(status_code=422, detail="Submission stage must be milestone or final.")
+    milestone: CourseMilestone | None = None
+    if stage == "milestone":
+        if not course.milestones_enabled:
+            raise HTTPException(status_code=409, detail="This course is configured for final submission only.")
+        if not milestone_id:
+            raise HTTPException(status_code=422, detail="Select the learning milestone for this submission.")
+        milestone = db.get(CourseMilestone, milestone_id)
+        if not milestone or milestone.course_id != course.id:
+            raise HTTPException(status_code=404, detail="The selected milestone does not belong to this course.")
+    elif milestone_id:
+        raise HTTPException(status_code=422, detail="A final submission cannot be linked to a milestone.")
+
+    ai_level = ai_use_level.strip().lower()
+    if ai_level not in {"none", "limited", "substantial", "required"}:
+        raise HTTPException(status_code=422, detail="Select a valid AI-use declaration.")
+    if ai_level != "none" and not (ai_use_details or "").strip():
+        raise HTTPException(status_code=422, detail="Explain how AI was used and how its output was checked.")
+
     owner_id = db.scalar(
         select(CourseLecturer.lecturer_id).where(
             CourseLecturer.course_id == course.id,
@@ -983,6 +1284,28 @@ async def upload_document(
         ).limit(1)
     )
     _, extracted_text, filename, digest = await read_and_extract(file)
+
+    previous: Document | None = None
+    version_number = 1
+    if course.version_history_enabled or course.cross_version_analysis_enabled:
+        previous = db.scalar(
+            select(Document)
+            .where(
+                Document.course_id == course.id,
+                func.lower(Document.student_id) == student_id.strip().lower(),
+                func.lower(Document.title) == title.strip().lower(),
+            )
+            .order_by(Document.version_number.desc(), Document.created_at.desc())
+            .limit(1)
+        )
+        if previous:
+            version_number = int(previous.version_number or 1) + 1
+
+    question_override = (
+        int(milestone.checkpoint_question_count or course.checkpoint_question_count or 3)
+        if milestone
+        else int(course.assessment_question_count or 20)
+    )
     document = Document(
         student_name=student_name.strip(),
         student_id=student_id.strip(),
@@ -996,16 +1319,37 @@ async def upload_document(
         institution_id=course.institution_id,
         course_id=course.id,
         submitted_to_lecturer_id=owner_id,
+        milestone_id=milestone.id if milestone else None,
+        previous_version_id=previous.id if previous else None,
+        submission_stage=stage,
+        version_number=version_number,
+        assessment_question_count_override=question_override,
+        understanding_summary=understanding_summary.strip(),
+        key_decisions=key_decisions.strip(),
+        main_contribution=main_contribution.strip(),
+        stated_limitation=stated_limitation.strip(),
+        ai_use_level=ai_level,
+        ai_use_details=(ai_use_details or "").strip() or None,
     )
     db.add(document)
     db.flush()
+    refresh_document_alerts(db, document)
+    if course.cross_version_analysis_enabled and document.previous_version_id:
+        ensure_version_analysis(db, document)
     audit(
         db,
         request,
         "student_document_uploaded",
         resource_type="document",
         resource_id=document.id,
-        detail={"course_id": course.id, "student_id": student_id.strip()},
+        detail={
+            "course_id": course.id,
+            "student_id": student_id.strip(),
+            "submission_stage": stage,
+            "milestone_id": milestone.id if milestone else None,
+            "version_number": version_number,
+            "ai_use_level": ai_level,
+        },
     )
     db.commit()
     db.refresh(document)
@@ -1015,8 +1359,11 @@ async def upload_document(
         "status": document.status,
         "word_count": document.word_count,
         "course": f"{course.course_code} · {course.title}",
-        "assessment_question_count": int(course.assessment_question_count or 20),
-        "message": "The document was accepted and question generation has started.",
+        "submission_stage": stage,
+        "milestone": milestone.title if milestone else None,
+        "version_number": version_number,
+        "assessment_question_count": question_override,
+        "message": "The submission was accepted and the understanding assessment is being prepared.",
     }
 
 
@@ -1039,7 +1386,11 @@ def document_status(document_id: str, db: Session = Depends(get_db)) -> dict[str
         select(func.count()).select_from(Question).where(Question.document_id == document.id)
     )
     course = db.get(Course, document.course_id) if document.course_id else None
-    assessment_question_count = int(course.assessment_question_count or 20) if course else 20
+    assessment_question_count = int(
+        document.assessment_question_count_override
+        or (course.assessment_question_count if course else 20)
+        or 20
+    )
     return {
         "document_id": document.id,
         "status": document.status,
@@ -1047,6 +1398,8 @@ def document_status(document_id: str, db: Session = Depends(get_db)) -> dict[str
         "assessment_question_count": assessment_question_count,
         "pass_threshold": settings.pass_threshold,
         "generation_mode": document.generation_mode,
+        "submission_stage": document.submission_stage,
+        "version_number": document.version_number,
         "error": document.processing_error,
         "elapsed_seconds": elapsed_seconds,
         "stale_after_seconds": stale_seconds,
@@ -1345,6 +1698,12 @@ def _submission_rows(db: Session, documents: list[Document]) -> list[dict[str, o
         if latest:
             refresh_interruption_state(db, latest)
         course = db.get(Course, document.course_id) if document.course_id else None
+        milestone = db.get(CourseMilestone, document.milestone_id) if document.milestone_id else None
+        alerts = db.scalars(
+            select(LearningAlert)
+            .where(LearningAlert.document_id == document.id, LearningAlert.status != "resolved")
+            .order_by(LearningAlert.created_at.desc())
+        ).all()
         rows.append({
             "document_id": document.id,
             "student_name": document.student_name,
@@ -1355,6 +1714,13 @@ def _submission_rows(db: Session, documents: list[Document]) -> list[dict[str, o
             "status": document.status,
             "generation_mode": document.generation_mode,
             "word_count": document.word_count,
+            "submission_stage": document.submission_stage,
+            "milestone": milestone.title if milestone else None,
+            "version_number": document.version_number,
+            "ai_use_level": document.ai_use_level,
+            "learning_alert_count": len(alerts),
+            "learning_alert_critical_count": sum(1 for alert in alerts if alert.severity == "critical"),
+            "learning_alerts": [alert_payload(alert) for alert in alerts[:5]],
             "created_at": document.created_at.isoformat(),
             "assessment_id": latest.id if latest else None,
             "assessment_status": latest.status if latest else None,
@@ -1377,6 +1743,18 @@ def _submission_rows(db: Session, documents: list[Document]) -> list[dict[str, o
             "last_interruption_reason": latest.last_interruption_reason if latest else None,
             "lock_reason": latest.lock_reason if latest else None,
             "interruption_excused": latest.interruption_excused if latest else False,
+            "oral_defence_status": (
+                db.scalar(select(OralDefence.status).where(OralDefence.assessment_id == latest.id))
+                if latest else None
+            ),
+            "practical_task_count": (
+                db.scalar(select(func.count(PracticalTask.id)).where(PracticalTask.assessment_id == latest.id)) or 0
+                if latest else 0
+            ),
+            "moderation_status": (
+                db.scalar(select(ModerationRecord.status).where(ModerationRecord.assessment_id == latest.id))
+                if latest else None
+            ),
         })
     return rows
 
@@ -1399,7 +1777,7 @@ def _assessment_for_lecturer(db: Session, user: User, assessment_id: str) -> Ass
     return assessment
 
 
-def _assessment_detail(assessment: Assessment) -> dict[str, object]:
+def _assessment_detail(db: Session, assessment: Assessment) -> dict[str, object]:
     details = []
     for item in sorted(assessment.items, key=lambda value: value.position):
         options = json.loads(item.shuffled_options_json)
@@ -1413,6 +1791,8 @@ def _assessment_detail(assessment: Assessment) -> dict[str, object]:
             "timed_out": item.timed_out,
             "response_ms": item.response_ms,
             "difficulty": item.question.difficulty,
+            "category": item.question.category,
+            "adaptive_reason": item.adaptive_reason,
             "time_limit_seconds": settings.question_time_seconds,
             "source_location": item.question.source_location,
             "source_quote": item.question.source_quote,
@@ -1425,14 +1805,22 @@ def _assessment_detail(assessment: Assessment) -> dict[str, object]:
         "student_id": assessment.document.student_id,
         "document_title": assessment.document.title,
     }
+    document = assessment.document
+    course = db.get(Course, document.course_id) if document.course_id else None
+    milestone = db.get(CourseMilestone, document.milestone_id) if document.milestone_id else None
     snapshot = assessment.webcam_snapshot
     summary["snapshot_available"] = bool(snapshot and snapshot.image_data)
     summary["snapshot_status"] = snapshot.status if snapshot else None
     summary["snapshot_captured_at"] = snapshot.captured_at.isoformat() if snapshot and snapshot.captured_at else None
-    monitoring_events = sorted(
-        list(assessment.monitoring_events or []),
-        key=lambda event: event.created_at,
-    )
+    summary.update({
+        "document_id": document.id,
+        "course_id": document.course_id,
+        "submission_stage": document.submission_stage,
+        "milestone": milestone.title if milestone else None,
+        "version_number": document.version_number,
+        "ai_use_level": document.ai_use_level,
+    })
+    monitoring_events = sorted(list(assessment.monitoring_events or []), key=lambda event: event.created_at)
     summary["monitoring_event_count"] = len(monitoring_events)
     summary["monitoring_unresolved_count"] = sum(1 for event in monitoring_events if not event.corrected)
     summary["monitoring_critical_count"] = sum(1 for event in monitoring_events if event.severity == "critical")
@@ -1452,10 +1840,93 @@ def _assessment_detail(assessment: Assessment) -> dict[str, object]:
         "interruption_excused": assessment.interruption_excused,
         "interruption_note": assessment.interruption_note,
     })
+
+    versions = db.scalars(
+        select(Document)
+        .where(
+            Document.course_id == document.course_id,
+            func.lower(Document.student_id) == document.student_id.lower(),
+            func.lower(Document.title) == document.title.lower(),
+        )
+        .order_by(Document.version_number, Document.created_at)
+    ).all() if document.course_id else [document]
+    previous = db.get(Document, document.previous_version_id) if document.previous_version_id else None
+    alerts = db.scalars(
+        select(LearningAlert).where(LearningAlert.document_id == document.id).order_by(LearningAlert.created_at.desc())
+    ).all()
+    rubric_mark = db.scalar(select(RubricMark).where(RubricMark.assessment_id == assessment.id))
+    audit_rows = db.scalars(
+        select(MarkAuditLog).where(MarkAuditLog.assessment_id == assessment.id).order_by(MarkAuditLog.created_at.desc())
+    ).all()
+    rubric = parse_rubric(course) if course else []
+    oral_defence = db.scalar(select(OralDefence).where(OralDefence.assessment_id == assessment.id))
+    practical_tasks = db.scalars(
+        select(PracticalTask).where(PracticalTask.assessment_id == assessment.id).order_by(PracticalTask.sequence)
+    ).all()
+    version_analysis = db.scalar(select(VersionAnalysis).where(VersionAnalysis.document_id == document.id))
+    moderation = db.scalar(select(ModerationRecord).where(ModerationRecord.assessment_id == assessment.id))
+    supervisor_meetings = db.scalars(
+        select(SupervisorMeeting)
+        .where(
+            SupervisorMeeting.course_id == document.course_id,
+            func.lower(SupervisorMeeting.student_id) == document.student_id.lower(),
+        )
+        .order_by(SupervisorMeeting.meeting_at.desc())
+        .limit(20)
+    ).all() if document.course_id else []
+    mark_payload = None
+    if rubric_mark:
+        mark_payload = {
+            "id": rubric_mark.id,
+            "criteria": json.loads(rubric_mark.criteria_json),
+            "total_score": rubric_mark.total_score,
+            "overall_comment": rubric_mark.overall_comment,
+            "updated_at": rubric_mark.updated_at.isoformat() if rubric_mark.updated_at else None,
+        }
+
     return {
         "summary": summary,
         "questions": details,
         "monitoring_events": [_monitoring_event_payload(event) for event in monitoring_events],
+        "justification": {
+            "understanding_summary": document.understanding_summary,
+            "key_decisions": document.key_decisions,
+            "main_contribution": document.main_contribution,
+            "stated_limitation": document.stated_limitation,
+            "ai_use_level": document.ai_use_level,
+            "ai_use_details": document.ai_use_details,
+        },
+        "version_history": [
+            {
+                "document_id": item.id,
+                "version_number": item.version_number,
+                "submission_stage": item.submission_stage,
+                "milestone": (db.get(CourseMilestone, item.milestone_id).title if item.milestone_id and db.get(CourseMilestone, item.milestone_id) else None),
+                "word_count": item.word_count,
+                "created_at": item.created_at.isoformat() if item.created_at else None,
+            }
+            for item in versions
+        ],
+        "version_comparison": version_comparison(document, previous),
+        "learning_alerts": [alert_payload(alert) for alert in alerts],
+        "phase2_settings": course_phase2_settings(course),
+        "oral_defence": oral_defence_payload(oral_defence),
+        "practical_tasks": [practical_task_payload(task) for task in practical_tasks],
+        "supervisor_meetings": [supervisor_meeting_payload(item) for item in supervisor_meetings],
+        "cross_version_analysis": version_analysis_payload(version_analysis),
+        "moderation": moderation_payload(moderation),
+        "rubric": rubric,
+        "rubric_mark": mark_payload,
+        "mark_audit": [
+            {
+                "id": row.id,
+                "previous_total": row.previous_total,
+                "new_total": row.new_total,
+                "reason": row.reason,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+            for row in audit_rows
+        ],
     }
 
 
@@ -1485,7 +1956,399 @@ def lecturer_assessment_detail(
     assessment = _assessment_for_lecturer(db, user, assessment_id)
     audit(db, request, "assessment_reviewed", user=user, resource_type="assessment", resource_id=assessment.id)
     db.commit()
-    return _assessment_detail(assessment)
+    return _assessment_detail(db, assessment)
+
+
+@app.post("/api/lecturer/assessments/{assessment_id}/rubric-mark")
+def save_rubric_mark(
+    assessment_id: str,
+    payload: RubricMarkRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    assessment = _assessment_for_lecturer(db, user, assessment_id)
+    if not assessment.course_id:
+        raise HTTPException(status_code=409, detail="This legacy assessment has no course rubric.")
+    course = _require_grading_access(db, user, assessment.course_id)
+    rubric = parse_rubric(course)
+    rubric_by_key = {item["key"]: item for item in rubric}
+    submitted = {item.criterion_key: item for item in payload.scores}
+    if set(submitted) != set(rubric_by_key):
+        raise HTTPException(status_code=422, detail="A score is required for every rubric criterion.")
+
+    criteria_payload: list[dict[str, object]] = []
+    total = 0.0
+    for key, criterion in rubric_by_key.items():
+        score_item = submitted[key]
+        maximum = float(criterion["max_score"])
+        if score_item.score > maximum:
+            raise HTTPException(status_code=422, detail=f"{criterion['label']} cannot exceed {maximum:g}.")
+        total += score_item.score
+        criteria_payload.append({
+            "key": key,
+            "label": criterion["label"],
+            "description": criterion.get("description"),
+            "max_score": maximum,
+            "score": round(score_item.score, 2),
+            "comment": score_item.comment.strip() if score_item.comment else None,
+        })
+    total = round(total, 2)
+    existing = db.scalar(select(RubricMark).where(RubricMark.assessment_id == assessment.id))
+    if existing and not (payload.change_reason or "").strip():
+        raise HTTPException(status_code=422, detail="Give a reason when changing an existing rubric mark.")
+    previous_total = existing.total_score if existing else None
+    previous_json = existing.criteria_json if existing else None
+    new_json = json.dumps(criteria_payload, ensure_ascii=False)
+    if existing:
+        existing.criteria_json = new_json
+        existing.total_score = total
+        existing.overall_comment = payload.overall_comment.strip() if payload.overall_comment else None
+        existing.graded_by = user.id
+        existing.updated_at = utcnow()
+        mark = existing
+    else:
+        mark = RubricMark(
+            assessment_id=assessment.id,
+            graded_by=user.id,
+            criteria_json=new_json,
+            total_score=total,
+            overall_comment=payload.overall_comment.strip() if payload.overall_comment else None,
+        )
+        db.add(mark)
+    db.add(MarkAuditLog(
+        assessment_id=assessment.id,
+        user_id=user.id,
+        previous_total=previous_total,
+        new_total=total,
+        previous_json=previous_json,
+        new_json=new_json,
+        reason=(payload.change_reason or "Initial rubric mark").strip(),
+    ))
+    ensure_random_moderation(db, assessment, course, total)
+    if course.marker_anomaly_detection_enabled:
+        scan_marker_anomalies(db, course)
+    audit(db, request, "rubric_mark_saved", user=user, resource_type="assessment", resource_id=assessment.id, detail={"previous_total": previous_total, "new_total": total})
+    db.commit()
+    return {"saved": True, "total_score": total, "assessment": _assessment_detail(db, assessment)}
+
+
+
+# ---------------------------------------------------------------------------
+# Optional Phase 2 learning-assurance modules
+# ---------------------------------------------------------------------------
+
+
+def _phase2_assessment_course(
+    db: Session,
+    user: User,
+    assessment_id: str,
+    feature: str,
+) -> tuple[Assessment, Course]:
+    assessment = _assessment_for_lecturer(db, user, assessment_id)
+    if not assessment.course_id:
+        raise HTTPException(status_code=409, detail="This assessment is not assigned to a course.")
+    course = _require_grading_access(db, user, assessment.course_id)
+    if not bool(getattr(course, feature, False)):
+        raise HTTPException(status_code=409, detail="This optional Phase 2 module is not enabled for the course.")
+    return assessment, course
+
+
+@app.post("/api/lecturer/assessments/{assessment_id}/oral-defence/start")
+def start_oral_defence(
+    assessment_id: str,
+    payload: OralDefenceStartRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    assessment, course = _phase2_assessment_course(db, user, assessment_id, "oral_defence_enabled")
+    record = prepare_oral_defence(db, assessment, course, user.id, payload.question_count)
+    audit(db, request, "oral_defence_prepared", user=user, resource_type="assessment", resource_id=assessment.id)
+    db.commit()
+    return {"oral_defence": oral_defence_payload(record)}
+
+
+@app.post("/api/lecturer/assessments/{assessment_id}/oral-defence/complete")
+def finish_oral_defence(
+    assessment_id: str,
+    payload: OralDefenceCompleteRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    assessment, course = _phase2_assessment_course(db, user, assessment_id, "oral_defence_enabled")
+    record = db.scalar(select(OralDefence).where(OralDefence.assessment_id == assessment.id))
+    if not record:
+        record = prepare_oral_defence(db, assessment, course, user.id)
+    try:
+        complete_oral_defence(
+            record,
+            user.id,
+            [item.model_dump() for item in payload.scores],
+            payload.outcome,
+            payload.notes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    audit(
+        db,
+        request,
+        "oral_defence_completed",
+        user=user,
+        resource_type="assessment",
+        resource_id=assessment.id,
+        detail={"score": record.total_score, "outcome": record.outcome},
+    )
+    db.commit()
+    return {"oral_defence": oral_defence_payload(record)}
+
+
+@app.post("/api/lecturer/assessments/{assessment_id}/practical-tasks/generate")
+def generate_practical_tasks(
+    assessment_id: str,
+    payload: PracticalTaskGenerateRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    assessment, course = _phase2_assessment_course(db, user, assessment_id, "practical_tasks_enabled")
+    tasks = prepare_practical_tasks(db, assessment, course, payload.count)
+    audit(db, request, "practical_tasks_prepared", user=user, resource_type="assessment", resource_id=assessment.id, detail={"count": len(tasks)})
+    db.commit()
+    return {"practical_tasks": [practical_task_payload(item) for item in tasks]}
+
+
+@app.post("/api/lecturer/practical-tasks/{task_id}/score")
+def score_practical_task(
+    task_id: str,
+    payload: PracticalTaskScoreRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    task = db.get(PracticalTask, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Practical task not found.")
+    assessment, _ = _phase2_assessment_course(db, user, task.assessment_id, "practical_tasks_enabled")
+    if payload.score > task.max_score:
+        raise HTTPException(status_code=422, detail=f"The task score cannot exceed {task.max_score:g}.")
+    task.student_response = payload.student_response.strip()
+    task.score = payload.score
+    task.notes = payload.notes.strip() if payload.notes else None
+    task.assessed_by = user.id
+    task.status = "completed"
+    task.completed_at = utcnow()
+    audit(db, request, "practical_task_scored", user=user, resource_type="practical_task", resource_id=task.id, detail={"assessment_id": assessment.id, "score": task.score})
+    db.commit()
+    return {"practical_task": practical_task_payload(task)}
+
+
+@app.get("/api/lecturer/courses/{course_id}/supervisor-meetings")
+def list_supervisor_meetings(
+    course_id: str,
+    student_id: str | None = Query(default=None),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    course = require_course_access(db, user, course_id)
+    if not course.supervisor_meetings_enabled:
+        raise HTTPException(status_code=409, detail="Supervisor meeting records are not enabled for this course.")
+    statement = select(SupervisorMeeting).where(SupervisorMeeting.course_id == course.id)
+    if student_id:
+        statement = statement.where(func.lower(SupervisorMeeting.student_id) == student_id.strip().lower())
+    meetings = db.scalars(statement.order_by(SupervisorMeeting.meeting_at.desc()).limit(200)).all()
+    return {"meetings": [supervisor_meeting_payload(item) for item in meetings]}
+
+
+@app.post("/api/lecturer/courses/{course_id}/supervisor-meetings", status_code=201)
+def create_supervisor_meeting(
+    course_id: str,
+    payload: SupervisorMeetingRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    course = _require_grading_access(db, user, course_id)
+    if not course.supervisor_meetings_enabled:
+        raise HTTPException(status_code=409, detail="Supervisor meeting records are not enabled for this course.")
+    document = db.get(Document, payload.document_id) if payload.document_id else None
+    if document and document.course_id != course.id:
+        raise HTTPException(status_code=422, detail="The selected document does not belong to this course.")
+    meeting = SupervisorMeeting(
+        course_id=course.id,
+        document_id=document.id if document else None,
+        student_id=payload.student_id.strip(),
+        recorded_by=user.id,
+        meeting_at=payload.meeting_at,
+        meeting_type=payload.meeting_type,
+        summary=payload.summary.strip(),
+        decisions=payload.decisions.strip() if payload.decisions else None,
+        action_items=payload.action_items.strip() if payload.action_items else None,
+        next_meeting_at=payload.next_meeting_at,
+    )
+    db.add(meeting)
+    db.flush()
+    audit(db, request, "supervisor_meeting_recorded", user=user, resource_type="supervisor_meeting", resource_id=meeting.id, detail={"student_id": meeting.student_id})
+    db.commit()
+    return {"meeting": supervisor_meeting_payload(meeting)}
+
+
+@app.delete("/api/lecturer/courses/{course_id}/supervisor-meetings/{meeting_id}")
+def delete_supervisor_meeting(
+    course_id: str,
+    meeting_id: str,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, bool]:
+    course = _require_grading_access(db, user, course_id)
+    meeting = db.get(SupervisorMeeting, meeting_id)
+    if not meeting or meeting.course_id != course.id:
+        raise HTTPException(status_code=404, detail="Supervisor meeting record not found.")
+    db.delete(meeting)
+    audit(db, request, "supervisor_meeting_deleted", user=user, resource_type="supervisor_meeting", resource_id=meeting_id)
+    db.commit()
+    return {"deleted": True}
+
+
+@app.post("/api/lecturer/documents/{document_id}/version-analysis")
+def run_cross_version_analysis(
+    document_id: str,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    document = require_document_access(db, user, document_id, write=True)
+    course = db.get(Course, document.course_id) if document.course_id else None
+    if not course or not course.cross_version_analysis_enabled:
+        raise HTTPException(status_code=409, detail="Cross-version analysis is not enabled for this course.")
+    if not document.previous_version_id:
+        raise HTTPException(status_code=409, detail="A previous version is required for cross-version analysis.")
+    analysis = ensure_version_analysis(db, document, user.id, refresh=True)
+    audit(db, request, "cross_version_analysis_run", user=user, resource_type="document", resource_id=document.id)
+    db.commit()
+    return {"cross_version_analysis": version_analysis_payload(analysis)}
+
+
+@app.get("/api/lecturer/courses/{course_id}/moderation-queue")
+def moderation_queue(
+    course_id: str,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    course = require_course_access(db, user, course_id)
+    if not course.random_moderation_enabled:
+        raise HTTPException(status_code=409, detail="Random moderation is not enabled for this course.")
+    rows = db.execute(
+        select(ModerationRecord, Assessment, Document)
+        .join(Assessment, Assessment.id == ModerationRecord.assessment_id)
+        .join(Document, Document.id == Assessment.document_id)
+        .where(ModerationRecord.course_id == course.id)
+        .order_by(ModerationRecord.selected_at.desc())
+    ).all()
+    return {"moderation_queue": [
+        {
+            **(moderation_payload(record) or {}),
+            "assessment_id": assessment.id,
+            "student_name": document.student_name,
+            "student_id": document.student_id,
+            "document_title": document.title,
+        }
+        for record, assessment, document in rows
+    ]}
+
+
+@app.post("/api/lecturer/assessments/{assessment_id}/moderation/complete")
+def complete_moderation(
+    assessment_id: str,
+    payload: ModerationCompleteRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    assessment, course = _phase2_assessment_course(db, user, assessment_id, "random_moderation_enabled")
+    record = db.scalar(select(ModerationRecord).where(ModerationRecord.assessment_id == assessment.id))
+    if not record:
+        raise HTTPException(status_code=404, detail="This assessment was not selected for moderation.")
+    original_mark = db.scalar(select(RubricMark).where(RubricMark.assessment_id == assessment.id))
+    if original_mark and original_mark.graded_by == user.id and user.role != "institution_admin":
+        raise HTTPException(status_code=403, detail="The original marker cannot moderate the same assessment.")
+    record.moderator_id = user.id
+    record.moderated_mark = payload.moderated_mark
+    record.variance = round(payload.moderated_mark - record.original_mark, 2)
+    record.decision = payload.decision
+    record.notes = payload.notes.strip()
+    record.status = "completed"
+    record.completed_at = utcnow()
+    audit(db, request, "moderation_completed", user=user, resource_type="assessment", resource_id=assessment.id, detail={"variance": record.variance, "decision": record.decision})
+    db.commit()
+    return {"moderation": moderation_payload(record), "variance_threshold": course.moderation_variance_threshold}
+
+
+@app.get("/api/lecturer/courses/{course_id}/marker-anomalies")
+def get_marker_anomalies(
+    course_id: str,
+    refresh: bool = Query(default=False),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    course = require_course_access(db, user, course_id, owner_only=True)
+    if not course.marker_anomaly_detection_enabled:
+        raise HTTPException(status_code=409, detail="Marker anomaly detection is not enabled for this course.")
+    if refresh:
+        scan_marker_anomalies(db, course)
+        db.commit()
+    alerts = db.scalars(
+        select(MarkerAnomalyAlert).where(MarkerAnomalyAlert.course_id == course.id).order_by(MarkerAnomalyAlert.generated_at.desc())
+    ).all()
+    marker_names = {
+        marker_id: full_name for marker_id, full_name in db.execute(
+            select(User.id, User.full_name).where(User.id.in_([item.marker_id for item in alerts if item.marker_id]))
+        ).all()
+    } if alerts else {}
+    return {"anomalies": [{**anomaly_payload(item), "marker_name": marker_names.get(item.marker_id, "Unknown marker")} for item in alerts]}
+
+
+@app.post("/api/lecturer/marker-anomalies/{alert_id}")
+def update_marker_anomaly(
+    alert_id: str,
+    payload: MarkerAnomalyActionRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    alert = db.get(MarkerAnomalyAlert, alert_id)
+    if not alert:
+        raise HTTPException(status_code=404, detail="Marker anomaly alert not found.")
+    require_course_access(db, user, alert.course_id, owner_only=True)
+    alert.status = payload.status
+    alert.resolution_note = payload.note.strip() if payload.note else None
+    alert.resolved_by = user.id
+    alert.resolved_at = utcnow() if payload.status == "resolved" else None
+    audit(db, request, "marker_anomaly_updated", user=user, resource_type="marker_anomaly", resource_id=alert.id, detail={"status": payload.status})
+    db.commit()
+    return {"anomaly": anomaly_payload(alert)}
+
+
+@app.post("/api/lecturer/learning-alerts/{alert_id}")
+def update_learning_alert(
+    alert_id: str,
+    payload: LearningAlertActionRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    alert = db.get(LearningAlert, alert_id)
+    if not alert:
+        raise HTTPException(status_code=404, detail="Learning alert not found.")
+    require_document_access(db, user, alert.document_id, write=True)
+    alert.status = payload.status
+    alert.resolution_note = payload.note.strip() if payload.note else None
+    alert.resolved_at = utcnow() if payload.status == "resolved" else None
+    audit(db, request, "learning_alert_updated", user=user, resource_type="learning_alert", resource_id=alert.id, detail={"status": payload.status})
+    db.commit()
+    return {"alert": alert_payload(alert)}
 
 
 @app.get("/api/lecturer/assessments/{assessment_id}/snapshot")
@@ -1641,7 +2504,7 @@ def admin_assessment_detail(assessment_id: str, db: Session = Depends(get_db)) -
     )
     if not assessment:
         raise HTTPException(status_code=404, detail="Assessment not found.")
-    return _assessment_detail(assessment)
+    return _assessment_detail(db, assessment)
 
 
 @app.get("/api/admin/assessments/{assessment_id}/snapshot", dependencies=[Depends(require_admin)])

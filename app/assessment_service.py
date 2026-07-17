@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from .config import settings
+from .learning_service import refresh_assessment_alerts
 from .models import (
     Assessment,
     AssessmentItem,
@@ -26,6 +27,15 @@ DIFFICULTY_WEIGHTS = {
     "recall": 0.30,
     "understanding": 0.40,
     "application": 0.30,
+}
+
+CATEGORY_WEIGHTS = {
+    "document_knowledge": 0.20,
+    "decision_defence": 0.20,
+    "interpretation": 0.20,
+    "counterfactual": 0.15,
+    "error_correction": 0.10,
+    "transfer_application": 0.15,
 }
 
 
@@ -76,32 +86,49 @@ def _difficulty_targets(total: int) -> dict[str, int]:
     return targets
 
 
+def _category_targets(total: int) -> dict[str, int]:
+    if total <= 5:
+        priority = [
+            "decision_defence",
+            "interpretation",
+            "transfer_application",
+            "counterfactual",
+            "error_correction",
+        ]
+        return {name: int(name in priority[:total]) for name in CATEGORY_WEIGHTS}
+    raw = {name: total * weight for name, weight in CATEGORY_WEIGHTS.items()}
+    targets = {name: math.floor(value) for name, value in raw.items()}
+    remaining = total - sum(targets.values())
+    ranked = sorted(raw, key=lambda name: raw[name] - targets[name], reverse=True)
+    for name in ranked[:remaining]:
+        targets[name] += 1
+    return targets
+
+
 def _select_questions(questions: list[Question], total: int) -> list[Question]:
     rng = random.SystemRandom()
-    grouped: dict[str, list[Question]] = {
-        "recall": [],
-        "understanding": [],
-        "application": [],
-    }
+    grouped: dict[str, list[Question]] = {name: [] for name in CATEGORY_WEIGHTS}
     for question in questions:
-        grouped.setdefault(question.difficulty, []).append(question)
+        grouped.setdefault(question.category or "document_knowledge", []).append(question)
     for values in grouped.values():
         rng.shuffle(values)
 
     selected: list[Question] = []
-    targets = _difficulty_targets(total)
-    for difficulty in ("recall", "understanding", "application"):
-        take = min(targets[difficulty], len(grouped.get(difficulty, [])))
-        selected.extend(grouped.get(difficulty, [])[:take])
-        grouped[difficulty] = grouped.get(difficulty, [])[take:]
+    targets = _category_targets(total)
+    for category in CATEGORY_WEIGHTS:
+        take = min(targets.get(category, 0), len(grouped.get(category, [])))
+        selected.extend(grouped.get(category, [])[:take])
+        grouped[category] = grouped.get(category, [])[take:]
 
     if len(selected) < total:
-        remainder = [
-            question
-            for difficulty in ("recall", "understanding", "application")
-            for question in grouped.get(difficulty, [])
-        ]
-        rng.shuffle(remainder)
+        remainder = [question for values in grouped.values() for question in values]
+        remainder.sort(
+            key=lambda question: (
+                question.category == "document_knowledge",
+                question.difficulty == "recall",
+                rng.random(),
+            )
+        )
         selected.extend(remainder[: total - len(selected)])
 
     if len(selected) < total:
@@ -503,8 +530,12 @@ def start_assessment(
         )
 
     course = db.get(Course, document.course_id) if document.course_id else None
-    requested_count = int(getattr(course, "assessment_question_count", 20) or 20)
-    question_count = max(5, min(20, requested_count, len(document.questions)))
+    requested_count = int(
+        document.assessment_question_count_override
+        or getattr(course, "assessment_question_count", 20)
+        or 20
+    )
+    question_count = max(3, min(20, requested_count, len(document.questions)))
 
     token, token_hash = make_session_token()
     now = utcnow()
@@ -610,10 +641,11 @@ def _complete(db: Session, assessment: Assessment) -> None:
     assessment.resume_deadline_at = None
     assessment.camera_reverification_required = False
     assessment.decision = (
-        "Ownership knowledge demonstrated"
+        "Understanding demonstrated"
         if score >= settings.pass_threshold
         else "Further verification required"
     )
+    refresh_assessment_alerts(db, assessment)
     db.commit()
 
 
@@ -664,6 +696,8 @@ def current_question(db: Session, assessment: Assessment) -> dict[str, object]:
             "stem": item.question.stem,
             "options": json.loads(item.shuffled_options_json),
             "difficulty": item.question.difficulty,
+            "category": item.question.category,
+            "adaptive_reason": item.adaptive_reason,
             "time_limit_seconds": settings.question_time_seconds,
             "remaining_ms": max(0, limit_ms - elapsed_ms),
             "capture_requested": capture_requested,
@@ -674,6 +708,33 @@ def current_question(db: Session, assessment: Assessment) -> dict[str, object]:
 
     _complete(db, assessment)
     return {"status": "completed"}
+
+
+def _adapt_remaining_sequence(assessment: Assessment, answered_item: AssessmentItem) -> None:
+    next_position = answered_item.position + 1
+    remaining = [
+        item for item in assessment.items
+        if item.position >= next_position and item.answered_at is None and item.presented_at is None
+    ]
+    if not remaining:
+        return
+    if answered_item.is_correct:
+        preferred = ["counterfactual", "transfer_application", "decision_defence"]
+        reason = "extension_after_correct"
+    else:
+        preferred = [answered_item.question.category, "decision_defence", "interpretation", "error_correction"]
+        reason = "reinforcement_after_incorrect"
+    candidate = next(
+        (item for category in preferred for item in remaining if item.question.category == category),
+        None,
+    )
+    immediate = next((item for item in remaining if item.position == next_position), None)
+    if not candidate or not immediate or candidate.id == immediate.id:
+        if immediate and not immediate.adaptive_reason:
+            immediate.adaptive_reason = reason
+        return
+    candidate.position, immediate.position = immediate.position, candidate.position
+    candidate.adaptive_reason = reason
 
 
 def submit_answer(
@@ -711,6 +772,7 @@ def submit_answer(
         item.timed_out = False
         item.response_ms = elapsed_ms
 
+    _adapt_remaining_sequence(assessment, item)
     assessment.current_position += 1
     db.commit()
 
@@ -751,7 +813,7 @@ def result_payload(assessment: Assessment) -> dict[str, object]:
         "interruption_excused": assessment.interruption_excused,
         "completed_at": assessment.completed_at.isoformat() if assessment.completed_at else None,
         "disclaimer": (
-            "This score measures demonstrated knowledge of the submitted document. "
+            "This score measures demonstrated understanding of the submitted work. "
             "Monitoring and interruption records are review indicators only. They are not "
             "conclusive proof of authorship, cheating, or academic misconduct."
         ),

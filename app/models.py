@@ -127,6 +127,25 @@ class Course(Base):
     enrollment_code: Mapped[str] = mapped_column(String(24), nullable=False, unique=True, index=True)
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="active")
     assessment_question_count: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
+    checkpoint_question_count: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    milestones_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    version_history_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    final_justification_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    ai_declaration_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    rubric_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+
+    # Phase 2 modules are independently optional at course level.
+    oral_defence_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    oral_defence_question_count: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    practical_tasks_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    practical_task_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    supervisor_meetings_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    cross_version_analysis_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    random_moderation_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    moderation_sample_percent: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    moderation_variance_threshold: Mapped[float] = mapped_column(Float, nullable=False, default=10.0)
+    marker_anomaly_detection_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
     created_by: Mapped[str] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
     )
@@ -137,6 +156,31 @@ class Course(Base):
         back_populates="course", cascade="all, delete-orphan"
     )
     documents: Mapped[list["Document"]] = relationship(back_populates="course")
+    milestones: Mapped[list["CourseMilestone"]] = relationship(
+        back_populates="course", cascade="all, delete-orphan", order_by="CourseMilestone.sequence"
+    )
+    supervisor_meetings: Mapped[list["SupervisorMeeting"]] = relationship(
+        back_populates="course", cascade="all, delete-orphan", order_by="SupervisorMeeting.meeting_at"
+    )
+
+
+class CourseMilestone(Base):
+    __tablename__ = "course_milestones"
+    __table_args__ = (UniqueConstraint("course_id", "sequence", name="uq_course_milestone_sequence"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    course_id: Mapped[str] = mapped_column(
+        ForeignKey("courses.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    title: Mapped[str] = mapped_column(String(180), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    checkpoint_question_count: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    course: Mapped[Course] = relationship(back_populates="milestones")
+    documents: Mapped[list["Document"]] = relationship(back_populates="milestone")
 
 
 class CourseLecturer(Base):
@@ -182,14 +226,41 @@ class Document(Base):
     submitted_to_lecturer_id: Mapped[str | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    milestone_id: Mapped[str | None] = mapped_column(
+        ForeignKey("course_milestones.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    previous_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("documents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    submission_stage: Mapped[str] = mapped_column(String(30), nullable=False, default="final")
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    assessment_question_count_override: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    understanding_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    key_decisions: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    main_contribution: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    stated_limitation: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    ai_use_level: Mapped[str] = mapped_column(String(30), nullable=False, default="none")
+    ai_use_details: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     course: Mapped[Course | None] = relationship(back_populates="documents")
+    milestone: Mapped[CourseMilestone | None] = relationship(back_populates="documents")
+    previous_version: Mapped["Document | None"] = relationship(remote_side="Document.id", uselist=False)
     questions: Mapped[list["Question"]] = relationship(
         back_populates="document", cascade="all, delete-orphan"
     )
     assessments: Mapped[list["Assessment"]] = relationship(
         back_populates="document", cascade="all, delete-orphan"
+    )
+    learning_alerts: Mapped[list["LearningAlert"]] = relationship(
+        back_populates="document", cascade="all, delete-orphan"
+    )
+    version_analysis: Mapped["VersionAnalysis | None"] = relationship(
+        back_populates="document", cascade="all, delete-orphan", uselist=False,
+        foreign_keys="VersionAnalysis.document_id",
+    )
+    supervisor_meetings: Mapped[list["SupervisorMeeting"]] = relationship(
+        back_populates="document", foreign_keys="SupervisorMeeting.document_id"
     )
 
 
@@ -204,6 +275,7 @@ class Question(Base):
     options_json: Mapped[str] = mapped_column(Text, nullable=False)
     correct_index: Mapped[int] = mapped_column(Integer, nullable=False)
     difficulty: Mapped[str] = mapped_column(String(30), nullable=False)
+    category: Mapped[str] = mapped_column(String(40), nullable=False, default="document_knowledge")
     time_limit_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     source_quote: Mapped[str] = mapped_column(Text, nullable=False)
     source_location: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -271,6 +343,21 @@ class Assessment(Base):
         cascade="all, delete-orphan",
         order_by="MonitoringEvent.created_at",
     )
+    rubric_mark: Mapped["RubricMark | None"] = relationship(
+        back_populates="assessment", cascade="all, delete-orphan", uselist=False
+    )
+    mark_audits: Mapped[list["MarkAuditLog"]] = relationship(
+        back_populates="assessment", cascade="all, delete-orphan", order_by="MarkAuditLog.created_at"
+    )
+    oral_defence: Mapped["OralDefence | None"] = relationship(
+        back_populates="assessment", cascade="all, delete-orphan", uselist=False
+    )
+    practical_tasks: Mapped[list["PracticalTask"]] = relationship(
+        back_populates="assessment", cascade="all, delete-orphan", order_by="PracticalTask.sequence"
+    )
+    moderation_record: Mapped["ModerationRecord | None"] = relationship(
+        back_populates="assessment", cascade="all, delete-orphan", uselist=False
+    )
 
 
 class AssessmentItem(Base):
@@ -292,6 +379,7 @@ class AssessmentItem(Base):
     is_correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     timed_out: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     response_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    adaptive_reason: Mapped[str | None] = mapped_column(String(80), nullable=True)
 
     assessment: Mapped[Assessment] = relationship(back_populates="items")
     question: Mapped[Question] = relationship(back_populates="assessment_items")
@@ -334,6 +422,241 @@ class MonitoringEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     assessment: Mapped[Assessment] = relationship(back_populates="monitoring_events")
+
+
+class LearningAlert(Base):
+    __tablename__ = "learning_alerts"
+    __table_args__ = (UniqueConstraint("document_id", "alert_key", name="uq_learning_alert_document_key"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    course_id: Mapped[str | None] = mapped_column(
+        ForeignKey("courses.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    assessment_id: Mapped[str | None] = mapped_column(
+        ForeignKey("assessments.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    student_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    alert_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    alert_type: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
+    severity: Mapped[str] = mapped_column(String(20), nullable=False, default="warning")
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
+    resolution_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    document: Mapped[Document] = relationship(back_populates="learning_alerts")
+
+
+class RubricMark(Base):
+    __tablename__ = "rubric_marks"
+    __table_args__ = (UniqueConstraint("assessment_id", name="uq_rubric_mark_assessment"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    assessment_id: Mapped[str] = mapped_column(
+        ForeignKey("assessments.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    graded_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    criteria_json: Mapped[str] = mapped_column(Text, nullable=False)
+    total_score: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    overall_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    assessment: Mapped[Assessment] = relationship(back_populates="rubric_mark")
+
+
+class MarkAuditLog(Base):
+    __tablename__ = "mark_audit_logs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    assessment_id: Mapped[str] = mapped_column(
+        ForeignKey("assessments.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    previous_total: Mapped[float | None] = mapped_column(Float, nullable=True)
+    new_total: Mapped[float] = mapped_column(Float, nullable=False)
+    previous_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    new_json: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    assessment: Mapped[Assessment] = relationship(back_populates="mark_audits")
+
+
+class OralDefence(Base):
+    __tablename__ = "oral_defences"
+    __table_args__ = (UniqueConstraint("assessment_id", name="uq_oral_defence_assessment"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    assessment_id: Mapped[str] = mapped_column(
+        ForeignKey("assessments.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    course_id: Mapped[str] = mapped_column(
+        ForeignKey("courses.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    examiner_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="prepared")
+    questions_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    scores_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    total_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    outcome: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    assessment: Mapped[Assessment] = relationship(back_populates="oral_defence")
+
+
+class PracticalTask(Base):
+    __tablename__ = "practical_tasks"
+    __table_args__ = (
+        UniqueConstraint("assessment_id", "sequence", name="uq_practical_task_assessment_sequence"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    assessment_id: Mapped[str] = mapped_column(
+        ForeignKey("assessments.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    course_id: Mapped[str] = mapped_column(
+        ForeignKey("courses.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    assessed_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    task_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    student_response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_score: Mapped[float] = mapped_column(Float, nullable=False, default=20.0)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="prepared")
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    assessment: Mapped[Assessment] = relationship(back_populates="practical_tasks")
+
+
+class SupervisorMeeting(Base):
+    __tablename__ = "supervisor_meetings"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    course_id: Mapped[str] = mapped_column(
+        ForeignKey("courses.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    document_id: Mapped[str | None] = mapped_column(
+        ForeignKey("documents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    student_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    recorded_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    meeting_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    meeting_type: Mapped[str] = mapped_column(String(40), nullable=False, default="supervision")
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    decisions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    action_items: Mapped[str | None] = mapped_column(Text, nullable=True)
+    next_meeting_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    course: Mapped[Course] = relationship(back_populates="supervisor_meetings")
+    document: Mapped[Document | None] = relationship(
+        back_populates="supervisor_meetings", foreign_keys=[document_id]
+    )
+
+
+class VersionAnalysis(Base):
+    __tablename__ = "version_analyses"
+    __table_args__ = (UniqueConstraint("document_id", name="uq_version_analysis_document"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    course_id: Mapped[str] = mapped_column(
+        ForeignKey("courses.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    previous_document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    generated_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    risk_level: Mapped[str] = mapped_column(String(20), nullable=False, default="low")
+    analysis_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    document: Mapped[Document] = relationship(
+        back_populates="version_analysis", foreign_keys=[document_id]
+    )
+
+
+class ModerationRecord(Base):
+    __tablename__ = "moderation_records"
+    __table_args__ = (UniqueConstraint("assessment_id", name="uq_moderation_record_assessment"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    assessment_id: Mapped[str] = mapped_column(
+        ForeignKey("assessments.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    course_id: Mapped[str] = mapped_column(
+        ForeignKey("courses.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    moderator_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="selected")
+    selected_reason: Mapped[str] = mapped_column(String(180), nullable=False)
+    original_mark: Mapped[float] = mapped_column(Float, nullable=False)
+    moderated_mark: Mapped[float | None] = mapped_column(Float, nullable=True)
+    variance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    decision: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    selected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    assessment: Mapped[Assessment] = relationship(back_populates="moderation_record")
+
+
+class MarkerAnomalyAlert(Base):
+    __tablename__ = "marker_anomaly_alerts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    course_id: Mapped[str] = mapped_column(
+        ForeignKey("courses.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    marker_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    anomaly_type: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
+    severity: Mapped[str] = mapped_column(String(20), nullable=False, default="warning")
+    metric_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    threshold_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    details: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    resolution_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
 
 
 class AuditLog(Base):

@@ -151,6 +151,87 @@ def _repair_assessment_columns() -> None:
                     operations.add_column("assessments", column)
 
 
+def _repair_phase1_columns() -> None:
+    """Repair Phase 1 columns if an older database was stamped ahead."""
+    with engine.begin() as connection:
+        inspector = sa.inspect(connection)
+        tables = set(inspector.get_table_names())
+        operations = Operations(MigrationContext.configure(connection))
+
+        if "courses" in tables:
+            columns = {item["name"] for item in inspector.get_columns("courses")}
+            additions = [
+                sa.Column("checkpoint_question_count", sa.Integer(), nullable=False, server_default="3"),
+                sa.Column("milestones_enabled", sa.Boolean(), nullable=False, server_default=sa.false()),
+                sa.Column("version_history_enabled", sa.Boolean(), nullable=False, server_default=sa.false()),
+                sa.Column("final_justification_required", sa.Boolean(), nullable=False, server_default=sa.true()),
+                sa.Column("ai_declaration_required", sa.Boolean(), nullable=False, server_default=sa.true()),
+                sa.Column("rubric_json", sa.Text(), nullable=False, server_default="[]"),
+            ]
+            for column in additions:
+                if column.name not in columns:
+                    print(f"Prestart: adding missing courses.{column.name}", flush=True)
+                    operations.add_column("courses", column)
+
+        inspector = sa.inspect(connection)
+        if "documents" in set(inspector.get_table_names()):
+            columns = {item["name"] for item in inspector.get_columns("documents")}
+            additions = [
+                sa.Column("milestone_id", sa.String(length=36), nullable=True),
+                sa.Column("previous_version_id", sa.String(length=36), nullable=True),
+                sa.Column("submission_stage", sa.String(length=30), nullable=False, server_default="final"),
+                sa.Column("version_number", sa.Integer(), nullable=False, server_default="1"),
+                sa.Column("assessment_question_count_override", sa.Integer(), nullable=True),
+                sa.Column("understanding_summary", sa.Text(), nullable=False, server_default=""),
+                sa.Column("key_decisions", sa.Text(), nullable=False, server_default=""),
+                sa.Column("main_contribution", sa.Text(), nullable=False, server_default=""),
+                sa.Column("stated_limitation", sa.Text(), nullable=False, server_default=""),
+                sa.Column("ai_use_level", sa.String(length=30), nullable=False, server_default="none"),
+                sa.Column("ai_use_details", sa.Text(), nullable=True),
+            ]
+            for column in additions:
+                if column.name not in columns:
+                    print(f"Prestart: adding missing documents.{column.name}", flush=True)
+                    operations.add_column("documents", column)
+
+        inspector = sa.inspect(connection)
+        if "questions" in set(inspector.get_table_names()):
+            columns = {item["name"] for item in inspector.get_columns("questions")}
+            if "category" not in columns:
+                operations.add_column("questions", sa.Column("category", sa.String(length=40), nullable=False, server_default="document_knowledge"))
+        inspector = sa.inspect(connection)
+        if "assessment_items" in set(inspector.get_table_names()):
+            columns = {item["name"] for item in inspector.get_columns("assessment_items")}
+            if "adaptive_reason" not in columns:
+                operations.add_column("assessment_items", sa.Column("adaptive_reason", sa.String(length=80), nullable=True))
+
+
+def _repair_phase2_columns() -> None:
+    """Repair optional Phase 2 course settings if a database was stamped ahead."""
+    with engine.begin() as connection:
+        inspector = sa.inspect(connection)
+        if "courses" not in set(inspector.get_table_names()):
+            return
+        operations = Operations(MigrationContext.configure(connection))
+        columns = {item["name"] for item in inspector.get_columns("courses")}
+        additions = [
+            sa.Column("oral_defence_enabled", sa.Boolean(), nullable=False, server_default=sa.false()),
+            sa.Column("oral_defence_question_count", sa.Integer(), nullable=False, server_default="5"),
+            sa.Column("practical_tasks_enabled", sa.Boolean(), nullable=False, server_default=sa.false()),
+            sa.Column("practical_task_count", sa.Integer(), nullable=False, server_default="1"),
+            sa.Column("supervisor_meetings_enabled", sa.Boolean(), nullable=False, server_default=sa.false()),
+            sa.Column("cross_version_analysis_enabled", sa.Boolean(), nullable=False, server_default=sa.false()),
+            sa.Column("random_moderation_enabled", sa.Boolean(), nullable=False, server_default=sa.false()),
+            sa.Column("moderation_sample_percent", sa.Integer(), nullable=False, server_default="10"),
+            sa.Column("moderation_variance_threshold", sa.Float(), nullable=False, server_default="10"),
+            sa.Column("marker_anomaly_detection_enabled", sa.Boolean(), nullable=False, server_default=sa.false()),
+        ]
+        for column in additions:
+            if column.name not in columns:
+                print(f"Prestart: adding missing courses.{column.name}", flush=True)
+                operations.add_column("courses", column)
+
+
 def _verify_schema() -> None:
     inspector = sa.inspect(engine)
     tables = set(inspector.get_table_names())
@@ -191,7 +272,43 @@ def _verify_schema() -> None:
         )
     if "monitoring_events" not in tables:
         raise RuntimeError("Database upgrade incomplete: monitoring_events table is missing.")
-    print("Prestart: user, course, assessment continuity, and monitoring schema verified.", flush=True)
+    required_phase1_tables = {"course_milestones", "learning_alerts", "rubric_marks", "mark_audit_logs"}
+    missing_phase1_tables = sorted(required_phase1_tables - tables)
+    if missing_phase1_tables:
+        raise RuntimeError("Database upgrade incomplete. Missing Phase 1 tables: " + ", ".join(missing_phase1_tables))
+    required_course_phase1 = {
+        "checkpoint_question_count", "milestones_enabled", "version_history_enabled",
+        "final_justification_required", "ai_declaration_required", "rubric_json",
+    }
+    missing_course_phase1 = sorted(required_course_phase1 - course_columns)
+    if missing_course_phase1:
+        raise RuntimeError("Database upgrade incomplete. Missing course learning columns: " + ", ".join(missing_course_phase1))
+    document_columns = {item["name"] for item in inspector.get_columns("documents")}
+    required_document_phase1 = {
+        "milestone_id", "previous_version_id", "submission_stage", "version_number",
+        "assessment_question_count_override", "understanding_summary", "key_decisions",
+        "main_contribution", "stated_limitation", "ai_use_level", "ai_use_details",
+    }
+    missing_document_phase1 = sorted(required_document_phase1 - document_columns)
+    if missing_document_phase1:
+        raise RuntimeError("Database upgrade incomplete. Missing document learning columns: " + ", ".join(missing_document_phase1))
+    required_course_phase2 = {
+        "oral_defence_enabled", "oral_defence_question_count", "practical_tasks_enabled",
+        "practical_task_count", "supervisor_meetings_enabled", "cross_version_analysis_enabled",
+        "random_moderation_enabled", "moderation_sample_percent", "moderation_variance_threshold",
+        "marker_anomaly_detection_enabled",
+    }
+    missing_course_phase2 = sorted(required_course_phase2 - course_columns)
+    if missing_course_phase2:
+        raise RuntimeError("Database upgrade incomplete. Missing Phase 2 course columns: " + ", ".join(missing_course_phase2))
+    required_phase2_tables = {
+        "oral_defences", "practical_tasks", "supervisor_meetings", "version_analyses",
+        "moderation_records", "marker_anomaly_alerts",
+    }
+    missing_phase2_tables = sorted(required_phase2_tables - tables)
+    if missing_phase2_tables:
+        raise RuntimeError("Database upgrade incomplete. Missing Phase 2 tables: " + ", ".join(missing_phase2_tables))
+    print("Prestart: account, monitoring, continuity, and Phase 1–2 learning-assurance schema verified.", flush=True)
 
 
 def _face_model_is_compatible(model_path: Path) -> bool:
@@ -358,6 +475,8 @@ def main() -> None:
     Base.metadata.create_all(bind=engine)
     _repair_legacy_user_columns()
     _repair_assessment_columns()
+    _repair_phase1_columns()
+    _repair_phase2_columns()
 
     config = Config(str(BASE_DIR / "alembic.ini"))
     command.upgrade(config, "head")
