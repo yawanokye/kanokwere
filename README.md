@@ -1,196 +1,123 @@
-# Kanokware MVP
+# Kanokware 1.0.0
 
-**Know your work. Prove your work.**
+**Verify learning in the age of AI.**
 
-Kanokware generates 20 questions from a student's uploaded document and administers a timed ownership-confidence assessment. Every question has 30 seconds. The default threshold is 80%, which requires at least 16 correct answers.
+Kanokware links student submissions to lecturer-owned courses and tests whether students can explain, defend, apply, and reflect on the work submitted under their names. The platform supports final-only assignments as well as optional learning-process monitoring.
 
-## Multi-lecturer controls
+## Phase 1 learning assurance
 
-This release replaces the shared lecturer `ADMIN_KEY` workflow with individual lecturer accounts and course-based access.
+### Optional learning milestones
 
-- Lecturers register using an institutional email, institution, department, and staff ID.
-- New accounts remain pending until approved by the platform administrator.
-- The first approved account for an institution can be assigned the `institution_admin` role.
-- Lecturers sign in using secure HTTP-only cookies.
-- Each lecturer creates courses and receives a unique student enrolment code.
-- Students enter the enrolment code when uploading their work.
-- A lecturer sees only submissions linked to courses assigned to that account.
-- Course owners can add approved co-lecturers or view-only collaborators.
-- Institution administrators can access all courses belonging to their institution.
-- Reviews, webcam photos, PDF reports, resets, and deletions are protected by server-side course access checks.
-- Security-sensitive actions are written to the audit log.
-- The original `ADMIN_KEY` remains only for platform-level lecturer approval and emergency administration.
+A lecturer chooses whether a course will use learning milestones. When enabled, the lecturer can create checkpoints such as problem definition, methodology, analysis, or draft development. Each milestone can have a short 3–10 question understanding assessment. When disabled, students submit only the final work.
 
-## Assessment features
+### Optional version history
 
-- PDF, DOCX, and TXT upload
-- Original file processed in memory and not retained
-- Exactly 20 grounded questions
-- Six recall, eight understanding, and six application questions
-- Randomised question and answer order
-- Correct answers never sent to the student browser
-- Server-enforced 30-second timing
-- Focus-loss logging
-- Webcam active during the assessment with audio disabled
-- No video recording
-- One randomly timed still image stored with the assessment
-- One attempt per document by default
-- Lecturer-controlled reset
-- Question-level evidence review
-- PDF report
-- PostgreSQL production support and SQLite local support
+A lecturer independently chooses whether Kanokware should link consecutive submissions as versions. When enabled, the lecturer sees version numbers, word-count changes, similarity, and major changes. When disabled, each upload is treated as a standalone submission.
 
-## Roles
+### Understanding justification required for every submission
 
-### Platform administrator
+Whether milestones and version history are enabled or not, every student must explain:
 
-Uses the Render-generated `ADMIN_KEY` to approve or suspend lecturer accounts. This key should not be shared with lecturers.
+- their understanding of the work
+- the main decisions they made
+- the contribution or value of the work
+- an important limitation
+- whether and how AI was used
 
-### Institution administrator
+This ensures that final-only assignments still contain evidence of the student's own understanding.
 
-Can access all courses and submissions within the institution and can create courses or add lecturers.
+### Higher-order and adaptive questions
 
-### Lecturer
+Question banks now cover document knowledge, decision defence, interpretation, counterfactual reasoning, error correction, and transfer or application. The assessment sequence adapts after each response by moving suitable higher-order questions forward.
 
-Can access courses explicitly assigned to the account. A course owner can add co-lecturers.
+### Lecturer intervention alerts
 
-### Co-lecturer
+Kanokware identifies matters that may require lecturer attention, including weak mastery, missing expected milestones, major version changes, substantial declared AI use, critical camera-monitoring events, and repeated assessment interruptions. Alerts support review and do not automatically establish misconduct.
 
-Can review and manage submissions for the assigned course.
+### Rubric-controlled marking
 
-### Viewer
+Each course receives a 100-point learning-assurance rubric. Lecturers can edit the rubric, score every criterion, add comments, and save an overall mark. A mark cannot be entered without completing all criteria.
 
-Can review evidence but cannot reset or delete submissions.
+### Mark-change audit trail
 
-## Lecturer onboarding workflow
+Every saved or changed rubric mark creates an audit record. Any change to an existing mark requires a reason and retains the previous and new totals.
 
-1. Lecturer opens the **Lecturer** tab and registers.
-2. Platform administrator opens the approval section and enters `ADMIN_KEY`.
-3. Administrator approves the lecturer as either `lecturer` or `institution_admin`.
-4. Lecturer signs in and creates a course.
-5. Kanokware generates an enrolment code such as `KANO-A7K92Q`.
-6. Lecturer shares the code with the relevant students.
-7. Students use the code when uploading documents.
-8. Submissions appear only in the dashboards of lecturers assigned to that course.
+### Student learning progress
 
-Approval currently serves as manual institutional-email verification. An automated email-verification provider can be added later.
+The lecturer dashboard summarises each student's milestones, versions, assessment performance, unresolved alerts, and final-submission status.
 
-## Run locally
+## Existing assessment controls
+
+- Course enrolment codes link students to the correct lecturer or supervision group.
+- Lecturers choose 5–20 final assessment questions.
+- Milestone checkpoints use 3–10 questions.
+- Every question has 30 seconds.
+- Questions and options are randomised.
+- Correct answers remain server-side.
+- Webcam monitoring, monitoring warnings, snapshots, and interruption recovery are supported.
+- Lecturer and platform-administrator accounts use role-based access.
+- PDF learning-assurance reports are available.
+
+## Local setup
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-python -m app.prestart
+python prestart.py
 uvicorn main:app --reload
 ```
 
-Open `http://127.0.0.1:8000`.
+On Windows, activate the environment with `.venv\Scripts\activate`.
 
 ## Render deployment
 
-The supplied `render.yaml` runs:
+Use the supplied Blueprint or this Start Command:
 
 ```bash
-python -m app.prestart && uvicorn main:app --host 0.0.0.0 --port $PORT
+python prestart.py && uvicorn main:app --host 0.0.0.0 --port $PORT
 ```
 
-`app.prestart` creates new tables and applies the Alembic schema revision. Existing document and assessment data are retained while the new institution, lecturer, course, session, and audit structures are added.
+The prestart step verifies face-monitoring assets, repairs known legacy schema gaps, and applies Alembic migrations. The Phase 1 migration preserves existing lecturer accounts, courses, submissions, assessments, reports, and monitoring evidence.
 
-Required production variables include:
+Key production variables include:
 
 ```env
 ENVIRONMENT=production
+DATABASE_URL=provided-by-render-postgres
 OPENAI_API_KEY=your-key
 OPENAI_MODEL=gpt-5.5
-ADMIN_KEY=generated-by-render
+ADMIN_KEY=your-private-platform-key
 PASS_THRESHOLD=80
 QUESTION_TIME_SECONDS=30
-LECTURER_SESSION_HOURS=12
-LOGIN_MAX_FAILURES=5
-LOGIN_LOCK_MINUTES=15
-LECTURER_REGISTRATION_ENABLED=true
 WEBCAM_REQUIRED=true
+HEARTBEAT_INTERVAL_SECONDS=5
+HEARTBEAT_STALE_SECONDS=20
+ASSESSMENT_RESUME_WINDOW_MINUTES=15
+MAX_ASSESSMENT_INTERRUPTION_COUNT=2
+MAX_ASSESSMENT_OFFLINE_SECONDS=300
 ```
-
-`DATABASE_URL` is supplied automatically by the PostgreSQL database defined in `render.yaml`.
-
-## Main account and course routes
-
-```text
-POST   /api/auth/register
-POST   /api/auth/login
-POST   /api/auth/logout
-GET    /api/auth/me
-POST   /api/auth/change-password
-
-GET    /api/platform/pending
-POST   /api/platform/users/{user_id}/approve
-POST   /api/platform/users/{user_id}/suspend
-
-GET    /api/lecturer/courses
-POST   /api/lecturer/courses
-POST   /api/lecturer/courses/{course_id}/collaborators
-POST   /api/lecturer/courses/{course_id}/regenerate-code
-
-GET    /api/lecturer/submissions
-GET    /api/lecturer/assessments/{assessment_id}
-GET    /api/lecturer/assessments/{assessment_id}/snapshot
-GET    /api/lecturer/assessments/{assessment_id}/report.pdf
-DELETE /api/lecturer/assessments/{assessment_id}
-DELETE /api/lecturer/documents/{document_id}
-```
-
-## Data and privacy
-
-Kanokware stores account details, course assignments, extracted document text, generated questions, assessment responses, timing, scores, audit events, and one webcam still image. It does not retain the original uploaded file or record webcam video or audio.
-
-Institutions should publish retention periods, identify who may access still images, and establish a clear appeal and due-process procedure. The ownership-confidence score is evidence of demonstrated document knowledge. It is not conclusive proof of authorship or misconduct.
 
 ## Tests
 
 ```bash
 pytest -q
+python -m compileall -q app alembic
+node --check app/static/app.js
 ```
 
-The tests cover lecturer registration and approval, secure login, course creation, course-level submission isolation, document assessment, webcam capture, evidence review, and PDF generation.
+## Phase 2 optional assurance modules
 
-## Lecturer account administration
+Every Phase 2 module is independently configurable per course and defaults to **Off**:
 
-Lecturers do not create their own accounts. Open the **Admin** tab, enter the platform `ADMIN_KEY`, and create the account using the lecturer's name, login email, institution, department, and role. Staff ID is not collected.
+- **Oral defence:** prepare and score a document-specific viva.
+- **Practical reproduction tasks:** require the student to reproduce, interpret, correct, or apply part of the work.
+- **Supervisor meeting records:** document guidance, decisions, agreed actions, and follow-up dates.
+- **Cross-version analysis:** compare consecutive submissions and identify material changes or risk indicators.
+- **Random moderation:** select a configurable percentage of marked assessments for a second review.
+- **Marker anomaly detection:** flag unusual marking patterns for authorised human review.
 
-Kanokware displays a one-time setup code. Give the lecturer the login email and setup code directly. The lecturer opens the **Lecturer** tab, activates the account, creates a private password, and creates a six-digit recovery PIN. The administrator never creates or sees the lecturer's password or recovery PIN.
+A lecturer may enable any combination, including none. Final-only assignments remain supported. The required student understanding justification and AI-use declaration introduced in Phase 1 remain in force.
 
-A lecturer who forgets a password can reset it automatically with the login email and recovery PIN. Administrator approval and email delivery are not required. If the recovery PIN is also forgotten, the administrator can issue a new one-time setup code. The administrator can also suspend, reactivate, or delete an account. Course ownership is transferred safely before deletion.
-
-
-## Live webcam warnings and configurable assessment length
-
-- Lecturers choose between 5 and 20 assessment questions when creating a course.
-- Course owners and institution administrators can change the number later from **My courses → Set questions**.
-- Kanokware still generates a validated 20-question bank and randomly selects the course-defined number for each attempt.
-- The browser analyses approximately one webcam frame per second for face presence, multiple faces, sustained off-centre or turned-away position, low lighting, and camera interruption.
-- Video and audio are not recorded. Only one existing random still image is retained.
-- Warning events are stored with the question number, duration, severity, and whether the condition was corrected.
-- Monitoring warnings never automatically fail a student. They are lecturer review indicators only.
-- The browser loads MediaPipe Face Detection from jsDelivr. If it cannot load, camera continuity and tab-switch monitoring still remain active.
-
-
-### Webcam movement monitoring
-
-The browser-side monitor records warnings for sustained looking away and excessive face movement, alongside no-face, multiple-face, low-light, camera interruption, and tab-switch events. These are review indicators and do not automatically determine misconduct.
-
-## Advanced camera monitoring reliability
-
-The assessment now performs a mandatory camera-monitoring preflight before an attempt starts. The preflight must receive several consecutive single-face detections from a live, adequately lit camera feed. During the assessment, Kanokware combines face presence, multiple-face checks, sustained head position, rapid head movement, lighting, camera obstruction, frozen-feed detection, camera interruption, and browser-focus monitoring. A watchdog detects a stalled face engine, and failed monitoring-event uploads are queued and retried so warnings are not silently lost.
-
-Students receive a concise consent notice that camera monitoring is active and that monitoring evidence may be retained for authorised lecturer review. The interface does not disclose the random verification-image capture time.
-
-## Assessment continuity
-
-Kanokware sends a heartbeat during active assessments. Abrupt browser closure, network loss, sleep, or power loss is detected from missing heartbeats even when the browser cannot report the event. Submitted answers remain stored. The current server-side question timer continues, and secure resume requires the same browser profile plus camera reverification.
-
-## Bundled face-monitoring assets
-
-The repository includes `app/vendor/mediapipe-tasks-vision-assets.zip`. During startup, `app.prestart` extracts the required model and WebAssembly files to `/tmp/kanokware-mediapipe-tasks-vision`. This avoids missing nested binary files in GitHub deployments.
+Database revision: `20260717_08_phase2_learning_assurance.py`. No new environment variable is required.

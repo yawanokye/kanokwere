@@ -102,3 +102,35 @@ The startup process now replaces the legacy Face Detection model with the offici
 MediaPipe Tasks-compatible BlazeFace short-range model. This fixes the
 `NormalizationOptions metadata` initialisation failure. Render must have outbound
 access to `storage.googleapis.com` during startup.
+
+
+## Version 0.9.0, Phase 1 learning assurance
+
+This release introduces optional learning milestones and optional version history while keeping the final understanding justification compulsory for every submission. It adds milestone checkpoint assessments, higher-order question categories, adaptive sequencing, learning intervention alerts, rubric-controlled marking, an append-only mark-change audit trail, and course-level student learning progress.
+
+Database revision: `20260717_07_phase1_learning_assurance.py`.
+
+No new environment variable is required. Deploy with the normal prestart command so the migration is applied automatically.
+
+## Version 1.0.0, Phase 2 optional learning assurance
+
+This release adds six independently optional course modules:
+
+- oral defence
+- practical reproduction tasks
+- supervisor meeting records
+- cross-version analysis
+- random moderation
+- marker anomaly detection
+
+All existing courses receive these features in the disabled state. Lecturers can turn on any combination and configure oral-question count, practical-task count, moderation sample percentage, and acceptable moderation variance.
+
+Database revision: `20260717_08_phase2_learning_assurance.py`.
+
+No new Render environment variable is required. Keep the standard start command:
+
+```bash
+python prestart.py && uvicorn main:app --host 0.0.0.0 --port $PORT
+```
+
+The migration preserves existing users, courses, submissions, assessments, reports, monitoring evidence, rubric marks, and Phase 1 learning records.

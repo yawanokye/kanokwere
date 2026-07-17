@@ -3,7 +3,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
-kanokwere.db
+kanokware.db
 *.db
 uploads/
 .DS_Store
