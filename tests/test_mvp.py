@@ -309,6 +309,99 @@ def test_automatic_password_reset_reissue_setup_code_and_delete_account():
         assert all(item["id"] != user["id"] for item in users.json()["users"])
 
 
+def test_phase3_ai_policy_evidence_profile_and_human_decision():
+    with TestClient(app) as client:
+        _, setup_code = create_lecturer(
+            client, "assurance@test.edu", "Assurance Lecturer"
+        )
+        activate_lecturer(client, "assurance@test.edu", setup_code)
+
+        course_response = client.post(
+            "/api/lecturer/courses",
+            json={
+                "course_code": "RES 910",
+                "title": "Responsible AI Assessment",
+                "academic_year": "2026/2027",
+                "semester": "First Semester",
+                "assessment_question_count": 5,
+                "ai_use_policy": "prohibited",
+                "ai_policy_guidance": "Students must complete this task without generative AI.",
+                "live_exam_monitoring_enabled": True,
+                "live_exam_title": "Responsible AI Live Examination",
+                "live_exam_instructions": "Keep the camera active and contact the lecturer after a disconnection.",
+            },
+        )
+        assert course_response.status_code == 201, course_response.text
+        course = course_response.json()["course"]
+        assert course["ai_policy"]["level"] == "prohibited"
+
+        resolved = client.get(
+            "/api/courses/resolve", params={"code": course["enrollment_code"]}
+        )
+        assert resolved.status_code == 200, resolved.text
+        assert resolved.json()["ai_policy"]["label"] == "AI use prohibited"
+
+        upload = client.post(
+            "/api/documents",
+            data={
+                "student_name": "Policy Review Student",
+                "student_id": "TEST/AI/001",
+                "title": "AI Policy Alignment Review",
+                "course_code": course["enrollment_code"],
+                **understanding_fields(
+                    ai_use_level="limited",
+                    ai_use_details=(
+                        "AI was used to organise early ideas. Every claim was checked against "
+                        "the submitted document before the final version was prepared."
+                    ),
+                ),
+            },
+            files={"file": ("policy.txt", sample_document().encode("utf-8"), "text/plain")},
+        )
+        assert upload.status_code == 202, upload.text
+        document_id = upload.json()["document_id"]
+
+        started = client.post(
+            "/api/assessments/start",
+            json={
+                "document_id": document_id,
+                "client_instance_id": "phase3-browser-instance-0001",
+            },
+        )
+        assert started.status_code == 200, started.text
+        assessment_id = started.json()["assessment_id"]
+
+        live_monitor = client.get(
+            f"/api/lecturer/courses/{course['id']}/live-exam-monitor"
+        )
+        assert live_monitor.status_code == 200, live_monitor.text
+        assert live_monitor.json()["exam"]["title"] == "Responsible AI Live Examination"
+        assert live_monitor.json()["sessions"][0]["assessment_id"] == assessment_id
+        assert "critical_event_count" in live_monitor.json()["sessions"][0]
+
+        detail = client.get(f"/api/lecturer/assessments/{assessment_id}")
+        assert detail.status_code == 200, detail.text
+        profile = detail.json()["evidence_profile"]
+        assert profile["ai_policy_alignment"]["status"] == "needs_review"
+        assert profile["recommendation"]["code"] == "human_review"
+        assert any(
+            alert["alert_type"] == "ai_policy"
+            for alert in detail.json()["learning_alerts"]
+        )
+
+        decision = client.post(
+            f"/api/lecturer/assessments/{assessment_id}/assurance-decision",
+            json={
+                "decision": "additional_viva",
+                "note": "The AI declaration conflicts with the course rule, so a short viva is required.",
+            },
+        )
+        assert decision.status_code == 200, decision.text
+        saved = decision.json()["evidence_profile"]["lecturer_decision"]
+        assert saved["code"] == "additional_viva"
+        assert saved["decided_at"] is not None
+
+
 def test_heartbeat_interruption_resume_lock_and_lecturer_override():
     with TestClient(app) as client:
         _, setup_code = create_lecturer(
