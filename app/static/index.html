@@ -29,7 +29,7 @@
         <div class="hero-copy">
           <span class="eyebrow">Document ownership assessment</span>
           <h1>Prove ownership of work submitted under your name through knowledge assessment</h1>
-          <p>Upload a document, answer the lecturer-selected number of document-specific questions, and receive an ownership confidence score. The standard threshold is 80%.</p>
+          <p>Upload a document, explain the work, complete document-specific questions, and build an assessment evidence profile. Optional oral, practical, process and live examination evidence remain under human academic judgement.</p>
           <div class="hero-stats" aria-label="Assessment summary">
             <div><strong>5–20</strong><span>lecturer-selected questions</span></div>
             <div><strong>30s</strong><span>per question</span></div>
@@ -143,7 +143,7 @@
             </label>
             <div class="full-width form-actions">
               <p class="form-note">The extracted text is stored for assessment and reporting. The original uploaded file is processed in memory and discarded.</p>
-              <button class="primary-button" type="submit">Generate ownership assessment</button>
+              <button class="primary-button" type="submit">Generate learning assessment</button>
             </div>
           </form>
           <div id="upload-message" class="message" role="status" aria-live="polite"></div>
@@ -369,6 +369,25 @@
                 </label>
                 <label class="checkbox-setting"><input name="milestones_enabled" type="checkbox"> <span>Track learning milestones in Kanokware</span></label>
                 <label class="checkbox-setting"><input name="version_history_enabled" type="checkbox"> <span>Keep document version history in Kanokware</span></label>
+                <label>Course AI-use rule
+                  <select name="ai_use_policy" required>
+                    <option value="permitted_with_disclosure">AI permitted with disclosure</option>
+                    <option value="restricted">Restricted AI support</option>
+                    <option value="prohibited">AI use prohibited</option>
+                    <option value="required">AI use required as part of learning</option>
+                  </select>
+                  <small>The rule is shown to students before upload. A mismatch triggers human review, not an automatic misconduct finding.</small>
+                </label>
+                <label>AI-use guidance
+                  <textarea name="ai_policy_guidance" rows="3" maxlength="2000" placeholder="State permitted tools, activities, disclosure requirements, and any prohibited uses."></textarea>
+                </label>
+                <label class="checkbox-setting"><input name="live_exam_monitoring_enabled" type="checkbox"> <span>Enable live examination monitoring dashboard</span></label>
+                <label>Live examination title
+                  <input name="live_exam_title" type="text" maxlength="240" placeholder="End-of-Semester Examination">
+                </label>
+                <label>Live examination instructions
+                  <textarea name="live_exam_instructions" rows="3" maxlength="2000" placeholder="State camera, browser, identification, connectivity, permitted-material and support arrangements."></textarea>
+                </label>
                 <fieldset class="phase2-options">
                   <legend>Optional Phase 2 assurance modules</legend>
                   <label class="checkbox-setting"><input name="oral_defence_enabled" type="checkbox"> <span>Oral defence or viva</span></label>
@@ -418,6 +437,25 @@ Final preparation"></textarea>
                 <tbody id="courses-body"><tr><td colspan="8" class="empty-state">No courses loaded.</td></tr></tbody>
               </table>
             </div>
+          </section>
+
+          <section id="live-exam-monitor-panel" class="admin-table-card hidden">
+            <div class="table-heading">
+              <div><span class="eyebrow">Live examination</span><h2 id="live-exam-monitor-title">Live examination monitoring</h2><small id="live-exam-monitor-instructions"></small></div>
+              <div class="table-tools">
+                <span id="live-exam-last-updated" class="muted"></span>
+                <button id="refresh-live-exam-monitor" class="text-button" type="button">Refresh now</button>
+                <button id="close-live-exam-monitor" class="secondary-button" type="button">Close</button>
+              </div>
+            </div>
+            <div id="live-exam-summary" class="review-summary"></div>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>Candidate</th><th>Connection</th><th>Progress</th><th>Camera</th><th>Indicators</th><th>Interruptions</th><th>Started</th><th>Action</th></tr></thead>
+                <tbody id="live-exam-monitor-body"><tr><td colspan="8" class="empty-state">Open Live monitor from an enabled course.</td></tr></tbody>
+              </table>
+            </div>
+            <p id="live-exam-disclaimer" class="muted"></p>
           </section>
 
           <section class="admin-table-card">
@@ -472,6 +510,28 @@ Final preparation"></textarea>
               <button id="close-review" class="secondary-button" type="button">Close</button>
             </div>
             <div id="review-summary" class="review-summary"></div>
+            <section id="evidence-profile-panel" class="evidence-profile-panel">
+              <div class="table-heading">
+                <div><span class="eyebrow">Phase 3</span><h3>Assessment evidence profile</h3><small>Combines understanding, oral, practical, AI-policy and session evidence without claiming proof of misconduct.</small></div>
+              </div>
+              <div id="evidence-profile-grid" class="evidence-profile-grid"></div>
+              <div id="evidence-recommendation" class="evidence-recommendation"></div>
+              <form id="assurance-decision-form" class="stack-form compact-form assurance-decision-form">
+                <label>Lecturer verification decision
+                  <select name="decision" required>
+                    <option value="evidence_consistent">Available evidence is consistent</option>
+                    <option value="additional_viva">Require an additional viva</option>
+                    <option value="supplementary_task">Require a supplementary task</option>
+                    <option value="academic_integrity_review">Refer for academic-integrity review</option>
+                    <option value="unable_to_determine">Unable to determine</option>
+                  </select>
+                </label>
+                <label>Reasoned decision note
+                  <textarea name="note" rows="3" minlength="10" maxlength="3000" required placeholder="Explain the evidence considered and the next step."></textarea>
+                </label>
+                <button class="primary-button" type="submit">Record verification decision</button>
+              </form>
+            </section>
             <div id="review-interruption" class="review-interruption hidden">
               <div>
                 <span class="eyebrow">Connection continuity</span>

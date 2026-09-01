@@ -61,6 +61,8 @@ const state = {
   resolvedCourse: null,
   currentReviewData: null,
   currentAnomalyCourseId: null,
+  liveMonitorCourseId: null,
+  liveMonitorTimer: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -1218,10 +1220,20 @@ function renderResolvedCourse(course) {
   const processParts = [];
   processParts.push(course.milestones_enabled ? "Kanokware milestones enabled" : "Final submission only");
   processParts.push(course.version_history_enabled ? "Version history enabled" : "Version history not required");
+  const aiPolicy = course.ai_policy || {};
+  processParts.push(aiPolicy.label || "AI permitted with disclosure");
+  if (course.live_exam_monitoring_enabled) {
+    processParts.push(`Live monitoring: ${course.live_exam_title || "enabled"}`);
+  }
   card.innerHTML = `<strong></strong><span></span><small></small>`;
   card.querySelector("strong").textContent = course.course;
   card.querySelector("span").textContent = `${course.lecturer || "Assigned lecturer"} · ${course.institution || "Institution"}`;
-  card.querySelector("small").textContent = `${processParts.join(" · ")} · Final justification required`;
+  card.querySelector("small").textContent = `${processParts.join(" · ")} · Final justification required${aiPolicy.guidance ? ` · ${aiPolicy.guidance}` : ""}${course.live_exam_instructions ? ` · ${course.live_exam_instructions}` : ""}`;
+
+  const aiSelect = $("#ai-use-level");
+  if (aiSelect && aiPolicy.level === "required") aiSelect.value = "required";
+  if (aiSelect && aiPolicy.level === "prohibited") aiSelect.value = "none";
+  aiSelect?.dispatchEvent(new Event("change"));
 
   const stageField = $("#submission-stage-field");
   const stage = $("#submission-stage");
@@ -1314,7 +1326,7 @@ $("#upload-form").addEventListener("submit", async (event) => {
     setMessage($("#upload-message"), error.message, "error");
   } finally {
     button.disabled = false;
-    button.textContent = "Generate ownership assessment";
+    button.textContent = "Generate learning assessment";
   }
 });
 
@@ -1940,6 +1952,8 @@ $("#lecturer-logout").addEventListener("click", async () => {
   }
   state.lecturerUser = null;
   state.courses = [];
+  stopLiveExamMonitor();
+  state.liveMonitorCourseId = null;
   clearSnapshotObjectUrls();
   showLecturerAuth();
   setMessage($("#lecturer-auth-message"), "You have signed out.", "success");
@@ -1970,6 +1984,11 @@ $("#course-create-form").addEventListener("submit", async (event) => {
       checkpoint_question_count: Number(raw.checkpoint_question_count || 3),
       milestones_enabled: Boolean(event.currentTarget.elements.milestones_enabled.checked),
       version_history_enabled: Boolean(event.currentTarget.elements.version_history_enabled.checked),
+      ai_use_policy: raw.ai_use_policy || "permitted_with_disclosure",
+      ai_policy_guidance: String(raw.ai_policy_guidance || "").trim() || null,
+      live_exam_monitoring_enabled: Boolean(event.currentTarget.elements.live_exam_monitoring_enabled.checked),
+      live_exam_title: String(raw.live_exam_title || "").trim() || null,
+      live_exam_instructions: String(raw.live_exam_instructions || "").trim() || null,
       oral_defence_enabled: Boolean(event.currentTarget.elements.oral_defence_enabled.checked),
       oral_defence_question_count: Number(raw.oral_defence_question_count || 5),
       practical_tasks_enabled: Boolean(event.currentTarget.elements.practical_tasks_enabled.checked),
@@ -2086,6 +2105,8 @@ function renderCourses(courses) {
     const process = [];
     process.push(course.milestones_enabled ? `${course.milestones.length} milestone(s)` : "Milestones off");
     process.push(course.version_history_enabled ? "Versions on" : "Versions off");
+    process.push(course.ai_policy?.label || "AI permitted with disclosure");
+    if (course.live_exam_monitoring_enabled) process.push("Live exam monitor on");
     const phase2Labels = [];
     if (course.oral_defence_enabled) phase2Labels.push("Viva");
     if (course.practical_tasks_enabled) phase2Labels.push("Practical");
@@ -2113,6 +2134,12 @@ function renderCourses(courses) {
       $("#learning-progress-body").closest("section")?.scrollIntoView({ behavior: "smooth" });
     });
     actions.appendChild(progress);
+    if (course.live_exam_monitoring_enabled) {
+      const liveMonitor = document.createElement("button");
+      liveMonitor.textContent = "Live monitor";
+      liveMonitor.addEventListener("click", () => openLiveExamMonitor(course));
+      actions.appendChild(liveMonitor);
+    }
     if (["owner", "institution_admin"].includes(course.my_access_level)) {
       const questions = document.createElement("button");
       questions.textContent = "Settings";
@@ -2137,6 +2164,101 @@ function renderCourses(courses) {
   });
 }
 
+function stopLiveExamMonitor() {
+  if (state.liveMonitorTimer) clearTimeout(state.liveMonitorTimer);
+  state.liveMonitorTimer = null;
+}
+
+async function openLiveExamMonitor(course) {
+  stopLiveExamMonitor();
+  state.liveMonitorCourseId = course.id;
+  $("#live-exam-monitor-panel").classList.remove("hidden");
+  $("#live-exam-monitor-panel").scrollIntoView({ behavior: "smooth" });
+  await loadLiveExamMonitor();
+}
+
+function renderLiveExamMonitor(result) {
+  const sessions = result.sessions || [];
+  $("#live-exam-monitor-title").textContent = result.exam?.title || "Live examination monitoring";
+  $("#live-exam-monitor-instructions").textContent = result.exam?.instructions || "Monitor connection, progress, camera state and review indicators in near real time.";
+  $("#live-exam-last-updated").textContent = result.server_time ? `Updated ${new Date(result.server_time).toLocaleTimeString()}` : "";
+  $("#live-exam-disclaimer").textContent = result.disclaimer || "Monitoring indicators require contextual human review.";
+
+  const summary = $("#live-exam-summary");
+  summary.replaceChildren();
+  const metrics = [
+    [sessions.length, "sessions in last 12 hours"],
+    [sessions.filter((item) => item.connected).length, "connected now"],
+    [sessions.filter((item) => ["interrupted", "locked"].includes(item.status)).length, "require attention"],
+    [sessions.filter((item) => item.status === "completed").length, "completed"],
+  ];
+  metrics.forEach(([value, label]) => {
+    const block = document.createElement("div");
+    block.innerHTML = "<strong></strong><span></span>";
+    block.querySelector("strong").textContent = value;
+    block.querySelector("span").textContent = label;
+    summary.appendChild(block);
+  });
+
+  const body = $("#live-exam-monitor-body");
+  body.replaceChildren();
+  if (!sessions.length) {
+    body.innerHTML = '<tr><td colspan="8" class="empty-state">No examination session has started in the last 12 hours.</td></tr>';
+    return;
+  }
+  sessions.forEach((item) => {
+    const row = document.createElement("tr");
+    row.innerHTML = `
+      <td><strong></strong><small></small></td>
+      <td><span class="status-pill"></span><small></small></td>
+      <td><strong></strong><small></small></td>
+      <td><span class="status-pill"></span></td>
+      <td><strong></strong><small></small></td>
+      <td><strong></strong><small></small></td>
+      <td><span></span></td>
+      <td><button type="button" class="secondary-button">Review</button></td>`;
+    row.children[0].querySelector("strong").textContent = item.student_name;
+    row.children[0].querySelector("small").textContent = item.student_id;
+    const connection = row.children[1].querySelector("span");
+    connection.textContent = item.connected ? "Connected" : String(item.status || "unknown").replaceAll("_", " ");
+    connection.classList.add(item.connected ? "active" : item.status || "warning");
+    row.children[1].querySelector("small").textContent = item.seconds_since_last_seen == null ? "No heartbeat yet" : `${item.seconds_since_last_seen}s since heartbeat`;
+    row.children[2].querySelector("strong").textContent = item.status === "completed" ? `${Number(item.score || 0).toFixed(0)}%` : `${Math.min(item.current_position || 1, item.question_count || 1)}/${item.question_count || 0}`;
+    row.children[2].querySelector("small").textContent = String(item.status || "unknown").replaceAll("_", " ");
+    const camera = row.children[3].querySelector("span");
+    camera.textContent = String(item.camera_status || "not captured").replaceAll("_", " ");
+    camera.classList.add(item.camera_status === "captured" ? "active" : "warning");
+    row.children[4].querySelector("strong").textContent = `${item.critical_event_count || 0} critical`;
+    row.children[4].querySelector("small").textContent = `${item.unresolved_event_count || 0} unresolved · ${item.monitoring_event_count || 0} total`;
+    row.children[5].querySelector("strong").textContent = item.interruption_count || 0;
+    row.children[5].querySelector("small").textContent = formatDuration(item.total_offline_seconds || 0);
+    row.children[6].querySelector("span").textContent = item.started_at ? new Date(item.started_at).toLocaleTimeString() : "—";
+    row.children[7].querySelector("button").addEventListener("click", () => reviewAssessment(item.assessment_id));
+    body.appendChild(row);
+  });
+}
+
+async function loadLiveExamMonitor() {
+  const courseId = state.liveMonitorCourseId;
+  if (!courseId) return;
+  stopLiveExamMonitor();
+  try {
+    const result = await api(`/api/lecturer/courses/${courseId}/live-exam-monitor`);
+    if (state.liveMonitorCourseId !== courseId) return;
+    renderLiveExamMonitor(result);
+    state.liveMonitorTimer = setTimeout(loadLiveExamMonitor, Math.max(3000, Number(result.refresh_seconds || 5) * 1000));
+  } catch (error) {
+    handleLecturerError(error);
+  }
+}
+
+$("#refresh-live-exam-monitor")?.addEventListener("click", loadLiveExamMonitor);
+$("#close-live-exam-monitor")?.addEventListener("click", () => {
+  stopLiveExamMonitor();
+  state.liveMonitorCourseId = null;
+  $("#live-exam-monitor-panel")?.classList.add("hidden");
+});
+
 async function updateCourseLearningSettings(course) {
   const finalCountInput = prompt(`Final assessment questions for ${course.course_code}, 5 to 20:`, String(course.assessment_question_count || 20));
   if (finalCountInput == null) return;
@@ -2154,6 +2276,31 @@ async function updateCourseLearningSettings(course) {
   }
   const milestonesEnabled = confirm("Select OK to enable Kanokware learning milestones. Select Cancel for final-submission-only or manually monitored learning process.");
   const versionHistoryEnabled = confirm("Select OK to keep document version history in Kanokware. Select Cancel to leave version tracking off.");
+  const allowedAiPolicies = ["prohibited", "restricted", "permitted_with_disclosure", "required"];
+  const aiPolicyInput = prompt(
+    "Course AI-use rule. Enter prohibited, restricted, permitted_with_disclosure, or required:",
+    course.ai_policy?.level || "permitted_with_disclosure"
+  );
+  if (aiPolicyInput == null) return;
+  const aiUsePolicy = aiPolicyInput.trim().toLowerCase();
+  if (!allowedAiPolicies.includes(aiUsePolicy)) {
+    setMessage($("#lecturer-message"), "Enter a valid AI-use rule: prohibited, restricted, permitted_with_disclosure, or required.", "error");
+    return;
+  }
+  const aiGuidanceInput = prompt(
+    "Student-facing AI-use guidance. Leave blank if no additional guidance is needed:",
+    course.ai_policy?.guidance || ""
+  );
+  if (aiGuidanceInput == null) return;
+  const liveExamMonitoringEnabled = confirm("Select OK to enable the optional live examination monitoring dashboard for this course.");
+  const liveExamTitleInput = liveExamMonitoringEnabled
+    ? prompt("Live examination title:", course.live_exam_title || `${course.course_code} live examination`)
+    : (course.live_exam_title || "");
+  if (liveExamTitleInput == null) return;
+  const liveExamInstructionsInput = liveExamMonitoringEnabled
+    ? prompt("Candidate-facing live examination monitoring instructions:", course.live_exam_instructions || "")
+    : (course.live_exam_instructions || "");
+  if (liveExamInstructionsInput == null) return;
   const oralDefenceEnabled = confirm("Select OK to enable the optional oral-defence module.");
   const oralCountInput = oralDefenceEnabled ? prompt("Oral-defence questions, 3 to 10:", String(course.oral_defence_question_count || 5)) : String(course.oral_defence_question_count || 5);
   if (oralCountInput == null) return;
@@ -2197,6 +2344,11 @@ async function updateCourseLearningSettings(course) {
         checkpoint_question_count: checkpointCount,
         milestones_enabled: milestonesEnabled,
         version_history_enabled: versionHistoryEnabled,
+        ai_use_policy: aiUsePolicy,
+        ai_policy_guidance: aiGuidanceInput.trim(),
+        live_exam_monitoring_enabled: liveExamMonitoringEnabled,
+        live_exam_title: liveExamTitleInput.trim(),
+        live_exam_instructions: liveExamInstructionsInput.trim(),
         oral_defence_enabled: oralDefenceEnabled,
         oral_defence_question_count: oralCount,
         practical_tasks_enabled: practicalTasksEnabled,
@@ -2468,6 +2620,51 @@ async function loadSnapshotImage(assessmentId, image) {
   }
 }
 
+function evidenceMetricValue(item) {
+  if (!item) return "Pending";
+  const status = String(item.status || "pending").replaceAll("_", " ");
+  return item.score == null ? status : `${Number(item.score).toFixed(1)}% · ${status}`;
+}
+
+function renderEvidenceProfile(profile) {
+  const grid = $("#evidence-profile-grid");
+  const recommendation = $("#evidence-recommendation");
+  const form = $("#assurance-decision-form");
+  if (!grid || !recommendation || !form) return;
+  grid.replaceChildren();
+  const rows = [
+    ["Document knowledge", evidenceMetricValue(profile?.document_knowledge), profile?.document_knowledge?.status],
+    ["Independent reasoning", evidenceMetricValue(profile?.independent_reasoning), profile?.independent_reasoning?.status],
+    ["Application and transfer", evidenceMetricValue(profile?.application_transfer), profile?.application_transfer?.status],
+    ["AI-policy alignment", String(profile?.ai_policy_alignment?.status || "pending").replaceAll("_", " "), profile?.ai_policy_alignment?.status],
+    ["Session evidence", String(profile?.session_evidence?.status || "pending").replaceAll("_", " "), profile?.session_evidence?.status],
+  ];
+  rows.forEach(([label, value, status]) => {
+    const card = document.createElement("article");
+    card.className = `evidence-profile-card ${String(status || "pending").replaceAll("_", "-")}`;
+    card.innerHTML = "<span></span><strong></strong>";
+    card.querySelector("span").textContent = label;
+    card.querySelector("strong").textContent = value;
+    grid.appendChild(card);
+  });
+  recommendation.replaceChildren();
+  const heading = document.createElement("strong");
+  heading.textContent = profile?.recommendation?.label || "Assessment evidence pending";
+  const list = document.createElement("ul");
+  (profile?.recommendation?.reasons || []).forEach((reason) => {
+    const item = document.createElement("li");
+    item.textContent = reason;
+    list.appendChild(item);
+  });
+  const disclaimer = document.createElement("small");
+  disclaimer.textContent = profile?.recommendation?.disclaimer || "This profile supports human academic judgement.";
+  recommendation.append(heading, list, disclaimer);
+
+  const saved = profile?.lecturer_decision || {};
+  form.elements.decision.value = saved.code || "evidence_consistent";
+  form.elements.note.value = saved.note || "";
+}
+
 async function reviewAssessment(assessmentId) {
   try {
     const result = await api(`/api/lecturer/assessments/${assessmentId}`);
@@ -2496,6 +2693,7 @@ async function reviewAssessment(assessmentId) {
       block.querySelector("span").textContent = label;
       summary.appendChild(block);
     });
+    renderEvidenceProfile(result.evidence_profile);
 
     const justification = $("#review-justification");
     justification.replaceChildren();
@@ -2725,6 +2923,30 @@ $("#rubric-mark-form")?.addEventListener("submit", async (event) => {
     });
     setMessage($("#lecturer-message"), "Criterion-level rubric mark saved and added to the audit trail.", "success");
     await reviewAssessment(assessmentId);
+  } catch (error) {
+    handleLecturerError(error);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("#assurance-decision-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const assessmentId = state.currentReviewAssessmentId;
+  if (!assessmentId) return;
+  const button = event.submitter;
+  button.disabled = true;
+  try {
+    const result = await api(`/api/lecturer/assessments/${assessmentId}/assurance-decision`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        decision: event.currentTarget.elements.decision.value,
+        note: event.currentTarget.elements.note.value.trim(),
+      }),
+    });
+    renderEvidenceProfile(result.evidence_profile);
+    setMessage($("#lecturer-message"), "Verification decision recorded in the assessment evidence profile.", "success");
   } catch (error) {
     handleLecturerError(error);
   } finally {

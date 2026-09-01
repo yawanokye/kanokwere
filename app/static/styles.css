@@ -814,6 +814,74 @@ textarea {
   grid-template-columns: minmax(0, 1.8fr) minmax(110px, .45fr) minmax(180px, 1fr);
   align-items: start;
 }
+
+.evidence-profile-panel {
+  margin: 1.25rem 0;
+  padding: 1.1rem;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: linear-gradient(145deg, rgba(241, 248, 246, 0.9), rgba(255, 255, 255, 0.98));
+}
+
+.evidence-profile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.evidence-profile-card {
+  display: grid;
+  gap: 0.3rem;
+  padding: 0.85rem;
+  border: 1px solid var(--border);
+  border-left: 4px solid #78958c;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.evidence-profile-card span {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.evidence-profile-card strong {
+  text-transform: capitalize;
+}
+
+.evidence-profile-card.aligned,
+.evidence-profile-card.completed,
+.evidence-profile-card.no-unresolved-indicators {
+  border-left-color: #1f8a63;
+}
+
+.evidence-profile-card.needs-review,
+.evidence-profile-card.human-review-required,
+.evidence-profile-card.attention {
+  border-left-color: #c05b38;
+}
+
+.evidence-recommendation {
+  margin-bottom: 1rem;
+  padding: 0.9rem 1rem;
+  border-radius: 12px;
+  background: rgba(20, 75, 63, 0.07);
+}
+
+.evidence-recommendation ul {
+  margin: 0.5rem 0;
+  padding-left: 1.25rem;
+}
+
+.evidence-recommendation small {
+  display: block;
+  color: var(--muted);
+}
+
+.assurance-decision-form {
+  border-top: 1px solid var(--border);
+  padding-top: 1rem;
+}
 .oral-question label,
 .practical-task-card label { margin: 0; }
 .phase2-metrics {
