@@ -1,4 +1,4 @@
-# Kanokware 1.1.0
+# Kanokware 1.2.0
 
 **Verify learning in the age of AI.**
 
@@ -8,7 +8,7 @@ Kanokware links student submissions to lecturer-owned courses and tests whether 
 
 ### Optional learning milestones
 
-A lecturer chooses whether a course will use learning milestones. When enabled, the lecturer can create checkpoints such as problem definition, methodology, analysis, or draft development. Each milestone can have a short 3–10 question understanding assessment. When disabled, students submit only the final work.
+A lecturer chooses whether a task will use learning milestones. When enabled, the lecturer can create checkpoints such as problem definition, methodology, analysis, or draft development. The lecturer sets any positive whole-number question count. When disabled, students submit only the final work.
 
 ### Optional version history
 
@@ -49,8 +49,7 @@ The lecturer dashboard summarises each student's milestones, versions, assessmen
 ## Existing assessment controls
 
 - Course enrolment codes link students to the correct lecturer or supervision group.
-- Lecturers choose 5–20 final assessment questions.
-- Milestone checkpoints use 3–10 questions.
+- Lecturers choose any positive whole-number question count for courses, tasks, milestones, standalone exams, and oral defences. Kanokware does not impose an application ceiling.
 - Every question has 30 seconds.
 - Questions and options are randomised.
 - Correct answers remain server-side.
@@ -135,3 +134,29 @@ Phase 3 addresses the assessment problem created by widespread generative-AI use
 - The PDF learning-assurance report includes the combined evidence profile and lecturer decision.
 
 Database revision: `20260831_09_assessment_evidence_profile.py`. The normal prestart migration preserves existing records.
+
+## Phase 4 task governance and standalone examinations
+
+New assessment tasks start with Kanokware's basic workflow: enrolment, document upload, required understanding justification, AI declaration, grounded questions, result, and PDF report. Advanced controls are selected per task.
+
+The platform administrator sets one rule for each advanced feature:
+
+- `disabled`
+- `admin_only`
+- `lecturer_allowed`
+- `always_on`
+
+Lecturers and facilitators can then activate permitted features for a particular task. The effective feature profile is snapshotted onto each submission and assessment so later policy changes do not alter an attempt already in progress. Existing courses without task profiles retain their earlier course-level behaviour.
+
+Standalone examination tasks support either:
+
+- a lecturer-uploaded PDF, DOCX, or TXT source from which Kanokware generates the configured number of grounded questions; or
+- a lecturer-authored JSON question bank containing exactly the task's configured number of questions.
+
+Optional examination evidence includes webcam monitoring, a live dashboard, secure fullscreen enforcement, consented screen recording, and consented environment-audio recording. Browser framing is blocked with `X-Frame-Options: DENY` and CSP `frame-ancestors 'none'`. A normal website cannot prevent the operating system from minimizing a browser; when secure enforcement is enabled Kanokware detects page hiding, focus loss, or fullscreen exit and locks the attempt for authorised review. Managed kiosk prevention still requires an institutional lockdown browser or device policy.
+
+Each task has a lecturer-set positive whole-number attempt limit. Attempts are counted per candidate and task across replacement uploads or exam banks, so creating a new source does not bypass the limit. When the limit is reached, the candidate app returns to its start screen and explains that a lecturer must increase the limit or reset the candidate. Authorised lecturers can change a task limit or reset one candidate's complete task-attempt history so the candidate can start afresh.
+
+Screen and audio recordings are uploaded as access-controlled chunks and are indicators for human review, not automatic misconduct findings. Institutions should configure consent, retention, accessibility accommodations, storage capacity, and due-process rules before enabling recording.
+
+Database revision: `20260901_10_task_feature_governance.py`. No new environment variable is required.

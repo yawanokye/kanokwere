@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import sys
 from pathlib import Path
@@ -146,7 +147,7 @@ def test_admin_created_lecturer_activation_course_and_complete_assessment():
         status = client.get(f"/api/documents/{document_id}/status")
         assert status.status_code == 200
         assert status.json()["status"] == "ready"
-        assert status.json()["question_count"] == 20
+        assert status.json()["question_count"] == 10
         assert status.json()["assessment_question_count"] == 10
         assert status.json()["generation_mode"] == "demo"
 
@@ -929,3 +930,209 @@ def test_phase2_optional_modules_end_to_end():
         assert len(body["supervisor_meetings"]) == 1
         assert body["cross_version_analysis"] is not None
         assert body["moderation"]["status"] == "completed"
+
+
+def test_task_governance_standalone_exam_uploaded_bank_and_recordings():
+    with TestClient(app) as client:
+        _, setup_code = create_lecturer(client, "task-facilitator@test.edu", "Task Facilitator")
+        activate_lecturer(client, "task-facilitator@test.edu", setup_code)
+
+        course_response = client.post(
+            "/api/lecturer/courses",
+            json={
+                "course_code": "EXM 900",
+                "title": "Standalone Examination",
+                "academic_year": "2026/2027",
+                "semester": "First Semester",
+                "assessment_question_count": 27,
+            },
+        )
+        assert course_response.status_code == 201, course_response.text
+        course = course_response.json()["course"]
+
+        policy = client.patch(
+            "/api/platform/features/secure_browser_enforcement",
+            headers=ADMIN_HEADERS,
+            json={"activation_mode": "admin_only"},
+        )
+        assert policy.status_code == 200, policy.text
+
+        forbidden = client.post(
+            f"/api/lecturer/courses/{course['id']}/tasks",
+            json={
+                "title": "Lecturer cannot bypass policy",
+                "mode": "standalone_exam",
+                "assessment_question_count": 23,
+                "features": {"secure_browser_enforcement": True},
+            },
+        )
+        assert forbidden.status_code == 403
+
+        task_response = client.post(
+            f"/api/lecturer/courses/{course['id']}/tasks",
+            json={
+                "title": "Open-count final examination",
+                "instructions": "Answer every question without leaving the examination page.",
+                "mode": "standalone_exam",
+                "assessment_question_count": 23,
+                "max_attempts": 2,
+                "features": {
+                    "screen_activity_recording": True,
+                    "environment_audio_recording": True,
+                },
+            },
+        )
+        assert task_response.status_code == 201, task_response.text
+        task = task_response.json()["task"]
+        assert task["assessment_question_count"] == 23
+        assert task["max_attempts"] == 2
+        assert task["effective_features"]["webcam_monitoring"] is False
+
+        admin_activation = client.patch(
+            f"/api/platform/assessment-tasks/{task['id']}/features",
+            headers=ADMIN_HEADERS,
+            json={"features": {"secure_browser_enforcement": True}},
+        )
+        assert admin_activation.status_code == 200, admin_activation.text
+        assert admin_activation.json()["task"]["effective_features"]["secure_browser_enforcement"] is True
+
+        questions = []
+        categories = [
+            "document_knowledge",
+            "decision_defence",
+            "interpretation",
+            "counterfactual",
+            "error_correction",
+            "transfer_application",
+        ]
+        difficulties = ["recall", "understanding", "application"]
+        for number in range(1, 24):
+            questions.append(
+                {
+                    "stem": f"Which lecturer-approved answer is correct for examination item number {number}?",
+                    "options": [
+                        f"Approved answer {number}",
+                        f"Distractor B {number}",
+                        f"Distractor C {number}",
+                        f"Distractor D {number}",
+                    ],
+                    "correct_option_index": 0,
+                    "difficulty": difficulties[(number - 1) % len(difficulties)],
+                    "category": categories[(number - 1) % len(categories)],
+                    "seconds": 30,
+                    "source_quote": f"Lecturer source reference for examination item {number}.",
+                    "source_location": f"Lecturer bank item {number}",
+                    "explanation": f"The lecturer designated option A as correct for item {number}.",
+                }
+            )
+        bank_upload = client.post(
+            f"/api/lecturer/courses/{course['id']}/tasks/{task['id']}/question-bank",
+            data={"title": "Lecturer-authored question bank"},
+            files={
+                "file": (
+                    "question-bank.json",
+                    json.dumps({"questions": questions}).encode("utf-8"),
+                    "application/json",
+                )
+            },
+        )
+        assert bank_upload.status_code == 200, bank_upload.text
+        assert bank_upload.json()["question_count"] == 23
+
+        resolved = client.get(f"/api/courses/resolve?code={course['enrollment_code']}")
+        assert resolved.status_code == 200, resolved.text
+        resolved_task = next(item for item in resolved.json()["assessment_tasks"] if item["id"] == task["id"])
+        assert resolved_task["ready"] is True
+
+        started = client.post(
+            "/api/examinations/start",
+            json={
+                "course_code": course["enrollment_code"],
+                "task_id": task["id"],
+                "candidate_name": "Standalone Candidate",
+                "candidate_id": "EXM/001",
+                "client_instance_id": "standalone-browser-instance-0001",
+            },
+        )
+        assert started.status_code == 200, started.text
+        assert started.json()["question_count"] == 23
+        assert started.json()["secure_browser_enforcement"] is True
+        assessment_id = started.json()["assessment_id"]
+        headers = {"Authorization": f"Bearer {started.json()['session_token']}"}
+
+        screen = client.post(
+            f"/api/assessments/{assessment_id}/recording-chunk",
+            headers=headers,
+            data={"recording_type": "screen", "sequence": 0, "duration_ms": 30000},
+            files={"media": ("screen.webm", b"screen-recording-evidence", "video/webm")},
+        )
+        assert screen.status_code == 201, screen.text
+        audio = client.post(
+            f"/api/assessments/{assessment_id}/recording-chunk",
+            headers=headers,
+            data={"recording_type": "environment_audio", "sequence": 0, "duration_ms": 30000},
+            files={"media": ("audio.webm", b"environment-audio-evidence", "audio/webm")},
+        )
+        assert audio.status_code == 201, audio.text
+
+        detail = client.get(f"/api/lecturer/assessments/{assessment_id}")
+        assert detail.status_code == 200, detail.text
+        assert len(detail.json()["recordings"]) == 2
+        download = client.get(detail.json()["recordings"][0]["download_url"])
+        assert download.status_code == 200
+
+        terminated = client.post(
+            f"/api/assessments/{assessment_id}/terminate",
+            headers=headers,
+            json={
+                "client_instance_id": "standalone-browser-instance-0001",
+                "reason": "fullscreen_exited",
+            },
+        )
+        assert terminated.status_code == 200, terminated.text
+        assert terminated.json()["status"] == "locked"
+
+        second = client.post(
+            "/api/examinations/start",
+            json={
+                "course_code": course["enrollment_code"],
+                "task_id": task["id"],
+                "candidate_name": "Standalone Candidate",
+                "candidate_id": "exm/001",
+                "client_instance_id": "standalone-browser-instance-0002",
+            },
+        )
+        assert second.status_code == 200, second.text
+
+        blocked = client.post(
+            "/api/examinations/start",
+            json={
+                "course_code": course["enrollment_code"],
+                "task_id": task["id"],
+                "candidate_name": "Standalone Candidate",
+                "candidate_id": "EXM/001",
+                "client_instance_id": "standalone-browser-instance-0003",
+            },
+        )
+        assert blocked.status_code == 409, blocked.text
+        assert "maximum of 2" in blocked.json()["detail"]
+
+        reset = client.delete(
+            f"/api/lecturer/courses/{course['id']}/tasks/{task['id']}/attempts",
+            params={"candidate_id": "EXM/001"},
+        )
+        assert reset.status_code == 200, reset.text
+        assert reset.json()["deleted_attempts"] == 2
+        assert reset.json()["retake_enabled"] is True
+
+        restarted = client.post(
+            "/api/examinations/start",
+            json={
+                "course_code": course["enrollment_code"],
+                "task_id": task["id"],
+                "candidate_name": "Standalone Candidate",
+                "candidate_id": "EXM/001",
+                "client_instance_id": "standalone-browser-instance-0004",
+            },
+        )
+        assert restarted.status_code == 200, restarted.text

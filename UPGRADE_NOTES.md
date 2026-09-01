@@ -144,3 +144,32 @@ The evidence profile combines document-specific understanding, completed oral-de
 Database revision: `20260831_09_assessment_evidence_profile.py`.
 
 No new Render environment variable is required. Keep the standard start command so existing course and assessment records are migrated safely.
+
+## Version 1.2.0: task feature governance and standalone examination mode
+
+This release adds platform-wide feature policies, lecturer-configured task profiles, standalone examinations, lecturer-authored JSON question banks, secure fullscreen enforcement, and optional consented screen and environment-audio recordings.
+
+The migration adds:
+
+- `feature_settings`
+- `assessment_tasks`
+- `task_feature_activations`
+- `assessment_recording_chunks`
+- task and feature-snapshot fields on documents
+- feature snapshots and candidate identity fields on assessments
+
+Existing courses and submissions retain their legacy course-level behavior. New task profiles start with basic assessment only unless an optional feature is allowed and activated. Feature snapshots protect in-progress and historical attempts from later configuration changes.
+
+Question counts are no longer capped by Kanokware. Lecturers may set any positive whole number for course assessments, task assessments, milestone checks, standalone exams, and oral defences. The full configured number of validated questions must be ready before an attempt can start. Very large AI-generated banks may require a higher OpenAI timeout and incur additional model usage.
+
+Courses and tasks now also store lecturer-set positive whole-number attempt limits. Task limits are enforced per candidate across new document uploads and replacement standalone exam banks. On limit failure the candidate interface returns to its start panel. Lecturers and facilitators with grading access can change a task's limit or reset all attempts for one candidate and task; the reset also deletes the related answers and monitoring or recording evidence and records an audit event.
+
+Screen and audio chunks are stored in the application database. Before enabling them in production, check database capacity and establish institutional consent, retention, access, accommodation, and deletion policies.
+
+Database revision: `20260901_10_task_feature_governance.py`.
+
+No new environment variable is required. Keep the standard start command:
+
+```bash
+python prestart.py && uvicorn main:app --host 0.0.0.0 --port $PORT
+```

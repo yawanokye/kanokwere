@@ -11,7 +11,7 @@ Learning milestones and version history are independent optional settings.
 
 ## Phase 1 features
 
-1. Optional learning milestones with 3–10 question checkpoint assessments.
+1. Optional learning milestones with lecturer-selected positive question counts.
 2. Optional version history with version comparison.
 3. Required student explanation of understanding, decisions, contribution, and limitation.
 4. AI-use declaration and explanation.
