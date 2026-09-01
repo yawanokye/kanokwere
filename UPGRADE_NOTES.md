@@ -134,3 +134,13 @@ python prestart.py && uvicorn main:app --host 0.0.0.0 --port $PORT
 ```
 
 The migration preserves existing users, courses, submissions, assessments, reports, monitoring evidence, rubric marks, and Phase 1 learning records.
+
+## Version 1.1.0, Phase 3 assessment evidence profile
+
+This release adds course-level AI-use rules, student-facing policy guidance, AI-policy alignment review, a combined assessment evidence profile, a recorded lecturer verification decision, and an optional live examination monitoring dashboard.
+
+The evidence profile combines document-specific understanding, completed oral-defence evidence, completed practical-task evidence, AI-policy alignment, and contextual session indicators. It does not claim to prove authorship, cheating, or misconduct.
+
+Database revision: `20260831_09_assessment_evidence_profile.py`.
+
+No new Render environment variable is required. Keep the standard start command so existing course and assessment records are migrated safely.

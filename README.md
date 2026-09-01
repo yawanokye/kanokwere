@@ -1,4 +1,4 @@
-# Kanokware 1.0.0
+# Kanokware 1.1.0
 
 **Verify learning in the age of AI.**
 
@@ -121,3 +121,17 @@ Every Phase 2 module is independently configurable per course and defaults to **
 A lecturer may enable any combination, including none. Final-only assignments remain supported. The required student understanding justification and AI-use declaration introduced in Phase 1 remain in force.
 
 Database revision: `20260717_08_phase2_learning_assurance.py`. No new environment variable is required.
+
+## Phase 3 assessment evidence profile
+
+Phase 3 addresses the assessment problem created by widespread generative-AI use without treating automated indicators as proof of misconduct.
+
+- Every course states one student-facing AI rule: prohibited, restricted, permitted with disclosure, or required.
+- Honest declarations that conflict with a course rule are accepted and routed to human review rather than blocked.
+- The lecturer review combines document knowledge, independent reasoning, application, AI-policy alignment, and session evidence.
+- The evidence profile recommends proportionate verification while retaining a clear due-process disclaimer.
+- Lecturers record a reasoned human decision: evidence consistent, additional viva, supplementary task, academic-integrity review, or unable to determine.
+- Courses may enable a live examination dashboard that refreshes active connection, question progress, camera state, interruption and monitoring indicators every five seconds.
+- The PDF learning-assurance report includes the combined evidence profile and lecturer decision.
+
+Database revision: `20260831_09_assessment_evidence_profile.py`. The normal prestart migration preserves existing records.
