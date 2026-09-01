@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from .assurance_service import ai_policy_alignment
 from .config import settings
 from .models import Assessment, Course, Document, LearningAlert, MonitoringEvent
 
@@ -184,6 +185,18 @@ def refresh_document_alerts(db: Session, document: Document) -> None:
                 "together with the mastery assessment and justification."
             ),
         )
+
+    if course:
+        policy_alignment = ai_policy_alignment(course, document)
+        if policy_alignment["status"] != "aligned":
+            _upsert_alert(
+                db,
+                document,
+                alert_key="ai_policy_alignment_review",
+                alert_type="ai_policy",
+                severity="warning",
+                message=policy_alignment["reason"],
+            )
 
 
 def refresh_assessment_alerts(db: Session, assessment: Assessment) -> None:

@@ -51,6 +51,10 @@ from .assessment_service import (
     start_assessment,
     submit_answer,
 )
+from .assurance_service import (
+    ai_policy_payload,
+    assessment_evidence_profile,
+)
 from .config import settings
 from .database import Base, SessionLocal, engine, get_db
 from .document_service import read_and_extract
@@ -110,6 +114,7 @@ from .schemas import (
     AdminUserStatusRequest,
     ActivateAccountRequest,
     AnswerRequest,
+    AssuranceDecisionRequest,
     AssessmentHeartbeatRequest,
     AssessmentInterruptRequest,
     ChangePasswordRequest,
@@ -190,7 +195,7 @@ async def lifespan(_: FastAPI):
 mimetypes.add_type("text/javascript", ".mjs")
 mimetypes.add_type("application/wasm", ".wasm")
 
-app = FastAPI(title="Kanokware", version="0.9.0", lifespan=lifespan)
+app = FastAPI(title="Kanokware", version="1.1.0", lifespan=lifespan)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 REPOSITORY_MONITORING_ASSET_DIR = STATIC_DIR / "vendor" / "mediapipe-tasks-vision"
 RUNTIME_MONITORING_ASSET_DIR = Path(
@@ -839,6 +844,10 @@ def _course_payload(db: Session, course: Course, current_user: User | None = Non
         "version_history_enabled": bool(course.version_history_enabled),
         "final_justification_required": bool(course.final_justification_required),
         "ai_declaration_required": bool(course.ai_declaration_required),
+        "ai_policy": ai_policy_payload(course),
+        "live_exam_monitoring_enabled": bool(course.live_exam_monitoring_enabled),
+        "live_exam_title": course.live_exam_title,
+        "live_exam_instructions": course.live_exam_instructions,
         **course_phase2_settings(course),
         "milestones": [
             {
@@ -892,6 +901,11 @@ def create_course(
         version_history_enabled=payload.version_history_enabled,
         final_justification_required=True,
         ai_declaration_required=True,
+        ai_use_policy=payload.ai_use_policy,
+        ai_policy_guidance=(payload.ai_policy_guidance or "").strip() or None,
+        live_exam_monitoring_enabled=payload.live_exam_monitoring_enabled,
+        live_exam_title=(payload.live_exam_title or "").strip() or None,
+        live_exam_instructions=(payload.live_exam_instructions or "").strip() or None,
         rubric_json=default_rubric_json(),
         oral_defence_enabled=payload.oral_defence_enabled,
         oral_defence_question_count=payload.oral_defence_question_count,
@@ -1002,6 +1016,21 @@ def update_course_settings(
     if payload.version_history_enabled is not None:
         course.version_history_enabled = payload.version_history_enabled
         changes["version_history_enabled"] = payload.version_history_enabled
+    if payload.ai_use_policy is not None:
+        course.ai_use_policy = payload.ai_use_policy
+        changes["ai_use_policy"] = payload.ai_use_policy
+    if payload.ai_policy_guidance is not None:
+        course.ai_policy_guidance = payload.ai_policy_guidance.strip() or None
+        changes["ai_policy_guidance"] = course.ai_policy_guidance
+    if payload.live_exam_monitoring_enabled is not None:
+        course.live_exam_monitoring_enabled = payload.live_exam_monitoring_enabled
+        changes["live_exam_monitoring_enabled"] = payload.live_exam_monitoring_enabled
+    if payload.live_exam_title is not None:
+        course.live_exam_title = payload.live_exam_title.strip() or None
+        changes["live_exam_title"] = course.live_exam_title
+    if payload.live_exam_instructions is not None:
+        course.live_exam_instructions = payload.live_exam_instructions.strip() or None
+        changes["live_exam_instructions"] = course.live_exam_instructions
     for field_name in (
         "oral_defence_enabled",
         "oral_defence_question_count",
@@ -1133,6 +1162,86 @@ def learning_progress(
     }
 
 
+@app.get("/api/lecturer/courses/{course_id}/live-exam-monitor")
+def live_exam_monitor(
+    course_id: str,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    course = require_course_access(db, user, course_id)
+    if not course.live_exam_monitoring_enabled:
+        raise HTTPException(
+            status_code=409,
+            detail="Live examination monitoring is not enabled for this course.",
+        )
+    cutoff = utcnow() - timedelta(hours=12)
+    assessments = db.scalars(
+        select(Assessment)
+        .join(Document, Document.id == Assessment.document_id)
+        .options(
+            selectinload(Assessment.document),
+            selectinload(Assessment.webcam_snapshot),
+            selectinload(Assessment.monitoring_events),
+        )
+        .where(Document.course_id == course.id, Assessment.started_at >= cutoff)
+        .order_by(Assessment.started_at.desc())
+        .limit(300)
+    ).all()
+    now = utcnow()
+    rows: list[dict[str, object]] = []
+    for assessment in assessments:
+        refresh_interruption_state(db, assessment)
+        last_seen = aware(assessment.last_seen_at)
+        seconds_since_last_seen = (
+            max(0, int((now - last_seen).total_seconds())) if last_seen else None
+        )
+        events = list(assessment.monitoring_events or [])
+        unresolved = [event for event in events if not event.corrected]
+        critical = [event for event in unresolved if event.severity == "critical"]
+        connected = bool(
+            assessment.status == "in_progress"
+            and seconds_since_last_seen is not None
+            and seconds_since_last_seen <= max(settings.heartbeat_stale_seconds, 20)
+        )
+        rows.append({
+            "assessment_id": assessment.id,
+            "student_name": assessment.document.student_name,
+            "student_id": assessment.document.student_id,
+            "document_title": assessment.document.title,
+            "status": assessment.status,
+            "connected": connected,
+            "current_position": assessment.current_position,
+            "question_count": assessment.question_count,
+            "score": assessment.score,
+            "started_at": assessment.started_at.isoformat() if assessment.started_at else None,
+            "completed_at": assessment.completed_at.isoformat() if assessment.completed_at else None,
+            "last_seen_at": assessment.last_seen_at.isoformat() if assessment.last_seen_at else None,
+            "seconds_since_last_seen": seconds_since_last_seen,
+            "monitoring_event_count": len(events),
+            "unresolved_event_count": len(unresolved),
+            "critical_event_count": len(critical),
+            "interruption_count": assessment.interruption_count,
+            "total_offline_seconds": assessment.total_offline_seconds,
+            "camera_status": (
+                assessment.webcam_snapshot.status if assessment.webcam_snapshot else "not_captured"
+            ),
+        })
+    return {
+        "course": _course_payload(db, course, user),
+        "exam": {
+            "title": course.live_exam_title or f"{course.course_code} live examination",
+            "instructions": course.live_exam_instructions,
+        },
+        "server_time": now.isoformat(),
+        "refresh_seconds": 5,
+        "sessions": rows,
+        "disclaimer": (
+            "Live monitoring indicators support invigilation and academic judgement. "
+            "They do not establish misconduct without contextual human review and due process."
+        ),
+    }
+
+
 @app.get("/api/courses/resolve")
 def resolve_course_code(
     code: str = Query(min_length=6, max_length=24),
@@ -1163,6 +1272,10 @@ def resolve_course_code(
         "version_history_enabled": bool(course.version_history_enabled),
         "final_justification_required": True,
         "ai_declaration_required": True,
+        "ai_policy": ai_policy_payload(course),
+        "live_exam_monitoring_enabled": bool(course.live_exam_monitoring_enabled),
+        "live_exam_title": course.live_exam_title,
+        "live_exam_instructions": course.live_exam_instructions,
         "milestones": [
             {
                 "id": milestone.id,
@@ -1819,6 +1932,7 @@ def _assessment_detail(db: Session, assessment: Assessment) -> dict[str, object]
         "milestone": milestone.title if milestone else None,
         "version_number": document.version_number,
         "ai_use_level": document.ai_use_level,
+        "ai_policy": ai_policy_payload(course),
     })
     monitoring_events = sorted(list(assessment.monitoring_events or []), key=lambda event: event.created_at)
     summary["monitoring_event_count"] = len(monitoring_events)
@@ -1909,6 +2023,12 @@ def _assessment_detail(db: Session, assessment: Assessment) -> dict[str, object]
         ],
         "version_comparison": version_comparison(document, previous),
         "learning_alerts": [alert_payload(alert) for alert in alerts],
+        "evidence_profile": assessment_evidence_profile(
+            assessment,
+            course,
+            oral_defence=oral_defence,
+            practical_tasks=list(practical_tasks),
+        ),
         "phase2_settings": course_phase2_settings(course),
         "oral_defence": oral_defence_payload(oral_defence),
         "practical_tasks": [practical_task_payload(task) for task in practical_tasks],
@@ -2142,6 +2262,49 @@ def score_practical_task(
     audit(db, request, "practical_task_scored", user=user, resource_type="practical_task", resource_id=task.id, detail={"assessment_id": assessment.id, "score": task.score})
     db.commit()
     return {"practical_task": practical_task_payload(task)}
+
+
+@app.post("/api/lecturer/assessments/{assessment_id}/assurance-decision")
+def record_assurance_decision(
+    assessment_id: str,
+    payload: AssuranceDecisionRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    assessment = _assessment_for_lecturer(db, user, assessment_id)
+    require_document_access(db, user, assessment.document_id, write=True)
+    assessment.assurance_decision = payload.decision
+    assessment.assurance_decision_note = payload.note.strip()
+    assessment.assurance_decided_by = user.id
+    assessment.assurance_decided_at = utcnow()
+    audit(
+        db,
+        request,
+        "assessment_assurance_decision_recorded",
+        user=user,
+        resource_type="assessment",
+        resource_id=assessment.id,
+        detail={"decision": payload.decision},
+    )
+    db.commit()
+    course = db.get(Course, assessment.course_id) if assessment.course_id else None
+    oral_defence = db.scalar(
+        select(OralDefence).where(OralDefence.assessment_id == assessment.id)
+    )
+    practical_tasks = db.scalars(
+        select(PracticalTask)
+        .where(PracticalTask.assessment_id == assessment.id)
+        .order_by(PracticalTask.sequence)
+    ).all()
+    return {
+        "evidence_profile": assessment_evidence_profile(
+            assessment,
+            course,
+            oral_defence=oral_defence,
+            practical_tasks=list(practical_tasks),
+        )
+    }
 
 
 @app.get("/api/lecturer/courses/{course_id}/supervisor-meetings")

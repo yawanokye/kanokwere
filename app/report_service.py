@@ -10,10 +10,20 @@ from reportlab.lib.units import mm
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from reportlab.lib import colors
 
+from .assurance_service import ai_policy_payload, assessment_evidence_profile
 from .models import Assessment
 
 
+def _profile_value(item: dict[str, object]) -> str:
+    status = str(item.get("status") or "pending").replace("_", " ").title()
+    score = item.get("score")
+    return f"{float(score):.1f}% · {status}" if score is not None else status
+
+
 def build_pdf_report(assessment: Assessment) -> bytes:
+    course = assessment.document.course
+    policy = ai_policy_payload(course)
+    evidence_profile = assessment_evidence_profile(assessment, course)
     buffer = io.BytesIO()
     document = SimpleDocTemplate(
         buffer,
@@ -49,6 +59,7 @@ def build_pdf_report(assessment: Assessment) -> bytes:
         ["Submission stage", assessment.document.submission_stage.replace("_", " ").title()],
         ["Version", str(assessment.document.version_number)],
         ["AI-use declaration", assessment.document.ai_use_level.replace("_", " ").title()],
+        ["Course AI rule", policy["label"]],
         [
             "Course",
             f"{assessment.document.course.course_code} · {assessment.document.course.title}"
@@ -110,6 +121,32 @@ def build_pdf_report(assessment: Assessment) -> bytes:
             styles["BodyText"],
         )
     )
+    profile = evidence_profile
+    profile_data = [
+        ["Document knowledge", _profile_value(profile["document_knowledge"])],
+        ["Independent reasoning", _profile_value(profile["independent_reasoning"])],
+        ["Application and transfer", _profile_value(profile["application_transfer"])],
+        ["AI-policy alignment", profile["ai_policy_alignment"]["status"].replace("_", " ").title()],
+        ["Session evidence", profile["session_evidence"]["status"].replace("_", " ").title()],
+        ["System recommendation", profile["recommendation"]["label"]],
+        [
+            "Lecturer decision",
+            (profile["lecturer_decision"]["code"] or "Not recorded").replace("_", " ").title(),
+        ],
+        ["Lecturer decision note", profile["lecturer_decision"]["note"] or "Not recorded"],
+    ]
+    story.extend([Spacer(1, 12), Paragraph("Assessment evidence profile", styles["Heading2"])])
+    profile_table = Table(profile_data, colWidths=[42 * mm, 115 * mm])
+    profile_table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.grey),
+        ("BACKGROUND", (0, 0), (0, -1), colors.whitesmoke),
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+    ]))
+    story.append(profile_table)
+    story.append(Spacer(1, 6))
+    story.append(Paragraph(escape(profile["recommendation"]["disclaimer"]), styles["Small"]))
     story.extend([Spacer(1, 12), Paragraph("Student justification and AI-use declaration", styles["Heading2"])])
     justification_data = [
         ["Understanding summary", assessment.document.understanding_summary or "Not provided"],

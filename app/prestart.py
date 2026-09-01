@@ -232,6 +232,45 @@ def _repair_phase2_columns() -> None:
                 operations.add_column("courses", column)
 
 
+def _repair_phase3_columns() -> None:
+    """Repair Phase 3 policy and decision columns if a database was stamped ahead."""
+    with engine.begin() as connection:
+        inspector = sa.inspect(connection)
+        tables = set(inspector.get_table_names())
+        operations = Operations(MigrationContext.configure(connection))
+        if "courses" in tables:
+            course_columns = {item["name"] for item in inspector.get_columns("courses")}
+            additions = [
+                sa.Column(
+                    "ai_use_policy",
+                    sa.String(length=40),
+                    nullable=False,
+                    server_default="permitted_with_disclosure",
+                ),
+                sa.Column("ai_policy_guidance", sa.Text(), nullable=True),
+                sa.Column("live_exam_monitoring_enabled", sa.Boolean(), nullable=False, server_default=sa.false()),
+                sa.Column("live_exam_title", sa.String(length=240), nullable=True),
+                sa.Column("live_exam_instructions", sa.Text(), nullable=True),
+            ]
+            for column in additions:
+                if column.name not in course_columns:
+                    print(f"Prestart: adding missing courses.{column.name}", flush=True)
+                    operations.add_column("courses", column)
+        inspector = sa.inspect(connection)
+        if "assessments" in set(inspector.get_table_names()):
+            assessment_columns = {item["name"] for item in inspector.get_columns("assessments")}
+            additions = [
+                sa.Column("assurance_decision", sa.String(length=50), nullable=True),
+                sa.Column("assurance_decision_note", sa.Text(), nullable=True),
+                sa.Column("assurance_decided_by", sa.String(length=36), nullable=True),
+                sa.Column("assurance_decided_at", sa.DateTime(timezone=True), nullable=True),
+            ]
+            for column in additions:
+                if column.name not in assessment_columns:
+                    print(f"Prestart: adding missing assessments.{column.name}", flush=True)
+                    operations.add_column("assessments", column)
+
+
 def _verify_schema() -> None:
     inspector = sa.inspect(engine)
     tables = set(inspector.get_table_names())
@@ -308,7 +347,21 @@ def _verify_schema() -> None:
     missing_phase2_tables = sorted(required_phase2_tables - tables)
     if missing_phase2_tables:
         raise RuntimeError("Database upgrade incomplete. Missing Phase 2 tables: " + ", ".join(missing_phase2_tables))
-    print("Prestart: account, monitoring, continuity, and Phase 1–2 learning-assurance schema verified.", flush=True)
+    required_course_phase3 = {
+        "ai_use_policy", "ai_policy_guidance", "live_exam_monitoring_enabled",
+        "live_exam_title", "live_exam_instructions",
+    }
+    missing_course_phase3 = sorted(required_course_phase3 - course_columns)
+    if missing_course_phase3:
+        raise RuntimeError("Database upgrade incomplete. Missing Phase 3 course columns: " + ", ".join(missing_course_phase3))
+    required_assessment_phase3 = {
+        "assurance_decision", "assurance_decision_note", "assurance_decided_by",
+        "assurance_decided_at",
+    }
+    missing_assessment_phase3 = sorted(required_assessment_phase3 - assessment_columns)
+    if missing_assessment_phase3:
+        raise RuntimeError("Database upgrade incomplete. Missing Phase 3 assessment columns: " + ", ".join(missing_assessment_phase3))
+    print("Prestart: account, monitoring, continuity, and Phase 1–3 learning-assurance schema verified.", flush=True)
 
 
 def _face_model_is_compatible(model_path: Path) -> bool:
@@ -477,6 +530,7 @@ def main() -> None:
     _repair_assessment_columns()
     _repair_phase1_columns()
     _repair_phase2_columns()
+    _repair_phase3_columns()
 
     config = Config(str(BASE_DIR / "alembic.ini"))
     command.upgrade(config, "head")

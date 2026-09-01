@@ -132,6 +132,15 @@ class Course(Base):
     version_history_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     final_justification_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     ai_declaration_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    ai_use_policy: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="permitted_with_disclosure"
+    )
+    ai_policy_guidance: Mapped[str | None] = mapped_column(Text, nullable=True)
+    live_exam_monitoring_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    live_exam_title: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    live_exam_instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
     rubric_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
 
     # Phase 2 modules are independently optional at course level.
@@ -309,6 +318,14 @@ class Assessment(Base):
     correct_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     score: Mapped[float | None] = mapped_column(Float, nullable=True)
     decision: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    assurance_decision: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    assurance_decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    assurance_decided_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    assurance_decided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     focus_loss_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     question_count: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
 

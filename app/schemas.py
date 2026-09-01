@@ -144,6 +144,13 @@ class CourseCreateRequest(BaseModel):
     checkpoint_question_count: int = Field(default=3, ge=3, le=10)
     milestones_enabled: bool = False
     version_history_enabled: bool = False
+    ai_use_policy: Literal[
+        "prohibited", "restricted", "permitted_with_disclosure", "required"
+    ] = "permitted_with_disclosure"
+    ai_policy_guidance: str | None = Field(default=None, max_length=2000)
+    live_exam_monitoring_enabled: bool = False
+    live_exam_title: str | None = Field(default=None, max_length=240)
+    live_exam_instructions: str | None = Field(default=None, max_length=2000)
 
     # Optional Phase 2 modules.
     oral_defence_enabled: bool = False
@@ -175,6 +182,13 @@ class CourseSettingsRequest(BaseModel):
     checkpoint_question_count: int | None = Field(default=None, ge=3, le=10)
     milestones_enabled: bool | None = None
     version_history_enabled: bool | None = None
+    ai_use_policy: Literal[
+        "prohibited", "restricted", "permitted_with_disclosure", "required"
+    ] | None = None
+    ai_policy_guidance: str | None = Field(default=None, max_length=2000)
+    live_exam_monitoring_enabled: bool | None = None
+    live_exam_title: str | None = Field(default=None, max_length=240)
+    live_exam_instructions: str | None = Field(default=None, max_length=2000)
     oral_defence_enabled: bool | None = None
     oral_defence_question_count: int | None = Field(default=None, ge=3, le=10)
     practical_tasks_enabled: bool | None = None
@@ -303,6 +317,17 @@ class ModerationCompleteRequest(BaseModel):
 class MarkerAnomalyActionRequest(BaseModel):
     status: Literal["acknowledged", "resolved"]
     note: str | None = Field(default=None, max_length=2000)
+
+
+class AssuranceDecisionRequest(BaseModel):
+    decision: Literal[
+        "evidence_consistent",
+        "additional_viva",
+        "supplementary_task",
+        "academic_integrity_review",
+        "unable_to_determine",
+    ]
+    note: str = Field(min_length=10, max_length=3000)
 
 
 class CourseCollaboratorRequest(BaseModel):
