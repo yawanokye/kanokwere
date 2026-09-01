@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -50,6 +51,7 @@ from .assessment_service import (
     set_interruption_excused,
     start_assessment,
     submit_answer,
+    terminate_secure_assessment,
 )
 from .assurance_service import (
     ai_policy_payload,
@@ -58,6 +60,20 @@ from .assurance_service import (
 from .config import settings
 from .database import Base, SessionLocal, engine, get_db
 from .document_service import read_and_extract
+from .feature_service import (
+    assessment_feature_enabled,
+    assessment_features,
+    document_feature_enabled,
+    document_features,
+    effective_task_features,
+    ensure_feature_settings,
+    feature_catalog_payload,
+    legacy_course_features,
+    set_task_features,
+    snapshot_task_features,
+    task_payload,
+    update_feature_setting,
+)
 from .learning_service import (
     alert_payload,
     course_learning_progress,
@@ -84,12 +100,15 @@ from .phase2_service import (
 from .models import (
     Assessment,
     AssessmentItem,
+    AssessmentRecordingChunk,
+    AssessmentTask,
     AuditLog,
     AuthSession,
     Course,
     CourseLecturer,
     CourseMilestone,
     Document,
+    FeatureSetting,
     Institution,
     LearningAlert,
     MarkAuditLog,
@@ -102,6 +121,7 @@ from .models import (
     Question,
     RubricMark,
     SupervisorMeeting,
+    TaskFeatureActivation,
     User,
     VersionAnalysis,
     WebcamSnapshot,
@@ -117,6 +137,9 @@ from .schemas import (
     AssuranceDecisionRequest,
     AssessmentHeartbeatRequest,
     AssessmentInterruptRequest,
+    AssessmentTerminateRequest,
+    AssessmentTaskCreateRequest,
+    AssessmentTaskUpdateRequest,
     ChangePasswordRequest,
     CourseCollaboratorRequest,
     CourseCreateRequest,
@@ -124,6 +147,8 @@ from .schemas import (
     CourseRubricRequest,
     CourseSettingsRequest,
     FocusEventRequest,
+    FeatureSettingUpdateRequest,
+    GeneratedQuestionBank,
     LearningAlertActionRequest,
     InterruptionNoteRequest,
     MonitoringEventRequest,
@@ -139,6 +164,8 @@ from .schemas import (
     SupervisorMeetingRequest,
     SelfServicePasswordResetRequest,
     StartAssessmentRequest,
+    StartStandaloneExamRequest,
+    TaskFeatureUpdateRequest,
     UserApprovalRequest,
     UserSuspensionRequest,
 )
@@ -173,6 +200,7 @@ def aware(value: datetime | None) -> datetime | None:
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
+        ensure_feature_settings(db)
         interrupted = db.scalars(
             select(Document).where(Document.status.in_(["queued", "generating"]))
         ).all()
@@ -195,7 +223,7 @@ async def lifespan(_: FastAPI):
 mimetypes.add_type("text/javascript", ".mjs")
 mimetypes.add_type("application/wasm", ".wasm")
 
-app = FastAPI(title="Kanokware", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="Kanokware", version="1.2.0", lifespan=lifespan)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 REPOSITORY_MONITORING_ASSET_DIR = STATIC_DIR / "vendor" / "mediapipe-tasks-vision"
 RUNTIME_MONITORING_ASSET_DIR = Path(
@@ -230,7 +258,9 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "same-origin"
-    response.headers["Permissions-Policy"] = "camera=(self), microphone=(), geolocation=()"
+    response.headers["Permissions-Policy"] = (
+        "camera=(self), microphone=(self), display-capture=(self), geolocation=()"
+    )
     if request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
     elif request.url.path.startswith("/monitoring-assets/"):
@@ -568,6 +598,94 @@ def platform_verify() -> dict[str, bool]:
     return {"authenticated": True}
 
 
+@app.get("/api/platform/features", dependencies=[Depends(require_admin)])
+def platform_features(db: Session = Depends(get_db)) -> dict[str, object]:
+    return {
+        "basic_features": [
+            "Course enrolment and task selection",
+            "Document upload and extraction",
+            "Understanding justification",
+            "AI-use declaration",
+            "Document-grounded assessment",
+            "Basic result and PDF report",
+        ],
+        "optional_features": feature_catalog_payload(db),
+    }
+
+
+@app.patch(
+    "/api/platform/features/{feature_key}",
+    dependencies=[Depends(require_admin)],
+)
+def platform_update_feature(
+    feature_key: str,
+    payload: FeatureSettingUpdateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    item = update_feature_setting(db, feature_key, payload.activation_mode)
+    audit(
+        db,
+        request,
+        "platform_feature_policy_updated",
+        resource_type="feature_setting",
+        resource_id=feature_key,
+        detail={"activation_mode": item.activation_mode},
+    )
+    db.commit()
+    return {"feature_key": feature_key, "activation_mode": item.activation_mode}
+
+
+@app.get("/api/platform/assessment-tasks", dependencies=[Depends(require_admin)])
+def platform_assessment_tasks(
+    course_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    statement = select(AssessmentTask).options(
+        selectinload(AssessmentTask.feature_activations)
+    ).order_by(AssessmentTask.created_at.desc())
+    if course_id:
+        statement = statement.where(AssessmentTask.course_id == course_id)
+    tasks = db.scalars(statement).all()
+    return {"tasks": [_task_payload(db, task) for task in tasks]}
+
+
+@app.patch(
+    "/api/platform/assessment-tasks/{task_id}/features",
+    dependencies=[Depends(require_admin)],
+)
+def platform_update_task_features(
+    task_id: str,
+    payload: TaskFeatureUpdateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    task = db.scalar(
+        select(AssessmentTask)
+        .options(selectinload(AssessmentTask.feature_activations))
+        .where(AssessmentTask.id == task_id)
+    )
+    if not task:
+        raise HTTPException(status_code=404, detail="Assessment task not found.")
+    set_task_features(
+        db,
+        task,
+        payload.features,
+        actor_role="system_admin",
+        actor_user_id=None,
+    )
+    audit(
+        db,
+        request,
+        "task_features_updated_by_system_admin",
+        resource_type="assessment_task",
+        resource_id=task.id,
+        detail={"features": payload.features},
+    )
+    db.commit()
+    return {"task": _task_payload(db, task)}
+
+
 @app.get("/api/platform/users", dependencies=[Depends(require_admin)])
 def platform_users(db: Session = Depends(get_db)) -> dict[str, object]:
     users = db.scalars(
@@ -839,6 +957,7 @@ def _course_payload(db: Session, course: Course, current_user: User | None = Non
         "enrollment_code": course.enrollment_code,
         "status": course.status,
         "assessment_question_count": int(course.assessment_question_count or 20),
+        "max_attempts": int(course.max_attempts or 1),
         "checkpoint_question_count": int(course.checkpoint_question_count or 3),
         "milestones_enabled": bool(course.milestones_enabled),
         "version_history_enabled": bool(course.version_history_enabled),
@@ -846,9 +965,15 @@ def _course_payload(db: Session, course: Course, current_user: User | None = Non
         "ai_declaration_required": bool(course.ai_declaration_required),
         "ai_policy": ai_policy_payload(course),
         "live_exam_monitoring_enabled": bool(course.live_exam_monitoring_enabled),
+        "webcam_monitoring_enabled": bool(settings.webcam_required),
+        "secure_browser_enforcement": False,
         "live_exam_title": course.live_exam_title,
         "live_exam_instructions": course.live_exam_instructions,
         **course_phase2_settings(course),
+        "assessment_tasks": [
+            _task_payload(db, task)
+            for task in course.assessment_tasks
+        ],
         "milestones": [
             {
                 "id": milestone.id,
@@ -868,6 +993,64 @@ def _course_payload(db: Session, course: Course, current_user: User | None = Non
             for name, email, access in lecturers
         ],
     }
+
+
+def _exam_source_for_task(db: Session, task_id: str) -> Document | None:
+    return db.scalar(
+        select(Document)
+        .where(Document.task_id == task_id, Document.submission_stage == "exam_source")
+        .order_by(Document.created_at.desc())
+        .limit(1)
+    )
+
+
+def _task_payload(db: Session, task: AssessmentTask) -> dict[str, object]:
+    payload = task_payload(db, task)
+    source = _exam_source_for_task(db, task.id) if task.mode == "standalone_exam" else None
+    payload["exam_source"] = (
+        {
+            "document_id": source.id,
+            "title": source.title,
+            "status": source.status,
+            "question_count": db.scalar(
+                select(func.count(Question.id)).where(Question.document_id == source.id)
+            ) or 0,
+        }
+        if source
+        else None
+    )
+    payload["ready"] = bool(source and source.status == "ready") if task.mode == "standalone_exam" else True
+    return payload
+
+
+def _course_has_feature(db: Session, course: Course, feature_key: str) -> bool:
+    """True when a legacy course or at least one active task has the feature."""
+    tasks = db.scalars(
+        select(AssessmentTask)
+        .options(selectinload(AssessmentTask.feature_activations))
+        .where(AssessmentTask.course_id == course.id, AssessmentTask.status == "active")
+    ).all()
+    if tasks:
+        return any(effective_task_features(db, task).get(feature_key, False) for task in tasks)
+    return bool(legacy_course_features(course).get(feature_key, False))
+
+
+def _assessment_phase2_settings(assessment: Assessment, course: Course | None) -> dict[str, object]:
+    payload = course_phase2_settings(course)
+    enabled = assessment_features(assessment, course)
+    payload.update(
+        {
+            "oral_defence_enabled": enabled.get("oral_defence", False),
+            "practical_tasks_enabled": enabled.get("practical_tasks", False),
+            "supervisor_meetings_enabled": enabled.get("supervisor_meetings", False),
+            "cross_version_analysis_enabled": enabled.get("cross_version_analysis", False),
+            "random_moderation_enabled": enabled.get("random_moderation", False),
+            "marker_anomaly_detection_enabled": enabled.get("marker_anomaly_detection", False),
+            "evidence_profile_enabled": enabled.get("evidence_profile", False),
+            "webcam_monitoring_enabled": enabled.get("webcam_monitoring", False),
+        }
+    )
+    return payload
 
 
 @app.get("/api/lecturer/courses")
@@ -896,6 +1079,7 @@ def create_course(
         semester=payload.semester.strip(),
         enrollment_code=generate_enrollment_code(db),
         assessment_question_count=payload.assessment_question_count,
+        max_attempts=payload.max_attempts,
         checkpoint_question_count=payload.checkpoint_question_count,
         milestones_enabled=payload.milestones_enabled,
         version_history_enabled=payload.version_history_enabled,
@@ -1005,6 +1189,9 @@ def update_course_settings(
     if payload.assessment_question_count is not None:
         course.assessment_question_count = payload.assessment_question_count
         changes["assessment_question_count"] = payload.assessment_question_count
+    if payload.max_attempts is not None:
+        course.max_attempts = payload.max_attempts
+        changes["max_attempts"] = payload.max_attempts
     if payload.checkpoint_question_count is not None:
         course.checkpoint_question_count = payload.checkpoint_question_count
         changes["checkpoint_question_count"] = payload.checkpoint_question_count
@@ -1074,6 +1261,287 @@ def _require_grading_access(db: Session, user: User, course_id: str) -> Course:
     if access not in {"owner", "co_lecturer"}:
         raise HTTPException(status_code=403, detail="This account has view-only access to the course.")
     return course
+
+
+@app.get("/api/lecturer/courses/{course_id}/tasks")
+def lecturer_assessment_tasks(
+    course_id: str,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    course = require_course_access(db, user, course_id)
+    tasks = db.scalars(
+        select(AssessmentTask)
+        .options(selectinload(AssessmentTask.feature_activations))
+        .where(AssessmentTask.course_id == course.id)
+        .order_by(AssessmentTask.created_at.desc())
+    ).all()
+    return {
+        "course_id": course.id,
+        "basic_features": [
+            "Document upload",
+            "Understanding justification",
+            "AI-use declaration",
+            "Document-grounded assessment",
+            "Basic result and PDF report",
+        ],
+        "optional_feature_catalog": feature_catalog_payload(db),
+        "tasks": [_task_payload(db, task) for task in tasks],
+    }
+
+
+@app.post("/api/lecturer/courses/{course_id}/tasks", status_code=201)
+def create_assessment_task(
+    course_id: str,
+    payload: AssessmentTaskCreateRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    course = _require_grading_access(db, user, course_id)
+    task = AssessmentTask(
+        course_id=course.id,
+        title=payload.title.strip(),
+        instructions=(payload.instructions or "").strip() or None,
+        mode=payload.mode,
+        assessment_question_count=payload.assessment_question_count,
+        max_attempts=payload.max_attempts,
+        created_by=user.id,
+        status="active",
+    )
+    db.add(task)
+    db.flush()
+    if payload.features:
+        set_task_features(
+            db,
+            task,
+            payload.features,
+            actor_role="lecturer",
+            actor_user_id=user.id,
+        )
+    audit(
+        db,
+        request,
+        "assessment_task_created",
+        user=user,
+        resource_type="assessment_task",
+        resource_id=task.id,
+        detail={"course_id": course.id, "features": payload.features},
+    )
+    db.commit()
+    db.refresh(task)
+    return {"task": _task_payload(db, task)}
+
+
+@app.patch("/api/lecturer/courses/{course_id}/tasks/{task_id}")
+def update_assessment_task(
+    course_id: str,
+    task_id: str,
+    payload: AssessmentTaskUpdateRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    course = _require_grading_access(db, user, course_id)
+    task = db.scalar(
+        select(AssessmentTask)
+        .options(selectinload(AssessmentTask.feature_activations))
+        .where(AssessmentTask.id == task_id, AssessmentTask.course_id == course.id)
+    )
+    if not task:
+        raise HTTPException(status_code=404, detail="Assessment task not found.")
+    if payload.title is not None:
+        task.title = payload.title.strip()
+    if payload.instructions is not None:
+        task.instructions = payload.instructions.strip() or None
+    if payload.mode is not None:
+        task.mode = payload.mode
+    if payload.assessment_question_count is not None:
+        task.assessment_question_count = payload.assessment_question_count
+    if payload.max_attempts is not None:
+        task.max_attempts = payload.max_attempts
+    if payload.status is not None:
+        task.status = payload.status
+    if payload.features is not None:
+        set_task_features(
+            db,
+            task,
+            payload.features,
+            actor_role="lecturer",
+            actor_user_id=user.id,
+        )
+    audit(
+        db,
+        request,
+        "assessment_task_updated",
+        user=user,
+        resource_type="assessment_task",
+        resource_id=task.id,
+        detail=payload.model_dump(exclude_none=True),
+    )
+    db.commit()
+    db.refresh(task)
+    return {"task": _task_payload(db, task)}
+
+
+@app.post("/api/lecturer/courses/{course_id}/tasks/{task_id}/exam-source", status_code=202)
+async def upload_exam_source(
+    course_id: str,
+    task_id: str,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    title: str = Form(..., min_length=3, max_length=300),
+    file: UploadFile = File(...),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    course = _require_grading_access(db, user, course_id)
+    task = db.scalar(
+        select(AssessmentTask)
+        .options(selectinload(AssessmentTask.feature_activations))
+        .where(AssessmentTask.id == task_id, AssessmentTask.course_id == course.id)
+    )
+    if not task:
+        raise HTTPException(status_code=404, detail="Assessment task not found.")
+    if task.mode != "standalone_exam":
+        raise HTTPException(status_code=409, detail="Change the task mode to standalone examination first.")
+    _, extracted_text, filename, digest = await read_and_extract(file)
+    source = Document(
+        student_name="Examination source",
+        student_id=f"EXAM-{task.id[:8]}",
+        title=title.strip(),
+        original_filename=filename,
+        file_hash=digest,
+        extracted_text=extracted_text,
+        word_count=len(extracted_text.split()),
+        status="queued",
+        generation_mode="pending",
+        institution_id=course.institution_id,
+        course_id=course.id,
+        task_id=task.id,
+        features_json=snapshot_task_features(db, task),
+        submitted_to_lecturer_id=user.id,
+        submission_stage="exam_source",
+        assessment_question_count_override=task.assessment_question_count,
+        understanding_summary="Lecturer-provided examination source material.",
+        key_decisions="Questions must remain grounded in the supplied source material.",
+        main_contribution="Standalone examination question source.",
+        stated_limitation="This source supports the configured task only.",
+        ai_use_level="none",
+    )
+    db.add(source)
+    db.flush()
+    audit(
+        db,
+        request,
+        "standalone_exam_source_uploaded",
+        user=user,
+        resource_type="document",
+        resource_id=source.id,
+        detail={"course_id": course.id, "task_id": task.id},
+    )
+    db.commit()
+    background_tasks.add_task(_generate_questions_job, source.id)
+    return {
+        "document_id": source.id,
+        "task_id": task.id,
+        "status": source.status,
+        "message": "The examination source was accepted and its grounded question bank is being prepared.",
+    }
+
+
+@app.post("/api/lecturer/courses/{course_id}/tasks/{task_id}/question-bank")
+async def upload_standalone_question_bank(
+    course_id: str,
+    task_id: str,
+    request: Request,
+    title: str = Form(..., min_length=3, max_length=300),
+    file: UploadFile = File(...),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    course = _require_grading_access(db, user, course_id)
+    task = db.scalar(
+        select(AssessmentTask)
+        .options(selectinload(AssessmentTask.feature_activations))
+        .where(AssessmentTask.id == task_id, AssessmentTask.course_id == course.id)
+    )
+    if not task:
+        raise HTTPException(status_code=404, detail="Assessment task not found.")
+    if task.mode != "standalone_exam":
+        raise HTTPException(status_code=409, detail="Question-bank upload is available only for standalone examinations.")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="The question-bank file is empty.")
+    if len(raw) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="The question-bank JSON file exceeds 2 MB.")
+    try:
+        bank = GeneratedQuestionBank.model_validate_json(raw)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Invalid question bank. Supply JSON with validated questions, four options, "
+                "a correct_option_index, difficulty, category, source reference and explanation."
+            ),
+        ) from exc
+    if len(bank.questions) != task.assessment_question_count:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"This task is configured for {task.assessment_question_count} questions; "
+                f"the uploaded bank contains {len(bank.questions)}."
+            ),
+        )
+
+    retained_text = "\n\n".join(
+        f"{item.source_location}: {item.source_quote}" for item in bank.questions
+    )
+    # A new source record preserves prior candidates' question-level evidence.
+    source = Document(
+            student_name="Lecturer-authored examination",
+            student_id=f"EXAM-{task.id[:8]}",
+            title=title.strip(),
+            original_filename=file.filename or "question-bank.json",
+            file_hash=hashlib.sha256(raw).hexdigest(),
+            extracted_text=retained_text,
+            word_count=len(retained_text.split()),
+            status="ready",
+            generation_mode="lecturer",
+            institution_id=course.institution_id,
+            course_id=course.id,
+            task_id=task.id,
+            features_json=snapshot_task_features(db, task),
+            submitted_to_lecturer_id=user.id,
+            submission_stage="exam_source",
+            assessment_question_count_override=task.assessment_question_count,
+            understanding_summary="Lecturer-authored standalone examination question bank.",
+            key_decisions="The lecturer supplied and approved all questions and answers.",
+            main_contribution="Reusable standalone examination bank.",
+            stated_limitation="Question validity remains the lecturer's academic responsibility.",
+            ai_use_level="none",
+    )
+    db.add(source)
+    db.flush()
+    for generated in bank.questions:
+        db.add(Question(document_id=source.id, **question_to_record(generated)))
+    audit(
+        db,
+        request,
+        "standalone_question_bank_uploaded",
+        user=user,
+        resource_type="document",
+        resource_id=source.id,
+        detail={"course_id": course.id, "task_id": task.id, "question_count": len(bank.questions)},
+    )
+    db.commit()
+    return {
+        "document_id": source.id,
+        "task_id": task.id,
+        "status": "ready",
+        "generation_mode": "lecturer",
+        "question_count": len(bank.questions),
+    }
 
 
 @app.post("/api/lecturer/courses/{course_id}/milestones", status_code=201)
@@ -1169,10 +1637,10 @@ def live_exam_monitor(
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     course = require_course_access(db, user, course_id)
-    if not course.live_exam_monitoring_enabled:
+    if not _course_has_feature(db, course, "live_exam_monitoring"):
         raise HTTPException(
             status_code=409,
-            detail="Live examination monitoring is not enabled for this course.",
+            detail="Live examination monitoring is not enabled for an active task in this course.",
         )
     cutoff = utcnow() - timedelta(hours=12)
     assessments = db.scalars(
@@ -1190,6 +1658,8 @@ def live_exam_monitor(
     now = utcnow()
     rows: list[dict[str, object]] = []
     for assessment in assessments:
+        if not assessment_feature_enabled(assessment, "live_exam_monitoring", course):
+            continue
         refresh_interruption_state(db, assessment)
         last_seen = aware(assessment.last_seen_at)
         seconds_since_last_seen = (
@@ -1205,8 +1675,8 @@ def live_exam_monitor(
         )
         rows.append({
             "assessment_id": assessment.id,
-            "student_name": assessment.document.student_name,
-            "student_id": assessment.document.student_id,
+            "student_name": assessment.candidate_name or assessment.document.student_name,
+            "student_id": assessment.candidate_id or assessment.document.student_id,
             "document_title": assessment.document.title,
             "status": assessment.status,
             "connected": connected,
@@ -1261,12 +1731,19 @@ def resolve_course_code(
         .limit(1)
     )
     institution = db.get(Institution, course.institution_id)
+    tasks = db.scalars(
+        select(AssessmentTask)
+        .options(selectinload(AssessmentTask.feature_activations))
+        .where(AssessmentTask.course_id == course.id, AssessmentTask.status == "active")
+        .order_by(AssessmentTask.created_at)
+    ).all()
     return {
         "course_id": course.id,
         "course": f"{course.course_code} · {course.title}",
         "institution": institution.name if institution else None,
         "lecturer": owner,
         "assessment_question_count": int(course.assessment_question_count or 20),
+        "max_attempts": int(course.max_attempts or 1),
         "checkpoint_question_count": int(course.checkpoint_question_count or 3),
         "milestones_enabled": bool(course.milestones_enabled),
         "version_history_enabled": bool(course.version_history_enabled),
@@ -1276,6 +1753,22 @@ def resolve_course_code(
         "live_exam_monitoring_enabled": bool(course.live_exam_monitoring_enabled),
         "live_exam_title": course.live_exam_title,
         "live_exam_instructions": course.live_exam_instructions,
+        "webcam_monitoring_enabled": bool(settings.webcam_required),
+        "secure_browser_enforcement": False,
+        "task_selection_required": len(tasks) > 1,
+        "assessment_tasks": [
+            {
+                "id": task.id,
+                "title": task.title,
+                "instructions": task.instructions,
+                "mode": task.mode,
+                "assessment_question_count": int(task.assessment_question_count or 20),
+                "max_attempts": int(task.max_attempts or 1),
+                "effective_features": effective_task_features(db, task),
+                "ready": _task_payload(db, task)["ready"],
+            }
+            for task in tasks
+        ],
         "milestones": [
             {
                 "id": milestone.id,
@@ -1318,7 +1811,17 @@ def _generate_questions_job(document_id: str) -> None:
         document.status = "generating"
         document.processing_error = None
         db.commit()
-        bank, mode = generate_question_bank(document.extracted_text, document.title)
+        course = db.get(Course, document.course_id) if document.course_id else None
+        question_target = int(
+            document.assessment_question_count_override
+            or (course.assessment_question_count if course else 20)
+            or 20
+        )
+        bank, mode = generate_question_bank(
+            document.extracted_text,
+            document.title,
+            question_count=max(1, question_target),
+        )
         db.execute(delete(Question).where(Question.document_id == document.id))
         for generated in bank.questions:
             db.add(Question(document_id=document.id, **question_to_record(generated)))
@@ -1347,6 +1850,7 @@ async def upload_document(
     student_id: str = Form(..., min_length=2, max_length=100),
     title: str = Form(..., min_length=3, max_length=300),
     course_code: str = Form(..., min_length=6, max_length=24),
+    task_id: str | None = Form(default=None),
     submission_stage: str = Form(default="final", max_length=30),
     milestone_id: str | None = Form(default=None),
     understanding_summary: str = Form(..., min_length=60, max_length=4000),
@@ -1369,13 +1873,41 @@ async def upload_document(
     if not course:
         raise HTTPException(status_code=404, detail="The course enrolment code is invalid or inactive.")
 
+    active_tasks = db.scalars(
+        select(AssessmentTask)
+        .options(selectinload(AssessmentTask.feature_activations))
+        .where(AssessmentTask.course_id == course.id, AssessmentTask.status == "active")
+        .order_by(AssessmentTask.created_at)
+    ).all()
+    task: AssessmentTask | None = None
+    if task_id:
+        task = next((item for item in active_tasks if item.id == task_id), None)
+        if not task:
+            raise HTTPException(
+                status_code=404,
+                detail="The selected assessment task is not active for this course.",
+            )
+    elif len(active_tasks) == 1:
+        task = active_tasks[0]
+    elif len(active_tasks) > 1:
+        raise HTTPException(status_code=422, detail="Select the assessment task for this submission.")
+    if task and task.mode == "standalone_exam":
+        raise HTTPException(
+            status_code=409,
+            detail="This is a standalone examination task. Start the examination instead of uploading student work.",
+        )
+
+    captured_features = (
+        effective_task_features(db, task) if task else legacy_course_features(course)
+    )
+
     stage = submission_stage.strip().lower()
     if stage not in {"milestone", "final"}:
         raise HTTPException(status_code=422, detail="Submission stage must be milestone or final.")
     milestone: CourseMilestone | None = None
     if stage == "milestone":
-        if not course.milestones_enabled:
-            raise HTTPException(status_code=409, detail="This course is configured for final submission only.")
+        if not captured_features.get("learning_milestones", False):
+            raise HTTPException(status_code=409, detail="This task is configured for final submission only.")
         if not milestone_id:
             raise HTTPException(status_code=422, detail="Select the learning milestone for this submission.")
         milestone = db.get(CourseMilestone, milestone_id)
@@ -1400,7 +1932,7 @@ async def upload_document(
 
     previous: Document | None = None
     version_number = 1
-    if course.version_history_enabled or course.cross_version_analysis_enabled:
+    if captured_features.get("version_history") or captured_features.get("cross_version_analysis"):
         previous = db.scalar(
             select(Document)
             .where(
@@ -1417,7 +1949,7 @@ async def upload_document(
     question_override = (
         int(milestone.checkpoint_question_count or course.checkpoint_question_count or 3)
         if milestone
-        else int(course.assessment_question_count or 20)
+        else int(task.assessment_question_count if task else course.assessment_question_count or 20)
     )
     document = Document(
         student_name=student_name.strip(),
@@ -1431,6 +1963,8 @@ async def upload_document(
         generation_mode="pending",
         institution_id=course.institution_id,
         course_id=course.id,
+        task_id=task.id if task else None,
+        features_json=json.dumps(captured_features, sort_keys=True),
         submitted_to_lecturer_id=owner_id,
         milestone_id=milestone.id if milestone else None,
         previous_version_id=previous.id if previous else None,
@@ -1447,7 +1981,7 @@ async def upload_document(
     db.add(document)
     db.flush()
     refresh_document_alerts(db, document)
-    if course.cross_version_analysis_enabled and document.previous_version_id:
+    if captured_features.get("cross_version_analysis") and document.previous_version_id:
         ensure_version_analysis(db, document)
     audit(
         db,
@@ -1457,6 +1991,7 @@ async def upload_document(
         resource_id=document.id,
         detail={
             "course_id": course.id,
+            "task_id": task.id if task else None,
             "student_id": student_id.strip(),
             "submission_stage": stage,
             "milestone_id": milestone.id if milestone else None,
@@ -1472,6 +2007,7 @@ async def upload_document(
         "status": document.status,
         "word_count": document.word_count,
         "course": f"{course.course_code} · {course.title}",
+        "task": task.title if task else None,
         "submission_stage": stage,
         "milestone": milestone.title if milestone else None,
         "version_number": version_number,
@@ -1545,22 +2081,104 @@ def begin_assessment(payload: StartAssessmentRequest, db: Session = Depends(get_
     assessment, token = start_assessment(
         db, payload.document_id, payload.client_instance_id
     )
+    active_features = assessment_features(assessment)
+    monitoring_enabled = bool(active_features.get("webcam_monitoring", False))
+    secure_browser = bool(active_features.get("secure_browser_enforcement", False))
+    instructions = (
+        f"Questions appear one at a time. Each question allows {settings.question_time_seconds} seconds. "
+        "You cannot return to an earlier question."
+    )
+    if monitoring_enabled:
+        instructions += (
+            " Camera monitoring and connection continuity checks remain active during the assessment."
+            " Interrupted sessions resume only after camera reverification."
+        )
+    if secure_browser:
+        instructions += " Fullscreen is required; hiding, minimizing or leaving the examination page ends and locks the attempt."
     return {
         "assessment_id": assessment.id,
         "session_token": token,
         "question_count": int(assessment.question_count or len(assessment.items) or 20),
         "pass_threshold": settings.pass_threshold,
-        "webcam_required": settings.webcam_required,
-        "monitoring_enabled": settings.webcam_required,
+        "webcam_required": monitoring_enabled,
+        "monitoring_enabled": monitoring_enabled,
+        "secure_browser_enforcement": secure_browser,
+        "fullscreen_required": secure_browser,
+        "frame_embedding_allowed": False,
+        "active_features": active_features,
         "heartbeat_interval_seconds": settings.heartbeat_interval_seconds,
         "resume_window_minutes": settings.assessment_resume_window_minutes,
         "max_interruptions": settings.max_assessment_interruptions,
         "max_offline_seconds": settings.max_assessment_offline_seconds,
-        "instructions": (
-            f"Questions appear one at a time. Each question allows {settings.question_time_seconds} seconds. "
-            "You cannot return to an earlier question. Camera monitoring and connection continuity checks "
-            "remain active during the assessment. Interrupted sessions resume only after camera reverification."
-        ),
+        "instructions": instructions,
+    }
+
+
+@app.post("/api/examinations/start")
+def begin_standalone_examination(
+    payload: StartStandaloneExamRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    course = db.scalar(
+        select(Course).where(
+            func.upper(Course.enrollment_code) == payload.course_code.strip().upper(),
+            Course.status == "active",
+        )
+    )
+    if not course:
+        raise HTTPException(status_code=404, detail="The course enrolment code is invalid or inactive.")
+    task = db.scalar(
+        select(AssessmentTask)
+        .options(selectinload(AssessmentTask.feature_activations))
+        .where(
+            AssessmentTask.id == payload.task_id,
+            AssessmentTask.course_id == course.id,
+            AssessmentTask.status == "active",
+            AssessmentTask.mode == "standalone_exam",
+        )
+    )
+    if not task:
+        raise HTTPException(status_code=404, detail="The standalone examination task is unavailable.")
+    source = _exam_source_for_task(db, task.id)
+    if not source or source.status != "ready":
+        raise HTTPException(status_code=409, detail="The examination question bank is not ready.")
+    source.features_json = snapshot_task_features(db, task)
+    db.commit()
+    assessment, token = start_assessment(
+        db,
+        source.id,
+        payload.client_instance_id,
+        candidate_name=payload.candidate_name,
+        candidate_id=payload.candidate_id,
+        standalone=True,
+    )
+    active_features = assessment_features(assessment, course)
+    monitoring_enabled = bool(active_features.get("webcam_monitoring", False))
+    secure_browser = bool(active_features.get("secure_browser_enforcement", False))
+    instructions = (
+        f"{task.instructions + ' ' if task.instructions else ''}Questions appear one at a time and each "
+        f"allows {settings.question_time_seconds} seconds. You cannot return to an earlier question."
+    )
+    if secure_browser:
+        instructions += " Fullscreen is required; hiding, minimizing or leaving the examination page ends and locks the attempt."
+    if monitoring_enabled:
+        instructions += " Camera monitoring and connection continuity checks are active."
+    return {
+        "assessment_id": assessment.id,
+        "session_token": token,
+        "question_count": int(assessment.question_count or len(assessment.items) or 20),
+        "pass_threshold": settings.pass_threshold,
+        "webcam_required": monitoring_enabled,
+        "monitoring_enabled": monitoring_enabled,
+        "secure_browser_enforcement": secure_browser,
+        "fullscreen_required": secure_browser,
+        "frame_embedding_allowed": False,
+        "active_features": active_features,
+        "heartbeat_interval_seconds": settings.heartbeat_interval_seconds,
+        "resume_window_minutes": settings.assessment_resume_window_minutes,
+        "max_interruptions": settings.max_assessment_interruptions,
+        "max_offline_seconds": settings.max_assessment_offline_seconds,
+        "instructions": instructions,
     }
 
 
@@ -1592,6 +2210,20 @@ def assessment_interrupt(
     if assessment.client_instance_id and assessment.client_instance_id != payload.client_instance_id:
         raise HTTPException(status_code=403, detail="The assessment browser identity does not match.")
     interrupt_assessment(db, assessment, reason=payload.reason)
+    return assessment_state_payload(assessment)
+
+
+@app.post("/api/assessments/{assessment_id}/terminate")
+def assessment_terminate(
+    assessment_id: str,
+    payload: AssessmentTerminateRequest,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    assessment = get_assessment(db, assessment_id, bearer_token(authorization))
+    if assessment.client_instance_id and assessment.client_instance_id != payload.client_instance_id:
+        raise HTTPException(status_code=403, detail="The assessment browser identity does not match.")
+    terminate_secure_assessment(db, assessment, reason=payload.reason)
     return assessment_state_payload(assessment)
 
 
@@ -1648,6 +2280,57 @@ async def assessment_snapshot(
     return {"captured": True, "already_captured": False, "captured_at": snapshot.captured_at.isoformat()}
 
 
+@app.post("/api/assessments/{assessment_id}/recording-chunk", status_code=201)
+async def assessment_recording_chunk(
+    assessment_id: str,
+    recording_type: str = Form(..., pattern="^(screen|environment_audio)$"),
+    sequence: int = Form(..., ge=0, le=10000),
+    duration_ms: int = Form(default=0, ge=0, le=120000),
+    media: UploadFile = File(...),
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    assessment = get_assessment(db, assessment_id, bearer_token(authorization))
+    feature_key = (
+        "screen_activity_recording" if recording_type == "screen" else "environment_audio_recording"
+    )
+    if not assessment_feature_enabled(assessment, feature_key):
+        raise HTTPException(status_code=409, detail="This recording type is not enabled for the task.")
+    existing = db.scalar(
+        select(AssessmentRecordingChunk).where(
+            AssessmentRecordingChunk.assessment_id == assessment.id,
+            AssessmentRecordingChunk.recording_type == recording_type,
+            AssessmentRecordingChunk.sequence == sequence,
+        )
+    )
+    if existing:
+        return {"recorded": True, "chunk_id": existing.id, "duplicate": True}
+    content_type = (media.content_type or "").split(";", 1)[0].lower()
+    allowed = {
+        "screen": {"video/webm", "video/mp4"},
+        "environment_audio": {"audio/webm", "audio/ogg", "audio/mp4", "video/webm"},
+    }
+    if content_type not in allowed[recording_type]:
+        raise HTTPException(status_code=415, detail="Unsupported recording format.")
+    payload = await media.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="The recording chunk is empty.")
+    if len(payload) > 12 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="A recording chunk cannot exceed 12 MB.")
+    chunk = AssessmentRecordingChunk(
+        assessment_id=assessment.id,
+        recording_type=recording_type,
+        sequence=sequence,
+        mime_type=content_type,
+        data=payload,
+        byte_count=len(payload),
+        duration_ms=duration_ms,
+    )
+    db.add(chunk)
+    db.commit()
+    return {"recorded": True, "chunk_id": chunk.id, "duplicate": False}
+
+
 @app.post("/api/assessments/{assessment_id}/focus-event")
 def focus_event(
     assessment_id: str,
@@ -1656,6 +2339,8 @@ def focus_event(
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     assessment = get_assessment(db, assessment_id, bearer_token(authorization))
+    if not assessment_feature_enabled(assessment, "webcam_monitoring"):
+        return {"recorded": False, "count": assessment.focus_loss_count}
     if assessment.status == "in_progress":
         assessment.focus_loss_count += 1
         db.add(
@@ -1682,6 +2367,8 @@ def assessment_monitoring_event(
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     assessment = get_assessment(db, assessment_id, bearer_token(authorization))
+    if not assessment_feature_enabled(assessment, "webcam_monitoring"):
+        return {"recorded": False, "reason": "monitoring_disabled", "monitoring_event_count": 0}
     if assessment.status != "in_progress":
         return {
             "recorded": False,
@@ -1914,8 +2601,8 @@ def _assessment_detail(db: Session, assessment: Assessment) -> dict[str, object]
     summary = result_payload(assessment) if assessment.status == "completed" else {
         "assessment_id": assessment.id,
         "status": assessment.status,
-        "student_name": assessment.document.student_name,
-        "student_id": assessment.document.student_id,
+        "student_name": assessment.candidate_name or assessment.document.student_name,
+        "student_id": assessment.candidate_id or assessment.document.student_id,
         "document_title": assessment.document.title,
     }
     document = assessment.document
@@ -1979,6 +2666,14 @@ def _assessment_detail(db: Session, assessment: Assessment) -> dict[str, object]
     ).all()
     version_analysis = db.scalar(select(VersionAnalysis).where(VersionAnalysis.document_id == document.id))
     moderation = db.scalar(select(ModerationRecord).where(ModerationRecord.assessment_id == assessment.id))
+    recording_chunks = db.scalars(
+        select(AssessmentRecordingChunk)
+        .where(AssessmentRecordingChunk.assessment_id == assessment.id)
+        .order_by(
+            AssessmentRecordingChunk.recording_type,
+            AssessmentRecordingChunk.sequence,
+        )
+    ).all()
     supervisor_meetings = db.scalars(
         select(SupervisorMeeting)
         .where(
@@ -2023,18 +2718,36 @@ def _assessment_detail(db: Session, assessment: Assessment) -> dict[str, object]
         ],
         "version_comparison": version_comparison(document, previous),
         "learning_alerts": [alert_payload(alert) for alert in alerts],
-        "evidence_profile": assessment_evidence_profile(
-            assessment,
-            course,
-            oral_defence=oral_defence,
-            practical_tasks=list(practical_tasks),
+        "evidence_profile": (
+            assessment_evidence_profile(
+                assessment,
+                course,
+                oral_defence=oral_defence,
+                practical_tasks=list(practical_tasks),
+            )
+            if assessment_feature_enabled(assessment, "evidence_profile", course)
+            else None
         ),
-        "phase2_settings": course_phase2_settings(course),
+        "active_features": assessment_features(assessment, course),
+        "phase2_settings": _assessment_phase2_settings(assessment, course),
         "oral_defence": oral_defence_payload(oral_defence),
         "practical_tasks": [practical_task_payload(task) for task in practical_tasks],
         "supervisor_meetings": [supervisor_meeting_payload(item) for item in supervisor_meetings],
         "cross_version_analysis": version_analysis_payload(version_analysis),
         "moderation": moderation_payload(moderation),
+        "recordings": [
+            {
+                "id": chunk.id,
+                "recording_type": chunk.recording_type,
+                "sequence": chunk.sequence,
+                "mime_type": chunk.mime_type,
+                "byte_count": chunk.byte_count,
+                "duration_ms": chunk.duration_ms,
+                "created_at": chunk.created_at.isoformat() if chunk.created_at else None,
+                "download_url": f"/api/lecturer/recordings/{chunk.id}",
+            }
+            for chunk in recording_chunks
+        ],
         "rubric": rubric,
         "rubric_mark": mark_payload,
         "mark_audit": [
@@ -2066,6 +2779,97 @@ def lecturer_submissions(
     return {"submissions": _submission_rows(db, documents)}
 
 
+@app.get("/api/lecturer/courses/{course_id}/exam-attempts")
+def lecturer_exam_attempts(
+    course_id: str,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    course = require_course_access(db, user, course_id)
+    attempts = db.scalars(
+        select(Assessment)
+        .join(Document, Document.id == Assessment.document_id)
+        .options(selectinload(Assessment.document), selectinload(Assessment.monitoring_events))
+        .where(Document.course_id == course.id, Document.submission_stage == "exam_source")
+        .order_by(Assessment.started_at.desc())
+        .limit(500)
+    ).all()
+    return {
+        "attempts": [
+            {
+                "assessment_id": item.id,
+                "candidate_name": item.candidate_name,
+                "candidate_id": item.candidate_id,
+                "task_id": item.document.task_id,
+                "exam_title": item.document.title,
+                "status": item.status,
+                "score": item.score,
+                "decision": item.decision,
+                "current_position": item.current_position,
+                "question_count": item.question_count,
+                "monitoring_event_count": len(item.monitoring_events or []),
+                "started_at": item.started_at.isoformat() if item.started_at else None,
+                "completed_at": item.completed_at.isoformat() if item.completed_at else None,
+            }
+            for item in attempts
+        ]
+    }
+
+
+@app.delete("/api/lecturer/courses/{course_id}/tasks/{task_id}/attempts")
+def lecturer_reset_candidate_task_attempts(
+    course_id: str,
+    task_id: str,
+    request: Request,
+    candidate_id: str = Query(min_length=1, max_length=100),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    """Clear one candidate's history for a task so they can start afresh."""
+    course = _require_grading_access(db, user, course_id)
+    task = db.scalar(
+        select(AssessmentTask).where(
+            AssessmentTask.id == task_id,
+            AssessmentTask.course_id == course.id,
+        )
+    )
+    if not task:
+        raise HTTPException(status_code=404, detail="Assessment task not found.")
+    normalized_candidate_id = candidate_id.strip().lower()
+    attempts = db.scalars(
+        select(Assessment)
+        .join(Document, Document.id == Assessment.document_id)
+        .where(
+            Document.task_id == task.id,
+            func.lower(Assessment.candidate_id) == normalized_candidate_id,
+        )
+    ).all()
+    deleted_ids = [item.id for item in attempts]
+    for assessment in attempts:
+        db.delete(assessment)
+    audit(
+        db,
+        request,
+        "candidate_task_attempts_reset",
+        user=user,
+        resource_type="assessment_task",
+        resource_id=task.id,
+        detail={
+            "candidate_id": candidate_id.strip(),
+            "deleted_attempts": len(deleted_ids),
+            "assessment_ids": deleted_ids,
+        },
+    )
+    db.commit()
+    return {
+        "reset": True,
+        "candidate_id": candidate_id.strip(),
+        "task_id": task.id,
+        "deleted_attempts": len(deleted_ids),
+        "retake_enabled": True,
+    }
+
+
 @app.get("/api/lecturer/assessments/{assessment_id}")
 def lecturer_assessment_detail(
     assessment_id: str,
@@ -2077,6 +2881,25 @@ def lecturer_assessment_detail(
     audit(db, request, "assessment_reviewed", user=user, resource_type="assessment", resource_id=assessment.id)
     db.commit()
     return _assessment_detail(db, assessment)
+
+
+@app.get("/api/lecturer/recordings/{chunk_id}")
+def lecturer_recording_chunk(
+    chunk_id: str,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> Response:
+    chunk = db.get(AssessmentRecordingChunk, chunk_id)
+    if not chunk:
+        raise HTTPException(status_code=404, detail="Recording chunk not found.")
+    assessment = _assessment_for_lecturer(db, user, chunk.assessment_id)
+    extension = "mp4" if "mp4" in chunk.mime_type else "ogg" if "ogg" in chunk.mime_type else "webm"
+    filename = f"kanokware-{chunk.recording_type}-{assessment.id[:8]}-{chunk.sequence:04d}.{extension}"
+    return Response(
+        content=chunk.data,
+        media_type=chunk.mime_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/api/lecturer/assessments/{assessment_id}/rubric-mark")
@@ -2145,8 +2968,9 @@ def save_rubric_mark(
         new_json=new_json,
         reason=(payload.change_reason or "Initial rubric mark").strip(),
     ))
-    ensure_random_moderation(db, assessment, course, total)
-    if course.marker_anomaly_detection_enabled:
+    if assessment_feature_enabled(assessment, "random_moderation", course):
+        ensure_random_moderation(db, assessment, course, total)
+    if assessment_feature_enabled(assessment, "marker_anomaly_detection", course):
         scan_marker_anomalies(db, course)
     audit(db, request, "rubric_mark_saved", user=user, resource_type="assessment", resource_id=assessment.id, detail={"previous_total": previous_total, "new_total": total})
     db.commit()
@@ -2169,8 +2993,13 @@ def _phase2_assessment_course(
     if not assessment.course_id:
         raise HTTPException(status_code=409, detail="This assessment is not assigned to a course.")
     course = _require_grading_access(db, user, assessment.course_id)
-    if not bool(getattr(course, feature, False)):
-        raise HTTPException(status_code=409, detail="This optional Phase 2 module is not enabled for the course.")
+    feature_key = {
+        "oral_defence_enabled": "oral_defence",
+        "practical_tasks_enabled": "practical_tasks",
+        "random_moderation_enabled": "random_moderation",
+    }.get(feature, feature.removesuffix("_enabled"))
+    if not assessment_feature_enabled(assessment, feature_key, course):
+        raise HTTPException(status_code=409, detail="This optional module is not enabled for this assessment task.")
     return assessment, course
 
 
@@ -2273,6 +3102,9 @@ def record_assurance_decision(
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     assessment = _assessment_for_lecturer(db, user, assessment_id)
+    course = db.get(Course, assessment.course_id) if assessment.course_id else None
+    if not assessment_feature_enabled(assessment, "evidence_profile", course):
+        raise HTTPException(status_code=409, detail="The assessment evidence profile is not enabled for this task.")
     require_document_access(db, user, assessment.document_id, write=True)
     assessment.assurance_decision = payload.decision
     assessment.assurance_decision_note = payload.note.strip()
@@ -2288,7 +3120,6 @@ def record_assurance_decision(
         detail={"decision": payload.decision},
     )
     db.commit()
-    course = db.get(Course, assessment.course_id) if assessment.course_id else None
     oral_defence = db.scalar(
         select(OralDefence).where(OralDefence.assessment_id == assessment.id)
     )
@@ -2315,8 +3146,8 @@ def list_supervisor_meetings(
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     course = require_course_access(db, user, course_id)
-    if not course.supervisor_meetings_enabled:
-        raise HTTPException(status_code=409, detail="Supervisor meeting records are not enabled for this course.")
+    if not _course_has_feature(db, course, "supervisor_meetings"):
+        raise HTTPException(status_code=409, detail="Supervisor meeting records are not enabled for an active task in this course.")
     statement = select(SupervisorMeeting).where(SupervisorMeeting.course_id == course.id)
     if student_id:
         statement = statement.where(func.lower(SupervisorMeeting.student_id) == student_id.strip().lower())
@@ -2333,11 +3164,16 @@ def create_supervisor_meeting(
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     course = _require_grading_access(db, user, course_id)
-    if not course.supervisor_meetings_enabled:
-        raise HTTPException(status_code=409, detail="Supervisor meeting records are not enabled for this course.")
     document = db.get(Document, payload.document_id) if payload.document_id else None
     if document and document.course_id != course.id:
         raise HTTPException(status_code=422, detail="The selected document does not belong to this course.")
+    feature_enabled = (
+        document_feature_enabled(document, "supervisor_meetings", course)
+        if document
+        else _course_has_feature(db, course, "supervisor_meetings")
+    )
+    if not feature_enabled:
+        raise HTTPException(status_code=409, detail="Supervisor meeting records are not enabled for this task.")
     meeting = SupervisorMeeting(
         course_id=course.id,
         document_id=document.id if document else None,
@@ -2384,8 +3220,8 @@ def run_cross_version_analysis(
 ) -> dict[str, object]:
     document = require_document_access(db, user, document_id, write=True)
     course = db.get(Course, document.course_id) if document.course_id else None
-    if not course or not course.cross_version_analysis_enabled:
-        raise HTTPException(status_code=409, detail="Cross-version analysis is not enabled for this course.")
+    if not course or not document_feature_enabled(document, "cross_version_analysis", course):
+        raise HTTPException(status_code=409, detail="Cross-version analysis is not enabled for this task.")
     if not document.previous_version_id:
         raise HTTPException(status_code=409, detail="A previous version is required for cross-version analysis.")
     analysis = ensure_version_analysis(db, document, user.id, refresh=True)
@@ -2401,8 +3237,8 @@ def moderation_queue(
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     course = require_course_access(db, user, course_id)
-    if not course.random_moderation_enabled:
-        raise HTTPException(status_code=409, detail="Random moderation is not enabled for this course.")
+    if not _course_has_feature(db, course, "random_moderation"):
+        raise HTTPException(status_code=409, detail="Random moderation is not enabled for an active task in this course.")
     rows = db.execute(
         select(ModerationRecord, Assessment, Document)
         .join(Assessment, Assessment.id == ModerationRecord.assessment_id)
@@ -2414,8 +3250,8 @@ def moderation_queue(
         {
             **(moderation_payload(record) or {}),
             "assessment_id": assessment.id,
-            "student_name": document.student_name,
-            "student_id": document.student_id,
+            "student_name": assessment.candidate_name or document.student_name,
+            "student_id": assessment.candidate_id or document.student_id,
             "document_title": document.title,
         }
         for record, assessment, document in rows
@@ -2457,8 +3293,8 @@ def get_marker_anomalies(
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     course = require_course_access(db, user, course_id, owner_only=True)
-    if not course.marker_anomaly_detection_enabled:
-        raise HTTPException(status_code=409, detail="Marker anomaly detection is not enabled for this course.")
+    if not _course_has_feature(db, course, "marker_anomaly_detection"):
+        raise HTTPException(status_code=409, detail="Marker anomaly detection is not enabled for an active task in this course.")
     if refresh:
         scan_marker_anomalies(db, course)
         db.commit()
@@ -2547,7 +3383,7 @@ def lecturer_pdf_report(
     pdf = build_pdf_report(assessment)
     audit(db, request, "report_downloaded", user=user, resource_type="assessment", resource_id=assessment.id)
     db.commit()
-    safe_id = assessment.document.student_id.replace("/", "-").replace("\\", "-")
+    safe_id = (assessment.candidate_id or assessment.document.student_id).replace("/", "-").replace("\\", "-")
     return Response(content=pdf, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="kanokware-{safe_id}.pdf"'})
 
 

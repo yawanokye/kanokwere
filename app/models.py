@@ -127,6 +127,7 @@ class Course(Base):
     enrollment_code: Mapped[str] = mapped_column(String(24), nullable=False, unique=True, index=True)
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="active")
     assessment_question_count: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     checkpoint_question_count: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     milestones_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     version_history_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -171,6 +172,77 @@ class Course(Base):
     supervisor_meetings: Mapped[list["SupervisorMeeting"]] = relationship(
         back_populates="course", cascade="all, delete-orphan", order_by="SupervisorMeeting.meeting_at"
     )
+    assessment_tasks: Mapped[list["AssessmentTask"]] = relationship(
+        back_populates="course", cascade="all, delete-orphan", order_by="AssessmentTask.created_at"
+    )
+
+
+class FeatureSetting(Base):
+    """Platform-wide availability rule for one optional assessment feature."""
+
+    __tablename__ = "feature_settings"
+
+    feature_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    activation_mode: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="lecturer_allowed"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class AssessmentTask(Base):
+    """A course task whose optional controls are selected independently."""
+
+    __tablename__ = "assessment_tasks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    course_id: Mapped[str] = mapped_column(
+        ForeignKey("courses.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    title: Mapped[str] = mapped_column(String(240), nullable=False)
+    instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mode: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="submission_assurance"
+    )
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="active")
+    assessment_question_count: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_by: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    course: Mapped[Course] = relationship(back_populates="assessment_tasks")
+    feature_activations: Mapped[list["TaskFeatureActivation"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
+    documents: Mapped[list["Document"]] = relationship(back_populates="task")
+
+
+class TaskFeatureActivation(Base):
+    __tablename__ = "task_feature_activations"
+    __table_args__ = (
+        UniqueConstraint("task_id", "feature_key", name="uq_task_feature_activation"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    feature_key: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    activated_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    activated_by_role: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="lecturer"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    task: Mapped[AssessmentTask] = relationship(back_populates="feature_activations")
 
 
 class CourseMilestone(Base):
@@ -232,6 +304,10 @@ class Document(Base):
     course_id: Mapped[str | None] = mapped_column(
         ForeignKey("courses.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    task_id: Mapped[str | None] = mapped_column(
+        ForeignKey("assessment_tasks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    features_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     submitted_to_lecturer_id: Mapped[str | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -253,6 +329,7 @@ class Document(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     course: Mapped[Course | None] = relationship(back_populates="documents")
+    task: Mapped[AssessmentTask | None] = relationship(back_populates="documents")
     milestone: Mapped[CourseMilestone | None] = relationship(back_populates="documents")
     previous_version: Mapped["Document | None"] = relationship(remote_side="Document.id", uselist=False)
     questions: Mapped[list["Question"]] = relationship(
@@ -310,6 +387,9 @@ class Assessment(Base):
     lecturer_id: Mapped[str | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    candidate_name: Mapped[str | None] = mapped_column(String(180), nullable=True)
+    candidate_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    features_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="in_progress")
     current_position: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
@@ -375,6 +455,34 @@ class Assessment(Base):
     moderation_record: Mapped["ModerationRecord | None"] = relationship(
         back_populates="assessment", cascade="all, delete-orphan", uselist=False
     )
+    recording_chunks: Mapped[list["AssessmentRecordingChunk"]] = relationship(
+        back_populates="assessment", cascade="all, delete-orphan",
+        order_by="AssessmentRecordingChunk.created_at"
+    )
+
+
+class AssessmentRecordingChunk(Base):
+    __tablename__ = "assessment_recording_chunks"
+    __table_args__ = (
+        UniqueConstraint(
+            "assessment_id", "recording_type", "sequence",
+            name="uq_assessment_recording_chunk_sequence",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    assessment_id: Mapped[str] = mapped_column(
+        ForeignKey("assessments.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    recording_type: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    byte_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    assessment: Mapped[Assessment] = relationship(back_populates="recording_chunks")
 
 
 class AssessmentItem(Base):

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from .assurance_service import ai_policy_alignment
 from .config import settings
+from .feature_service import document_feature_enabled
 from .models import Assessment, Course, Document, LearningAlert, MonitoringEvent
 
 
@@ -138,7 +139,7 @@ def refresh_document_alerts(db: Session, document: Document) -> None:
     course = db.get(Course, document.course_id) if document.course_id else None
     previous = db.get(Document, document.previous_version_id) if document.previous_version_id else None
 
-    if course and course.milestones_enabled and document.submission_stage == "final":
+    if course and document_feature_enabled(document, "learning_milestones", course) and document.submission_stage == "final":
         prior_milestones = db.scalar(
             select(func.count(Document.id)).where(
                 Document.course_id == document.course_id,
@@ -271,7 +272,11 @@ def course_learning_progress(db: Session, course: Course) -> list[dict[str, Any]
         grouped[document.student_id].append(document)
 
     rows: list[dict[str, Any]] = []
-    milestone_total = len(course.milestones) if course.milestones_enabled else 0
+    milestone_total = (
+        len(course.milestones)
+        if any(document_feature_enabled(item, "learning_milestones", course) for item in documents)
+        else 0
+    )
     for student_id, items in grouped.items():
         latest = items[-1]
         milestone_ids = {item.milestone_id for item in items if item.milestone_id}

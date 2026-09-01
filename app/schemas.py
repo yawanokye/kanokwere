@@ -46,11 +46,19 @@ class GeneratedQuestion(BaseModel):
 
 
 class GeneratedQuestionBank(BaseModel):
-    questions: list[GeneratedQuestion] = Field(min_length=20, max_length=20)
+    questions: list[GeneratedQuestion] = Field(min_length=1)
 
 
 class StartAssessmentRequest(BaseModel):
     document_id: str
+    client_instance_id: str = Field(min_length=16, max_length=120)
+
+
+class StartStandaloneExamRequest(BaseModel):
+    course_code: str = Field(min_length=6, max_length=24)
+    task_id: str
+    candidate_name: str = Field(min_length=2, max_length=180)
+    candidate_id: str = Field(min_length=2, max_length=100)
     client_instance_id: str = Field(min_length=16, max_length=120)
 
 
@@ -70,6 +78,17 @@ class AssessmentInterruptRequest(BaseModel):
         "camera_failure",
         "network_failure",
     ] = "browser_exit"
+
+
+class AssessmentTerminateRequest(BaseModel):
+    client_instance_id: str = Field(min_length=16, max_length=120)
+    reason: Literal[
+        "page_hidden",
+        "window_blur",
+        "fullscreen_exited",
+        "frame_detected",
+        "browser_minimized",
+    ] = "page_hidden"
 
 
 class InterruptionNoteRequest(BaseModel):
@@ -140,8 +159,9 @@ class CourseCreateRequest(BaseModel):
     title: str = Field(min_length=3, max_length=240)
     academic_year: str = Field(min_length=4, max_length=40)
     semester: str = Field(min_length=2, max_length=80)
-    assessment_question_count: int = Field(default=20, ge=5, le=20)
-    checkpoint_question_count: int = Field(default=3, ge=3, le=10)
+    assessment_question_count: int = Field(default=20, ge=1)
+    max_attempts: int = Field(default=1, ge=1)
+    checkpoint_question_count: int = Field(default=3, ge=1)
     milestones_enabled: bool = False
     version_history_enabled: bool = False
     ai_use_policy: Literal[
@@ -154,7 +174,7 @@ class CourseCreateRequest(BaseModel):
 
     # Optional Phase 2 modules.
     oral_defence_enabled: bool = False
-    oral_defence_question_count: int = Field(default=5, ge=3, le=10)
+    oral_defence_question_count: int = Field(default=5, ge=1)
     practical_tasks_enabled: bool = False
     practical_task_count: int = Field(default=1, ge=1, le=5)
     supervisor_meetings_enabled: bool = False
@@ -178,8 +198,9 @@ class CourseCreateRequest(BaseModel):
 
 
 class CourseSettingsRequest(BaseModel):
-    assessment_question_count: int | None = Field(default=None, ge=5, le=20)
-    checkpoint_question_count: int | None = Field(default=None, ge=3, le=10)
+    assessment_question_count: int | None = Field(default=None, ge=1)
+    max_attempts: int | None = Field(default=None, ge=1)
+    checkpoint_question_count: int | None = Field(default=None, ge=1)
     milestones_enabled: bool | None = None
     version_history_enabled: bool | None = None
     ai_use_policy: Literal[
@@ -190,7 +211,7 @@ class CourseSettingsRequest(BaseModel):
     live_exam_title: str | None = Field(default=None, max_length=240)
     live_exam_instructions: str | None = Field(default=None, max_length=2000)
     oral_defence_enabled: bool | None = None
-    oral_defence_question_count: int | None = Field(default=None, ge=3, le=10)
+    oral_defence_question_count: int | None = Field(default=None, ge=1)
     practical_tasks_enabled: bool | None = None
     practical_task_count: int | None = Field(default=None, ge=1, le=5)
     supervisor_meetings_enabled: bool | None = None
@@ -201,11 +222,61 @@ class CourseSettingsRequest(BaseModel):
     marker_anomaly_detection_enabled: bool | None = None
 
 
+class FeatureSettingUpdateRequest(BaseModel):
+    activation_mode: Literal["disabled", "admin_only", "lecturer_allowed", "always_on"]
+
+
+class AssessmentTaskCreateRequest(BaseModel):
+    title: str = Field(min_length=3, max_length=240)
+    instructions: str | None = Field(default=None, max_length=4000)
+    mode: Literal["submission_assurance", "standalone_exam"] = "submission_assurance"
+    assessment_question_count: int = Field(default=20, ge=1)
+    max_attempts: int = Field(default=1, ge=1)
+    features: dict[str, bool] = Field(default_factory=dict)
+
+    @field_validator("features")
+    @classmethod
+    def limit_features(cls, value: dict[str, bool]) -> dict[str, bool]:
+        if len(value) > 30:
+            raise ValueError("Too many optional feature selections.")
+        return value
+
+
+class AssessmentTaskUpdateRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=3, max_length=240)
+    instructions: str | None = Field(default=None, max_length=4000)
+    mode: Literal["submission_assurance", "standalone_exam"] | None = None
+    assessment_question_count: int | None = Field(default=None, ge=1)
+    max_attempts: int | None = Field(default=None, ge=1)
+    status: Literal["draft", "active", "closed"] | None = None
+    features: dict[str, bool] | None = None
+
+    @field_validator("features")
+    @classmethod
+    def limit_optional_features(cls, value: dict[str, bool] | None) -> dict[str, bool] | None:
+        if value is not None and len(value) > 30:
+            raise ValueError("Too many optional feature selections.")
+        return value
+
+
+class TaskFeatureUpdateRequest(BaseModel):
+    features: dict[str, bool]
+
+    @field_validator("features")
+    @classmethod
+    def require_feature_selection(cls, value: dict[str, bool]) -> dict[str, bool]:
+        if not value:
+            raise ValueError("Select at least one feature to update.")
+        if len(value) > 30:
+            raise ValueError("Too many optional feature selections.")
+        return value
+
+
 class CourseMilestoneCreateRequest(BaseModel):
     title: str = Field(min_length=2, max_length=180)
     description: str | None = Field(default=None, max_length=1000)
     required: bool = True
-    checkpoint_question_count: int = Field(default=3, ge=3, le=10)
+    checkpoint_question_count: int = Field(default=3, ge=1)
 
 
 class RubricCriterionRequest(BaseModel):
@@ -272,7 +343,7 @@ class MonitoringEventRequest(BaseModel):
 
 
 class OralDefenceStartRequest(BaseModel):
-    question_count: int | None = Field(default=None, ge=3, le=10)
+    question_count: int | None = Field(default=None, ge=1)
 
 
 class OralDefenceQuestionScoreRequest(BaseModel):

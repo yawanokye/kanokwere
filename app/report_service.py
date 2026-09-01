@@ -53,8 +53,8 @@ def build_pdf_report(assessment: Assessment) -> bytes:
     ]
 
     summary_data = [
-        ["Student", assessment.document.student_name],
-        ["Student ID", assessment.document.student_id],
+        ["Student", assessment.candidate_name or assessment.document.student_name],
+        ["Student ID", assessment.candidate_id or assessment.document.student_id],
         ["Document", assessment.document.title],
         ["Submission stage", assessment.document.submission_stage.replace("_", " ").title()],
         ["Version", str(assessment.document.version_number)],

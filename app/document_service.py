@@ -103,7 +103,7 @@ async def read_and_extract(upload: UploadFile) -> tuple[bytes, str, str, str]:
             status_code=422,
             detail=(
                 "The document contains too little readable text to produce a reliable "
-                "20-question ownership assessment. Scanned PDFs need OCR before upload."
+                "document-grounded assessment. Scanned PDFs need OCR before upload."
             ),
         )
 

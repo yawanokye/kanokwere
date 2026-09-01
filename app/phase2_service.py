@@ -166,7 +166,7 @@ def prepare_oral_defence(
     existing = db.scalar(select(OralDefence).where(OralDefence.assessment_id == assessment.id))
     if existing:
         return existing
-    count = max(3, min(10, int(question_count or course.oral_defence_question_count or 5)))
+    count = max(1, int(question_count or course.oral_defence_question_count or 5))
     questions = _oral_question_bank(assessment)[:count]
     record = OralDefence(
         assessment_id=assessment.id,
@@ -481,8 +481,6 @@ def ensure_random_moderation(
     course: Course,
     original_mark: float,
 ) -> ModerationRecord | None:
-    if not course.random_moderation_enabled:
-        return None
     existing = db.scalar(select(ModerationRecord).where(ModerationRecord.assessment_id == assessment.id))
     if existing:
         return existing
@@ -520,8 +518,6 @@ def anomaly_payload(alert: MarkerAnomalyAlert) -> dict[str, Any]:
 
 
 def scan_marker_anomalies(db: Session, course: Course) -> list[MarkerAnomalyAlert]:
-    if not course.marker_anomaly_detection_enabled:
-        return []
     db.execute(delete(MarkerAnomalyAlert).where(MarkerAnomalyAlert.course_id == course.id))
     rows = db.execute(
         select(RubricMark, Assessment)

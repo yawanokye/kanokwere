@@ -113,6 +113,12 @@ def _repair_assessment_columns() -> None:
 
         if "courses" in tables:
             columns = {item["name"] for item in inspector.get_columns("courses")}
+            if "max_attempts" not in columns:
+                print("Prestart: adding missing courses.max_attempts", flush=True)
+                operations.add_column(
+                    "courses",
+                    sa.Column("max_attempts", sa.Integer(), nullable=False, server_default="1"),
+                )
             if "assessment_question_count" not in columns:
                 print("Prestart: adding missing courses.assessment_question_count", flush=True)
                 operations.add_column(
@@ -271,6 +277,44 @@ def _repair_phase3_columns() -> None:
                     operations.add_column("assessments", column)
 
 
+def _repair_phase4_columns() -> None:
+    """Repair task-governance columns if a database was stamped ahead."""
+    with engine.begin() as connection:
+        inspector = sa.inspect(connection)
+        tables = set(inspector.get_table_names())
+        operations = Operations(MigrationContext.configure(connection))
+        if "assessment_tasks" in tables:
+            columns = {item["name"] for item in inspector.get_columns("assessment_tasks")}
+            if "max_attempts" not in columns:
+                print("Prestart: adding missing assessment_tasks.max_attempts", flush=True)
+                operations.add_column(
+                    "assessment_tasks",
+                    sa.Column("max_attempts", sa.Integer(), nullable=False, server_default="1"),
+                )
+        if "documents" in tables:
+            columns = {item["name"] for item in inspector.get_columns("documents")}
+            additions = [
+                sa.Column("task_id", sa.String(length=36), nullable=True),
+                sa.Column("features_json", sa.Text(), nullable=False, server_default="{}"),
+            ]
+            for column in additions:
+                if column.name not in columns:
+                    print(f"Prestart: adding missing documents.{column.name}", flush=True)
+                    operations.add_column("documents", column)
+        inspector = sa.inspect(connection)
+        if "assessments" in set(inspector.get_table_names()):
+            columns = {item["name"] for item in inspector.get_columns("assessments")}
+            additions = [
+                sa.Column("features_json", sa.Text(), nullable=False, server_default="{}"),
+                sa.Column("candidate_name", sa.String(length=180), nullable=True),
+                sa.Column("candidate_id", sa.String(length=100), nullable=True),
+            ]
+            for column in additions:
+                if column.name not in columns:
+                    print(f"Prestart: adding missing assessments.{column.name}", flush=True)
+                    operations.add_column("assessments", column)
+
+
 def _verify_schema() -> None:
     inspector = sa.inspect(engine)
     tables = set(inspector.get_table_names())
@@ -283,8 +327,14 @@ def _verify_schema() -> None:
             "Database upgrade incomplete. Missing users columns: " + ", ".join(missing)
         )
     course_columns = {item["name"] for item in inspector.get_columns("courses")}
-    if "assessment_question_count" not in course_columns:
-        raise RuntimeError("Database upgrade incomplete: courses.assessment_question_count is missing.")
+    missing_course_assessment = sorted(
+        {"assessment_question_count", "max_attempts"} - course_columns
+    )
+    if missing_course_assessment:
+        raise RuntimeError(
+            "Database upgrade incomplete. Missing course assessment columns: "
+            + ", ".join(missing_course_assessment)
+        )
     assessment_columns = {item["name"] for item in inspector.get_columns("assessments")}
     required_assessment_columns = {
         "question_count",
@@ -361,7 +411,27 @@ def _verify_schema() -> None:
     missing_assessment_phase3 = sorted(required_assessment_phase3 - assessment_columns)
     if missing_assessment_phase3:
         raise RuntimeError("Database upgrade incomplete. Missing Phase 3 assessment columns: " + ", ".join(missing_assessment_phase3))
-    print("Prestart: account, monitoring, continuity, and Phase 1–3 learning-assurance schema verified.", flush=True)
+    required_phase4_tables = {
+        "feature_settings", "assessment_tasks", "task_feature_activations",
+        "assessment_recording_chunks",
+    }
+    missing_phase4_tables = sorted(required_phase4_tables - tables)
+    if missing_phase4_tables:
+        raise RuntimeError("Database upgrade incomplete. Missing task-governance tables: " + ", ".join(missing_phase4_tables))
+    task_columns = {item["name"] for item in inspector.get_columns("assessment_tasks")}
+    if "max_attempts" not in task_columns:
+        raise RuntimeError(
+            "Database upgrade incomplete: assessment_tasks.max_attempts is missing."
+        )
+    missing_document_phase4 = sorted({"task_id", "features_json"} - document_columns)
+    if missing_document_phase4:
+        raise RuntimeError("Database upgrade incomplete. Missing task document columns: " + ", ".join(missing_document_phase4))
+    missing_assessment_phase4 = sorted(
+        {"features_json", "candidate_name", "candidate_id"} - assessment_columns
+    )
+    if missing_assessment_phase4:
+        raise RuntimeError("Database upgrade incomplete. Missing task assessment columns: " + ", ".join(missing_assessment_phase4))
+    print("Prestart: account, monitoring, continuity, and Phase 1–4 assessment schema verified.", flush=True)
 
 
 def _face_model_is_compatible(model_path: Path) -> bool:
@@ -531,6 +601,7 @@ def main() -> None:
     _repair_phase1_columns()
     _repair_phase2_columns()
     _repair_phase3_columns()
+    _repair_phase4_columns()
 
     config = Config(str(BASE_DIR / "alembic.ini"))
     command.upgrade(config, "head")

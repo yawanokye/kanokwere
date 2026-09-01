@@ -10,10 +10,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from .config import settings
+from .feature_service import assessment_feature_enabled, assessment_features, document_features
 from .learning_service import refresh_assessment_alerts
 from .models import (
     Assessment,
     AssessmentItem,
+    AssessmentTask,
     Course,
     Document,
     MonitoringEvent,
@@ -243,6 +245,11 @@ def _lock_assessment(
         "offline_limit_exceeded": "The assessment exceeded the permitted total offline time.",
         "different_browser": "A resume attempt was made from a different browser profile.",
         "lecturer_locked": "The assessment was locked for lecturer review.",
+        "page_hidden": "The assessment ended because the examination page was hidden or minimized.",
+        "window_blur": "The assessment ended because the examination window lost focus.",
+        "fullscreen_exited": "The assessment ended because secure fullscreen mode was exited.",
+        "frame_detected": "The assessment ended because it was opened inside another application frame.",
+        "browser_minimized": "The assessment ended because the browser was minimized.",
     }
     db.add(
         MonitoringEvent(
@@ -286,6 +293,10 @@ def interrupt_assessment(
     reason: str,
     now: datetime | None = None,
 ) -> Assessment:
+    if not assessment_feature_enabled(assessment, "webcam_monitoring"):
+        assessment.last_seen_at = now or utcnow()
+        db.commit()
+        return assessment
     current = now or utcnow()
     if assessment.status in {"completed", "locked", "interrupted"}:
         return assessment
@@ -305,6 +316,23 @@ def interrupt_assessment(
     return assessment
 
 
+def terminate_secure_assessment(
+    db: Session,
+    assessment: Assessment,
+    *,
+    reason: str,
+) -> Assessment:
+    if not assessment_feature_enabled(assessment, "secure_browser_enforcement"):
+        raise HTTPException(status_code=409, detail="Secure browser enforcement is not enabled.")
+    if assessment.status == "completed":
+        return assessment
+    _lock_assessment(db, assessment, reason=reason)
+    assessment.last_interruption_reason = reason
+    assessment.interruption_count += 1
+    db.commit()
+    return assessment
+
+
 def refresh_interruption_state(
     db: Session,
     assessment: Assessment,
@@ -312,6 +340,8 @@ def refresh_interruption_state(
     now: datetime | None = None,
     commit: bool = True,
 ) -> Assessment:
+    if not assessment_feature_enabled(assessment, "webcam_monitoring"):
+        return assessment
     current = now or utcnow()
     changed = False
     if assessment.status == "in_progress":
@@ -345,6 +375,7 @@ def refresh_interruption_state(
 
 def assessment_state_payload(assessment: Assessment) -> dict[str, object]:
     now = utcnow()
+    active_features = assessment_features(assessment)
     deadline = _aware(assessment.resume_deadline_at)
     remaining = max(0, int((deadline - now).total_seconds())) if deadline else None
     return {
@@ -371,6 +402,9 @@ def assessment_state_payload(assessment: Assessment) -> dict[str, object]:
         "interruption_note": assessment.interruption_note,
         "heartbeat_interval_seconds": settings.heartbeat_interval_seconds,
         "heartbeat_stale_seconds": settings.heartbeat_stale_seconds,
+        "monitoring_enabled": bool(active_features.get("webcam_monitoring", False)),
+        "secure_browser_enforcement": bool(active_features.get("secure_browser_enforcement", False)),
+        "active_features": active_features,
         "max_interruptions": settings.max_assessment_interruptions,
         "max_offline_seconds": settings.max_assessment_offline_seconds,
     }
@@ -385,6 +419,11 @@ def heartbeat_assessment(
     reason: str,
 ) -> dict[str, object]:
     now = utcnow()
+    if not assessment_feature_enabled(assessment, "webcam_monitoring"):
+        assessment.last_seen_at = now
+        assessment.camera_reverification_required = False
+        db.commit()
+        return assessment_state_payload(assessment)
     refresh_interruption_state(db, assessment, now=now, commit=False)
 
     if assessment.client_instance_id and assessment.client_instance_id != client_instance_id:
@@ -506,36 +545,74 @@ def start_assessment(
     db: Session,
     document_id: str,
     client_instance_id: str,
+    *,
+    candidate_name: str | None = None,
+    candidate_id: str | None = None,
+    standalone: bool = False,
 ) -> tuple[Assessment, str]:
     document = db.scalar(
         select(Document)
         .options(selectinload(Document.questions))
         .where(Document.id == document_id)
+        .with_for_update()
     )
     if not document:
         raise HTTPException(status_code=404, detail="Document not found.")
-    if document.status != "ready" or len(document.questions) < 20:
+    if document.submission_stage == "exam_source" and not standalone:
+        raise HTTPException(status_code=409, detail="Use the standalone examination start route for this task.")
+    if standalone and document.submission_stage != "exam_source":
+        raise HTTPException(status_code=409, detail="This document is not a standalone examination source.")
+    if document.status != "ready":
         raise HTTPException(status_code=409, detail="The document is not ready for assessment.")
 
-    attempt_count = db.scalar(
-        select(func.count(Assessment.id)).where(Assessment.document_id == document.id)
-    ) or 0
-    if attempt_count >= settings.max_attempts_per_document:
+    course = db.get(Course, document.course_id) if document.course_id else None
+    task = db.get(AssessmentTask, document.task_id) if document.task_id else None
+    max_attempts = int(
+        (task.max_attempts if task else None)
+        or (course.max_attempts if course else None)
+        or settings.max_attempts_per_document
+        or 1
+    )
+    normalized_candidate_id = (candidate_id or document.student_id or "").strip().lower()
+    if task:
+        # A new upload or a replacement exam bank must not bypass the task limit.
+        # Count every attempt made by this candidate against the same task.
+        attempt_query = (
+            select(func.count(Assessment.id))
+            .join(Document, Document.id == Assessment.document_id)
+            .where(
+                Document.task_id == task.id,
+                func.lower(Assessment.candidate_id) == normalized_candidate_id,
+            )
+        )
+    else:
+        # Preserve the legacy per-document behaviour for courses that have not
+        # adopted explicit assessment tasks.
+        attempt_query = select(func.count(Assessment.id)).where(
+            Assessment.document_id == document.id
+        )
+    attempt_count = db.scalar(attempt_query) or 0
+    if attempt_count >= max_attempts:
         raise HTTPException(
             status_code=409,
             detail=(
-                "The maximum number of assessment attempts has been reached. "
+                f"The lecturer-set maximum of {max_attempts} assessment attempt(s) has been reached. "
                 "A lecturer must reset the attempt before another can begin."
             ),
         )
 
-    course = db.get(Course, document.course_id) if document.course_id else None
+    captured_features = document_features(document, course)
     requested_count = int(
         document.assessment_question_count_override
         or getattr(course, "assessment_question_count", 20)
         or 20
     )
-    question_count = max(3, min(20, requested_count, len(document.questions)))
+    question_count = max(1, requested_count)
+    if len(document.questions) < question_count:
+        raise HTTPException(
+            status_code=409,
+            detail=f"The task requires {question_count} questions but only {len(document.questions)} are ready.",
+        )
 
     token, token_hash = make_session_token()
     now = utcnow()
@@ -543,6 +620,9 @@ def start_assessment(
         document_id=document.id,
         course_id=document.course_id,
         lecturer_id=document.submitted_to_lecturer_id,
+        candidate_name=(candidate_name or document.student_name).strip(),
+        candidate_id=(candidate_id or document.student_id).strip(),
+        features_json=json.dumps(captured_features, sort_keys=True),
         token_hash=token_hash,
         question_count=question_count,
         last_seen_at=now,
@@ -578,16 +658,17 @@ def start_assessment(
             )
         )
 
-    earliest_capture = 2 if question_count >= 4 else 1
-    latest_capture = max(earliest_capture, question_count - 1)
-    db.add(
-        WebcamSnapshot(
-            assessment_id=assessment.id,
-            scheduled_position=rng.randint(earliest_capture, latest_capture),
-            scheduled_offset_ms=rng.randint(1500, 6500),
-            status="pending",
+    if captured_features.get("webcam_monitoring", False):
+        earliest_capture = 2 if question_count >= 4 else 1
+        latest_capture = max(earliest_capture, question_count - 1)
+        db.add(
+            WebcamSnapshot(
+                assessment_id=assessment.id,
+                scheduled_position=rng.randint(earliest_capture, latest_capture),
+                scheduled_offset_ms=rng.randint(1500, 6500),
+                status="pending",
+            )
         )
-    )
     db.commit()
     db.refresh(assessment)
     return assessment, token
@@ -682,7 +763,7 @@ def current_question(db: Session, assessment: Assessment) -> dict[str, object]:
 
         snapshot = assessment.webcam_snapshot
         capture_requested = bool(
-            settings.webcam_required
+            assessment_feature_enabled(assessment, "webcam_monitoring")
             and snapshot
             and snapshot.image_data is None
             and snapshot.status == "pending"
@@ -772,7 +853,8 @@ def submit_answer(
         item.timed_out = False
         item.response_ms = elapsed_ms
 
-    _adapt_remaining_sequence(assessment, item)
+    if assessment_feature_enabled(assessment, "adaptive_questions"):
+        _adapt_remaining_sequence(assessment, item)
     assessment.current_position += 1
     db.commit()
 
@@ -793,8 +875,8 @@ def result_payload(assessment: Assessment) -> dict[str, object]:
     critical = sum(1 for event in events if event.severity == "critical")
     return {
         "assessment_id": assessment.id,
-        "student_name": assessment.document.student_name,
-        "student_id": assessment.document.student_id,
+        "student_name": assessment.candidate_name or assessment.document.student_name,
+        "student_id": assessment.candidate_id or assessment.document.student_id,
         "document_title": assessment.document.title,
         "correct_count": assessment.correct_count,
         "question_count": _question_total(assessment),

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .config import settings
+from .feature_service import assessment_feature_enabled
 from .models import Assessment, Course, Document, OralDefence, PracticalTask
 
 
@@ -97,22 +98,26 @@ def assessment_evidence_profile(
     knowledge_status = "completed" if assessment.status == "completed" else "pending"
     knowledge_score = float(assessment.score) if assessment.score is not None else None
 
-    if course and course.oral_defence_enabled:
+    if assessment_feature_enabled(assessment, "oral_defence", course):
         oral_status = oral.status if oral else "pending"
         oral_score = float(oral.total_score) if oral and oral.total_score is not None else None
     else:
         oral_status = "not_configured"
         oral_score = None
 
-    if course and course.practical_tasks_enabled:
+    if assessment_feature_enabled(assessment, "practical_tasks", course):
         practical_score, practical_status = _practical_score(tasks)
     else:
         practical_score, practical_status = None, "not_configured"
 
-    events = list(assessment.monitoring_events or [])
+    monitoring_enabled = assessment_feature_enabled(assessment, "webcam_monitoring", course)
+    events = list(assessment.monitoring_events or []) if monitoring_enabled else []
     unresolved = [event for event in events if not event.corrected]
     critical = [event for event in unresolved if event.severity == "critical"]
-    if critical:
+    if not monitoring_enabled:
+        session_status = "not_configured"
+        session_message = "Camera and continuity monitoring were not enabled for this task."
+    elif critical:
         session_status = "human_review_required"
         session_message = f"{len(critical)} unresolved critical session indicator(s) require contextual review."
     elif unresolved:
