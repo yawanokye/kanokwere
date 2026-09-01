@@ -31,7 +31,7 @@
           <h1>Prove ownership of work submitted under your name through knowledge assessment</h1>
           <p>Upload a document, explain the work, complete document-specific questions, and build an assessment evidence profile. Optional oral, practical, process and live examination evidence remain under human academic judgement.</p>
           <div class="hero-stats" aria-label="Assessment summary">
-            <div><strong>5–20</strong><span>lecturer-selected questions</span></div>
+            <div><strong>Lecturer-set</strong><span>question count</span></div>
             <div><strong>30s</strong><span>per question</span></div>
             <div><strong>80%</strong><span>standard threshold</span></div>
           </div>
@@ -79,6 +79,24 @@
               <small>Obtain this code from your lecturer or supervisor.</small>
             </label>
             <div id="course-requirements-card" class="course-requirements-card full-width hidden" aria-live="polite"></div>
+            <label id="assessment-task-field" class="full-width hidden">
+              Assessment task
+              <select name="task_id" id="student-assessment-task"><option value="">Select assessment task</option></select>
+              <small>Each task has its own examination and assurance controls.</small>
+            </label>
+            <section id="standalone-exam-card" class="course-requirements-card full-width hidden">
+              <span class="eyebrow">Standalone examination</span>
+              <strong id="standalone-exam-title">Examination</strong>
+              <p id="standalone-exam-instructions"></p>
+              <div class="form-grid">
+                <label>Candidate name<input id="exam-candidate-name" type="text" maxlength="180" autocomplete="name"></label>
+                <label>Candidate ID<input id="exam-candidate-id" type="text" maxlength="100"></label>
+              </div>
+              <label class="consent-row"><input id="standalone-exam-consent" type="checkbox"><span id="standalone-consent-text">I understand the examination rules and consent to the enabled monitoring and recording controls.</span></label>
+              <button id="start-standalone-exam" class="primary-button" type="button" disabled>Start examination</button>
+              <div id="standalone-exam-message" class="message" role="status"></div>
+            </section>
+            <div id="submission-assurance-fields" class="form-grid full-width">
             <label id="submission-stage-field" class="full-width hidden">
               Submission stage
               <select name="submission_stage" id="submission-stage">
@@ -145,6 +163,7 @@
               <p class="form-note">The extracted text is stored for assessment and reporting. The original uploaded file is processed in memory and discarded.</p>
               <button class="primary-button" type="submit">Generate learning assessment</button>
             </div>
+            </div>
           </form>
           <div id="upload-message" class="message" role="status" aria-live="polite"></div>
         </section>
@@ -154,7 +173,7 @@
             <div class="spinner" aria-hidden="true"></div>
             <span class="eyebrow">Step 2</span>
             <h2 id="prepare-heading">Preparing the assessment</h2>
-            <p id="processing-status">Reading the document and generating 20 grounded questions.</p>
+            <p id="processing-status">Reading the document and generating the lecturer-selected question count.</p>
             <div class="progress-track"><span id="processing-progress"></span></div>
             <div class="processing-grid">
               <div><span id="processing-questions">0</span><small>validated questions</small></div>
@@ -187,7 +206,7 @@
           </div>
           <label class="consent-row">
             <input id="consent-checkbox" type="checkbox">
-            <span>I understand the assessment rules and consent to camera monitoring and retention of monitoring evidence for authorised review.</span>
+            <span id="assessment-consent-text">I understand the assessment rules and consent to the enabled monitoring evidence for authorised review.</span>
           </label>
           <div id="mode-warning" class="message warning"></div>
           <div class="form-actions align-right">
@@ -361,11 +380,15 @@
                 <label>Academic year<input name="academic_year" type="text" maxlength="40" required placeholder="2026/2027"></label>
                 <label>Semester<input name="semester" type="text" maxlength="80" required placeholder="First Semester"></label>
                 <label>Final assessment questions
-                  <input name="assessment_question_count" type="number" min="5" max="20" value="20" required>
-                  <small>Select between 5 and 20 questions. A new higher-order subset is used for each attempt.</small>
+                  <input name="assessment_question_count" type="number" min="1" value="20" required>
+                  <small>Set any positive number of questions appropriate for the assessment.</small>
+                </label>
+                <label>Maximum attempts
+                  <input name="max_attempts" type="number" min="1" value="1" required>
+                  <small>Set how many times each student may start a legacy course assessment. Task-specific limits can be set below.</small>
                 </label>
                 <label>Milestone checkpoint questions
-                  <input name="checkpoint_question_count" type="number" min="3" max="10" value="3" required>
+                  <input name="checkpoint_question_count" type="number" min="1" value="3" required>
                 </label>
                 <label class="checkbox-setting"><input name="milestones_enabled" type="checkbox"> <span>Track learning milestones in Kanokware</span></label>
                 <label class="checkbox-setting"><input name="version_history_enabled" type="checkbox"> <span>Keep document version history in Kanokware</span></label>
@@ -391,7 +414,7 @@
                 <fieldset class="phase2-options">
                   <legend>Optional Phase 2 assurance modules</legend>
                   <label class="checkbox-setting"><input name="oral_defence_enabled" type="checkbox"> <span>Oral defence or viva</span></label>
-                  <label>Oral-defence questions<input name="oral_defence_question_count" type="number" min="3" max="10" value="5"></label>
+                  <label>Oral-defence questions<input name="oral_defence_question_count" type="number" min="1" value="5"></label>
                   <label class="checkbox-setting"><input name="practical_tasks_enabled" type="checkbox"> <span>Practical reproduction or application tasks</span></label>
                   <label>Practical tasks per assessment<input name="practical_task_count" type="number" min="1" max="5" value="1"></label>
                   <label class="checkbox-setting"><input name="supervisor_meetings_enabled" type="checkbox"> <span>Supervisor meeting records</span></label>
@@ -423,6 +446,29 @@ Final preparation"></textarea>
                 <label>Access<select name="access_level"><option value="co_lecturer">Co-lecturer</option><option value="viewer">View only</option></select></label>
                 <button class="secondary-button" type="submit">Add lecturer</button>
               </form>
+            </section>
+
+            <section class="management-card">
+              <div class="table-heading"><div><h2>Create assessment task</h2><small>Basic assessment is always available. Activate only the optional controls needed for this task.</small></div></div>
+              <form id="assessment-task-form" class="stack-form compact-form">
+                <label>Course<select name="course_id" id="task-course" required><option value="">Select course</option></select></label>
+                <label>Task title<input name="title" type="text" minlength="3" maxlength="240" required></label>
+                <label>Mode<select name="mode" id="task-mode"><option value="submission_assurance">Student document ownership</option><option value="standalone_exam">Standalone examination</option></select></label>
+                <label>Questions<input name="assessment_question_count" type="number" min="1" value="20" required></label>
+                <label>Maximum attempts per student<input name="max_attempts" type="number" min="1" value="1" required><small>The lecturer can change this later or reset a candidate to start afresh.</small></label>
+                <label>Instructions<textarea name="instructions" rows="3" maxlength="4000"></textarea></label>
+                <fieldset class="phase2-options">
+                  <legend>Optional task features</legend>
+                  <div id="task-feature-options"><small>Select a course to load administrator-approved features.</small></div>
+                </fieldset>
+                <div id="exam-source-fields" class="hidden">
+                  <label>Examination source title<input name="exam_source_title" type="text" maxlength="300"></label>
+                  <label class="file-drop"><input name="exam_source_file" type="file" accept=".pdf,.docx,.txt"><strong>Choose source document</strong><small>Kanokware generates the grounded exam bank from this file.</small></label>
+                  <label class="file-drop"><input name="exam_questions_file" type="file" accept=".json,application/json"><strong>Or choose lecturer question-bank JSON</strong><small>Supply exactly the task's selected number of validated questions. Existing attempts remain unchanged when a new bank is uploaded.</small></label>
+                </div>
+                <button class="primary-button" type="submit">Create task</button>
+              </form>
+              <div id="task-create-message" class="message" role="status"></div>
             </section>
           </div>
 
@@ -617,6 +663,10 @@ Final preparation"></textarea>
               <div class="table-heading"><h3>Webcam monitoring events</h3></div>
               <div id="review-monitoring-events" class="monitoring-event-list"></div>
             </div>
+            <div id="review-recordings" class="review-monitoring hidden">
+              <div class="table-heading"><h3>Consented screen and environment recordings</h3></div>
+              <div id="review-recording-list" class="monitoring-event-list"></div>
+            </div>
             <div class="table-heading"><h3>Adaptive question-level evidence</h3></div>
             <div id="review-questions" class="review-questions"></div>
           </section>
@@ -683,6 +733,33 @@ Final preparation"></textarea>
 
         <section class="admin-table-card">
           <div class="table-heading">
+            <div><h2>Optional feature governance</h2><small>Control which advanced features are unavailable, administrator-only, lecturer-selectable, or mandatory for every new task.</small></div>
+            <button id="refresh-platform-features" class="text-button" type="button">Refresh</button>
+          </div>
+          <p class="muted">Basic enrolment, upload, understanding justification, AI declaration, grounded questions, result and PDF reporting cannot be disabled.</p>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Feature</th><th>Purpose</th><th>Activation rule</th></tr></thead>
+              <tbody id="platform-features-body"><tr><td colspan="3" class="empty-state">Unlock the admin dashboard to load feature policies.</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="admin-table-card">
+          <div class="table-heading">
+            <div><h2>Administrator task activation</h2><small>Activate or remove administrator-controlled features for a particular assessment task.</small></div>
+            <button id="refresh-platform-tasks" class="text-button" type="button">Refresh</button>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Task</th><th>Mode</th><th>Effective optional features</th><th>Administrator controls</th></tr></thead>
+              <tbody id="platform-tasks-body"><tr><td colspan="4" class="empty-state">No task profiles loaded.</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="admin-table-card">
+          <div class="table-heading">
             <div><h2>All lecturer accounts</h2><small>Reissue a setup code, suspend, reactivate, or delete an account.</small></div>
             <button id="refresh-platform-users" class="text-button" type="button">Refresh</button>
           </div>
@@ -702,6 +779,6 @@ Final preparation"></textarea>
     <strong>Kanokware</strong>
     <span>Ownership confidence supports academic judgement. It does not replace due process.</span>
   </footer>
-  <script src="/static/app.js?v=20260717-phase2" defer></script>
+  <script src="/static/app.js?v=20260901-attempt-governance" defer></script>
 </body>
 </html>

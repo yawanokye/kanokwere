@@ -59,6 +59,16 @@ const state = {
   currentReviewSummary: null,
   recoveryDbPromise: null,
   resolvedCourse: null,
+  selectedTask: null,
+  monitoringEnabled: false,
+  secureBrowserEnforcement: false,
+  secureBrowserArmed: false,
+  activeFeatures: {},
+  screenCaptureStream: null,
+  environmentAudioStream: null,
+  evidenceRecorders: [],
+  recordingSequences: { screen: 0, environment_audio: 0 },
+  recordingUploads: new Set(),
   currentReviewData: null,
   currentAnomalyCourseId: null,
   liveMonitorCourseId: null,
@@ -149,6 +159,41 @@ function clearAssessmentSession() {
   sessionStorage.removeItem("kanokware_session_token");
   state.assessmentId = null;
   state.token = null;
+}
+
+function isAttemptLimitError(error) {
+  return Boolean(
+    error?.status === 409 && /maximum[\s\S]*attempt|attempt[\s\S]*reached/i.test(error.message || "")
+  );
+}
+
+async function returnToStartModeAfterAttemptLimit(message) {
+  state.testActive = false;
+  state.secureBrowserArmed = false;
+  state.connectionStatus = navigator.onLine ? "online" : "offline";
+  clearQuestionTimer();
+  clearHeartbeatTimer();
+  clearSnapshotTimer();
+  stopSuspiciousMonitoring();
+  stopCamera();
+  await stopEvidenceRecordings();
+  clearAssessmentSession();
+  state.documentId = null;
+  state.currentPosition = null;
+  localStorage.removeItem("kanokware_document_id");
+  $("#consent-checkbox").checked = false;
+  $("#start-button").disabled = true;
+  showPanel("upload", 1);
+  document.exitFullscreen?.().catch(() => {});
+  setMessage($("#mode-warning"));
+  if (state.selectedTask?.mode === "standalone_exam") {
+    setMessage($("#standalone-exam-message"), message, "error");
+  }
+  setMessage(
+    $("#upload-message"),
+    `${message} Ask the lecturer to increase the permitted attempts or reset your task attempts before starting again.`,
+    "error"
+  );
 }
 
 function formatDuration(seconds) {
@@ -377,6 +422,7 @@ async function recoverAssessment(reason = "reconnect") {
       clearAssessmentSession();
       state.testActive = false;
       stopCamera();
+      await stopEvidenceRecordings();
       showPanel("upload", 1);
       setMessage($("#upload-message"), "The saved assessment session is no longer available. Contact the lecturer if another attempt is required.", "error");
       return;
@@ -404,6 +450,114 @@ async function reportExplicitInterruption(reason = "pagehide") {
   } catch (_) {
     // Missing heartbeats will still identify the interruption on the server.
   }
+}
+
+async function terminateForSecureBrowser(reason) {
+  if (!state.testActive || !state.secureBrowserEnforcement || !state.secureBrowserArmed) return;
+  state.secureBrowserArmed = false;
+  disableOptions();
+  try {
+    const response = await fetch(`/api/assessments/${state.assessmentId}/terminate`, {
+      method: "POST",
+      headers: assessmentHeaders(),
+      body: JSON.stringify({ client_instance_id: state.clientInstanceId, reason }),
+      credentials: "same-origin",
+      keepalive: true,
+    });
+    const payload = await response.json().catch(() => ({}));
+    state.connectionStatus = "locked";
+    setConnectionOverlay("locked", payload);
+  } catch (_) {
+    setConnectionOverlay("locked", { lock_reason: reason });
+  }
+}
+
+function stopStream(stream) {
+  stream?.getTracks?.().forEach((track) => track.stop());
+}
+
+async function prepareEvidenceCapture(features = {}) {
+  if (features.screen_activity_recording && !state.screenCaptureStream) {
+    if (!navigator.mediaDevices?.getDisplayMedia) throw new Error("This browser does not support screen recording.");
+    state.screenCaptureStream = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: { ideal: 8, max: 12 } },
+      audio: false,
+    });
+  }
+  if (features.environment_audio_recording && !state.environmentAudioStream) {
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error("This browser does not support environment-audio recording.");
+    state.environmentAudioStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      video: false,
+    });
+  }
+}
+
+async function uploadRecordingChunk(recordingType, sequence, blob, durationMs = 30000) {
+  if (!state.assessmentId || !state.token || !blob?.size) return;
+  const form = new FormData();
+  form.set("recording_type", recordingType);
+  form.set("sequence", String(sequence));
+  form.set("duration_ms", String(durationMs));
+  const extension = blob.type.includes("mp4") ? "mp4" : blob.type.includes("ogg") ? "ogg" : "webm";
+  form.set("media", blob, `${recordingType}-${String(sequence).padStart(4, "0")}.${extension}`);
+  await api(`/api/assessments/${state.assessmentId}/recording-chunk`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${state.token}` },
+    body: form,
+  });
+}
+
+function startEvidenceRecorder(stream, recordingType) {
+  if (!stream || typeof MediaRecorder === "undefined") throw new Error("This browser cannot record the enabled evidence stream.");
+  const preferred = recordingType === "screen"
+    ? ["video/webm;codecs=vp8,opus", "video/webm", "video/mp4"]
+    : ["audio/webm;codecs=opus", "audio/webm", "audio/ogg", "audio/mp4"];
+  const mimeType = preferred.find((value) => MediaRecorder.isTypeSupported?.(value)) || "";
+  const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+  recorder.ondataavailable = (event) => {
+    if (!event.data?.size) return;
+    const sequence = state.recordingSequences[recordingType]++;
+    const upload = uploadRecordingChunk(recordingType, sequence, event.data).catch(() => {
+      postMonitoringEvent("monitoring_unavailable", 0, false, {
+        severity: "critical",
+        message: `${recordingType.replaceAll("_", " ")} evidence could not be uploaded.`,
+      });
+    }).finally(() => state.recordingUploads.delete(upload));
+    state.recordingUploads.add(upload);
+  };
+  recorder.start(30000);
+  state.evidenceRecorders.push(recorder);
+  stream.getTracks().forEach((track) => {
+    track.addEventListener("ended", () => {
+      if (!state.testActive) return;
+      postMonitoringEvent("monitoring_unavailable", 0, false, {
+        severity: "critical",
+        message: `${recordingType.replaceAll("_", " ")} recording was stopped before the assessment ended.`,
+      });
+    }, { once: true });
+  });
+}
+
+function startEvidenceRecordings(activeFeatures = {}) {
+  state.recordingSequences = { screen: 0, environment_audio: 0 };
+  if (activeFeatures.screen_activity_recording) startEvidenceRecorder(state.screenCaptureStream, "screen");
+  if (activeFeatures.environment_audio_recording) startEvidenceRecorder(state.environmentAudioStream, "environment_audio");
+}
+
+async function stopEvidenceRecordings() {
+  const stopped = state.evidenceRecorders.map((recorder) => new Promise((resolve) => {
+    if (recorder.state === "inactive") return resolve();
+    recorder.addEventListener("stop", resolve, { once: true });
+    recorder.stop();
+  }));
+  await Promise.all(stopped);
+  await Promise.allSettled([...state.recordingUploads]);
+  state.evidenceRecorders = [];
+  stopStream(state.screenCaptureStream);
+  stopStream(state.environmentAudioStream);
+  state.screenCaptureStream = null;
+  state.environmentAudioStream = null;
 }
 
 function setWebcamStatus(message, mode = "active") {
@@ -1218,8 +1372,9 @@ function renderResolvedCourse(course) {
   if (!card) return;
   card.classList.remove("hidden");
   const processParts = [];
-  processParts.push(course.milestones_enabled ? "Kanokware milestones enabled" : "Final submission only");
-  processParts.push(course.version_history_enabled ? "Version history enabled" : "Version history not required");
+  processParts.push((course.assessment_tasks || []).length
+    ? `${course.assessment_tasks.length} assessment task(s)`
+    : `Legacy course workflow · ${course.max_attempts || 1} attempt(s) permitted`);
   const aiPolicy = course.ai_policy || {};
   processParts.push(aiPolicy.label || "AI permitted with disclosure");
   if (course.live_exam_monitoring_enabled) {
@@ -1235,15 +1390,74 @@ function renderResolvedCourse(course) {
   if (aiSelect && aiPolicy.level === "prohibited") aiSelect.value = "none";
   aiSelect?.dispatchEvent(new Event("change"));
 
-  const stageField = $("#submission-stage-field");
-  const stage = $("#submission-stage");
-  const milestoneField = $("#milestone-field");
   const milestoneSelect = $("#student-milestone");
-  stageField?.classList.toggle("hidden", !course.milestones_enabled);
-  if (!course.milestones_enabled) stage.value = "final";
   milestoneSelect.replaceChildren(new Option("Select milestone", ""));
   (course.milestones || []).forEach((item) => milestoneSelect.appendChild(new Option(item.title, item.id)));
-  milestoneField?.classList.toggle("hidden", !course.milestones_enabled || stage.value !== "milestone");
+
+  const tasks = course.assessment_tasks || [];
+  const taskField = $("#assessment-task-field");
+  const taskSelect = $("#student-assessment-task");
+  taskSelect.replaceChildren(new Option("Select assessment task", ""));
+  tasks.forEach((task) => taskSelect.appendChild(new Option(
+    `${task.title} · ${task.mode === "standalone_exam" ? "Standalone exam" : "Document ownership"} · ${task.max_attempts || 1} attempt(s)`,
+    task.id
+  )));
+  taskField?.classList.toggle("hidden", tasks.length === 0);
+  taskSelect.required = tasks.length > 1;
+  if (tasks.length === 1) taskSelect.value = tasks[0].id;
+  applySelectedAssessmentTask();
+}
+
+function applySelectedAssessmentTask() {
+  const course = state.resolvedCourse;
+  if (!course) return;
+  const selectedId = $("#student-assessment-task")?.value || "";
+  const task = (course.assessment_tasks || []).find((item) => item.id === selectedId) || null;
+  state.selectedTask = task;
+  const standalone = task?.mode === "standalone_exam";
+  const features = task?.effective_features || {
+    learning_milestones: Boolean(course.milestones_enabled),
+    version_history: Boolean(course.version_history_enabled),
+    webcam_monitoring: Boolean(course.webcam_monitoring_enabled),
+    secure_browser_enforcement: Boolean(course.secure_browser_enforcement),
+  };
+  state.monitoringEnabled = Boolean(features.webcam_monitoring);
+  state.secureBrowserEnforcement = Boolean(features.secure_browser_enforcement);
+  state.activeFeatures = features;
+  const consentEvidence = [];
+  if (features.webcam_monitoring) consentEvidence.push("camera monitoring");
+  if (features.screen_activity_recording) consentEvidence.push("screen activity recording");
+  if (features.environment_audio_recording) consentEvidence.push("environment audio recording");
+  const consentText = $("#assessment-consent-text");
+  if (consentText) {
+    consentText.textContent = consentEvidence.length
+      ? `I understand the assessment rules and consent to ${consentEvidence.join(", ")} being retained for authorised review.`
+      : "I understand the assessment rules and the configured browser controls.";
+  }
+
+  $("#submission-assurance-fields")?.classList.toggle("hidden", standalone);
+  $("#standalone-exam-card")?.classList.toggle("hidden", !standalone);
+  $("#submission-assurance-fields")?.querySelectorAll("input, select, textarea, button").forEach((input) => {
+    input.disabled = standalone;
+  });
+  if (standalone) {
+    $("#standalone-exam-title").textContent = task.title;
+    $("#standalone-exam-instructions").textContent = `${task.instructions || "Complete the examination in one uninterrupted session."} Maximum starts per candidate: ${task.max_attempts || 1}.${task.ready ? "" : " The lecturer is still preparing the question bank."}`;
+    const recordingLabels = [];
+    if (features.screen_activity_recording) recordingLabels.push("screen activity");
+    if (features.environment_audio_recording) recordingLabels.push("environment audio");
+    if (features.webcam_monitoring) recordingLabels.push("camera monitoring");
+    $("#standalone-consent-text").textContent = recordingLabels.length
+      ? `I understand the examination rules and consent to ${recordingLabels.join(", ")} being retained for authorised review.`
+      : "I understand the examination rules and the configured browser controls.";
+    $("#start-standalone-exam").disabled = !task.ready || !$("#standalone-exam-consent")?.checked;
+  }
+
+  const milestonesEnabled = Boolean(features.learning_milestones) && !standalone;
+  const stage = $("#submission-stage");
+  $("#submission-stage-field")?.classList.toggle("hidden", !milestonesEnabled);
+  if (!milestonesEnabled && stage) stage.value = "final";
+  $("#milestone-field")?.classList.toggle("hidden", !milestonesEnabled || stage?.value !== "milestone");
 }
 
 async function resolveStudentCourse(showErrors = true) {
@@ -1270,6 +1484,8 @@ async function resolveStudentCourse(showErrors = true) {
 
 $("#verify-course-code")?.addEventListener("click", () => resolveStudentCourse(true));
 $("#student-course-code")?.addEventListener("change", () => resolveStudentCourse(false));
+$("#student-assessment-task")?.addEventListener("change", applySelectedAssessmentTask);
+$("#standalone-exam-consent")?.addEventListener("change", applySelectedAssessmentTask);
 $("#submission-stage")?.addEventListener("change", (event) => {
   const milestone = event.target.value === "milestone";
   $("#milestone-field")?.classList.toggle("hidden", !milestone);
@@ -1313,7 +1529,8 @@ $("#upload-form").addEventListener("submit", async (event) => {
     const course = state.resolvedCourse || await resolveStudentCourse(false);
     if (!course) throw new Error("Confirm the course enrolment code before uploading.");
     const formData = new FormData(event.currentTarget);
-    if (!course.milestones_enabled) formData.set("submission_stage", "final");
+    if (state.selectedTask?.mode === "standalone_exam") throw new Error("Use Start examination for this task.");
+    if (!state.selectedTask?.effective_features?.learning_milestones && state.selectedTask) formData.set("submission_stage", "final");
     const result = await api("/api/documents", { method: "POST", body: formData });
     state.documentId = result.document_id;
     pollStartedAt = Date.now();
@@ -1376,7 +1593,7 @@ async function pollDocumentStatus() {
     $("#processing-progress").style.width = `${widths[result.status] || 25}%`;
     const messages = {
       queued: "The document is queued for processing.",
-      generating: "Generating and validating 20 document-specific questions.",
+      generating: `Generating and validating ${state.assessmentQuestionCount} document-specific questions.`,
       ready: "All questions passed grounding and structure checks.",
       failed: "Question generation could not be completed.",
     };
@@ -1483,15 +1700,63 @@ $("#consent-checkbox").addEventListener("change", (event) => {
   $("#start-button").disabled = !event.target.checked;
 });
 
+async function activateStartedAssessment(result, monitoringPrepared = false) {
+  state.assessmentId = result.assessment_id;
+  state.token = result.session_token;
+  state.snapshotCaptured = false;
+  state.assessmentQuestionCount = Number(result.question_count || state.assessmentQuestionCount || 20);
+  state.monitoringEnabled = Boolean(result.monitoring_enabled);
+  state.secureBrowserEnforcement = Boolean(result.secure_browser_enforcement);
+  state.activeFeatures = result.active_features || {};
+  state.secureBrowserArmed = false;
+  state.testActive = true;
+  saveAssessmentSession();
+  state.heartbeatIntervalMs = Math.max(3000, Number(result.heartbeat_interval_seconds || 5) * 1000);
+  state.connectionStatus = "online";
+  showPanel("test", 3);
+  setConnectionOverlay("online");
+  if (state.secureBrowserEnforcement) {
+    if (!document.fullscreenElement) {
+      await document.documentElement.requestFullscreen?.().catch(() => {});
+    }
+    if (!document.fullscreenElement) {
+      state.secureBrowserArmed = true;
+      await terminateForSecureBrowser("fullscreen_exited");
+      throw new Error("Secure fullscreen could not be started. This attempt was locked for review.");
+    }
+    window.setTimeout(() => { state.secureBrowserArmed = state.testActive; }, 750);
+  }
+  if (state.monitoringEnabled) {
+    if (!monitoringPrepared) {
+      await startCamera();
+      await runMonitoringPreflight();
+    }
+    await startSuspiciousMonitoring();
+    await sendHeartbeat({ cameraVerified: true, reason: "start" });
+    startHeartbeatLoop();
+  } else {
+    stopCamera();
+  }
+  startEvidenceRecordings(state.activeFeatures);
+  await loadQuestion();
+}
+
 $("#start-button").addEventListener("click", async () => {
   const button = $("#start-button");
   button.disabled = true;
   button.textContent = "Starting…";
   try {
-    button.textContent = "Starting camera…";
-    await startCamera();
-    button.textContent = "Checking monitoring…";
-    await runMonitoringPreflight();
+    let monitoringPrepared = false;
+    if (state.secureBrowserEnforcement && !document.fullscreenElement) {
+      await document.documentElement.requestFullscreen();
+    }
+    await prepareEvidenceCapture(state.activeFeatures);
+    if (state.monitoringEnabled) {
+      button.textContent = "Checking camera…";
+      await startCamera();
+      await runMonitoringPreflight();
+      monitoringPrepared = true;
+    }
     button.textContent = "Starting assessment…";
     const result = await api("/api/assessments/start", {
       method: "POST",
@@ -1501,27 +1766,66 @@ $("#start-button").addEventListener("click", async () => {
         client_instance_id: state.clientInstanceId,
       }),
     });
-    state.assessmentId = result.assessment_id;
-    state.token = result.session_token;
-    state.snapshotCaptured = false;
-    state.assessmentQuestionCount = Number(result.question_count || state.assessmentQuestionCount || 20);
-    state.testActive = true;
-    saveAssessmentSession();
-    state.heartbeatIntervalMs = Math.max(3000, Number(result.heartbeat_interval_seconds || 5) * 1000);
-    state.connectionStatus = "online";
-    showPanel("test", 3);
-    setConnectionOverlay("online");
-    document.documentElement.requestFullscreen?.().catch(() => {});
-    await startSuspiciousMonitoring();
-    await sendHeartbeat({ cameraVerified: true, reason: "start" });
-    startHeartbeatLoop();
-    await loadQuestion();
+    await activateStartedAssessment(result, monitoringPrepared);
   } catch (error) {
     stopCamera();
-    setMessage($("#mode-warning"), `Camera monitoring could not start: ${error.message}`, "error");
+    await stopEvidenceRecordings();
+    if (isAttemptLimitError(error)) {
+      await returnToStartModeAfterAttemptLimit(error.message);
+      return;
+    }
+    setMessage($("#mode-warning"), `The enabled examination controls could not start: ${error.message}`, "error");
     button.disabled = false;
   } finally {
     button.textContent = "Start assessment";
+  }
+});
+
+$("#start-standalone-exam")?.addEventListener("click", async () => {
+  const button = $("#start-standalone-exam");
+  const task = state.selectedTask;
+  const candidateName = $("#exam-candidate-name")?.value.trim();
+  const candidateId = $("#exam-candidate-id")?.value.trim();
+  if (!task || task.mode !== "standalone_exam") return;
+  if (!candidateName || !candidateId) {
+    setMessage($("#standalone-exam-message"), "Enter the candidate name and ID.", "warning");
+    return;
+  }
+  button.disabled = true;
+  setMessage($("#standalone-exam-message"), "Starting examination…");
+  try {
+    let monitoringPrepared = false;
+    if (state.secureBrowserEnforcement && !document.fullscreenElement) {
+      await document.documentElement.requestFullscreen();
+    }
+    await prepareEvidenceCapture(state.activeFeatures);
+    if (state.monitoringEnabled) {
+      await startCamera();
+      await runMonitoringPreflight();
+      monitoringPrepared = true;
+    }
+    const result = await api("/api/examinations/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        course_code: $("#student-course-code").value.trim(),
+        task_id: task.id,
+        candidate_name: candidateName,
+        candidate_id: candidateId,
+        client_instance_id: state.clientInstanceId,
+      }),
+    });
+    await activateStartedAssessment(result, monitoringPrepared);
+  } catch (error) {
+    stopCamera();
+    await stopEvidenceRecordings();
+    if (isAttemptLimitError(error)) {
+      await returnToStartModeAfterAttemptLimit(error.message);
+      return;
+    }
+    setMessage($("#standalone-exam-message"), error.message, "error");
+  } finally {
+    button.disabled = !task.ready || !$("#standalone-exam-consent")?.checked;
   }
 });
 
@@ -1626,6 +1930,7 @@ async function loadQuestion() {
       clearAssessmentSession();
       state.testActive = false;
       stopCamera();
+      await stopEvidenceRecordings();
       showPanel("upload", 1);
       setMessage($("#upload-message"), error.message, "error");
       return;
@@ -1678,10 +1983,11 @@ async function loadResult() {
   clearQuestionTimer();
   clearSnapshotTimer();
   clearHeartbeatTimer();
-  state.testActive = false;
   try {
     if (!state.snapshotCaptured) await captureSnapshotOnce("completion_fallback");
     stopCamera();
+    await stopEvidenceRecordings();
+    state.testActive = false;
     const result = await api(`/api/assessments/${state.assessmentId}/result`, {
       headers: { Authorization: `Bearer ${state.token}` },
     });
@@ -1704,6 +2010,7 @@ async function loadResult() {
 
 $("#new-assessment-button").addEventListener("click", () => {
   stopCamera();
+  stopEvidenceRecordings();
   clearHeartbeatTimer();
   state.documentId = null;
   clearAssessmentSession();
@@ -1723,6 +2030,10 @@ $("#new-assessment-button").addEventListener("click", () => {
 
 document.addEventListener("visibilitychange", () => {
   if (!state.testActive || document.visibilityState !== "hidden") return;
+  if (state.secureBrowserEnforcement) {
+    terminateForSecureBrowser("page_hidden");
+    return;
+  }
   fetch(`/api/assessments/${state.assessmentId}/focus-event`, {
     method: "POST",
     headers: assessmentHeaders(),
@@ -1732,6 +2043,10 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("blur", () => {
   if (!state.testActive) return;
+  if (state.secureBrowserEnforcement) {
+    terminateForSecureBrowser("window_blur");
+    return;
+  }
   showMonitoringWarning({ title: "Assessment window lost focus", message: "Return to the assessment window.", severity: "warning" });
   postMonitoringEvent("window_blur", 0, false, { severity: "warning", message: "The assessment browser window lost focus." });
   fetch(`/api/assessments/${state.assessmentId}/focus-event`, {
@@ -1740,6 +2055,10 @@ window.addEventListener("blur", () => {
     body: JSON.stringify({ event: "blur" }),
     keepalive: true,
   }).catch(() => {});
+});
+document.addEventListener("fullscreenchange", () => {
+  if (!state.testActive || !state.secureBrowserEnforcement || !state.secureBrowserArmed) return;
+  if (!document.fullscreenElement) terminateForSecureBrowser("fullscreen_exited");
 });
 window.addEventListener("focus", () => {
   if (!state.testActive) return;
@@ -1981,6 +2300,7 @@ $("#course-create-form").addEventListener("submit", async (event) => {
       academic_year: raw.academic_year,
       semester: raw.semester,
       assessment_question_count: Number(raw.assessment_question_count || 20),
+      max_attempts: Number(raw.max_attempts || 1),
       checkpoint_question_count: Number(raw.checkpoint_question_count || 3),
       milestones_enabled: Boolean(event.currentTarget.elements.milestones_enabled.checked),
       version_history_enabled: Boolean(event.currentTarget.elements.version_history_enabled.checked),
@@ -2059,22 +2379,120 @@ function populateCourseSelectors(courses) {
   const collaborator = $("#collaborator-course");
   const filter = $("#submission-course-filter");
   const progress = $("#progress-course-filter");
+  const taskCourse = $("#task-course");
   const selectedFilter = filter.value;
   const selectedProgress = progress?.value || "";
+  const selectedTaskCourse = taskCourse?.value || "";
   collaborator.replaceChildren(new Option("Select course", ""));
   filter.replaceChildren(new Option("All my courses", ""));
   progress?.replaceChildren(new Option("Select a course", ""));
+  taskCourse?.replaceChildren(new Option("Select course", ""));
   courses.forEach((course) => {
     const label = `${course.course_code} · ${course.title}`;
     if (["owner", "institution_admin"].includes(course.my_access_level)) {
       collaborator.appendChild(new Option(label, course.id));
+    }
+    if (["owner", "co_lecturer", "institution_admin"].includes(course.my_access_level)) {
+      taskCourse?.appendChild(new Option(label, course.id));
     }
     filter.appendChild(new Option(label, course.id));
     progress?.appendChild(new Option(label, course.id));
   });
   if (courses.some((course) => course.id === selectedFilter)) filter.value = selectedFilter;
   if (progress && courses.some((course) => course.id === selectedProgress)) progress.value = selectedProgress;
+  if (taskCourse && courses.some((course) => course.id === selectedTaskCourse)) taskCourse.value = selectedTaskCourse;
 }
+
+async function loadTaskFeatureOptions() {
+  const courseId = $("#task-course")?.value;
+  const container = $("#task-feature-options");
+  if (!courseId || !container) {
+    if (container) container.innerHTML = "<small>Select a course to load administrator-approved features.</small>";
+    return;
+  }
+  try {
+    const result = await api(`/api/lecturer/courses/${courseId}/tasks`);
+    container.replaceChildren();
+    (result.optional_feature_catalog || []).forEach((feature) => {
+      const label = document.createElement("label");
+      label.className = "checkbox-setting";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.dataset.featureKey = feature.key;
+      input.disabled = feature.activation_mode !== "lecturer_allowed";
+      input.checked = feature.activation_mode === "always_on";
+      const text = document.createElement("span");
+      const rule = {
+        disabled: "disabled by administrator",
+        admin_only: "administrator activation required",
+        lecturer_allowed: "lecturer may activate",
+        always_on: "required by administrator",
+      }[feature.activation_mode];
+      text.textContent = `${feature.label} — ${rule}`;
+      label.title = feature.description;
+      label.append(input, text);
+      container.appendChild(label);
+    });
+  } catch (error) {
+    setMessage($("#task-create-message"), error.message, "error");
+  }
+}
+
+$("#task-course")?.addEventListener("change", loadTaskFeatureOptions);
+$("#task-mode")?.addEventListener("change", (event) => {
+  $("#exam-source-fields")?.classList.toggle("hidden", event.target.value !== "standalone_exam");
+});
+
+$("#assessment-task-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = event.submitter;
+  const data = formJson(form);
+  const features = {};
+  $("#task-feature-options")?.querySelectorAll('input[data-feature-key]:not(:disabled)').forEach((input) => {
+    features[input.dataset.featureKey] = input.checked;
+  });
+  const sourceFile = form.elements.exam_source_file?.files?.[0];
+  const questionFile = form.elements.exam_questions_file?.files?.[0];
+  if (sourceFile && questionFile) {
+    setMessage($("#task-create-message"), "Choose either a source document or a question-bank JSON file, not both.", "warning");
+    return;
+  }
+  button.disabled = true;
+  try {
+    const created = await api(`/api/lecturer/courses/${data.course_id}/tasks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: data.title,
+        instructions: data.instructions || null,
+        mode: data.mode,
+        assessment_question_count: Number(data.assessment_question_count),
+        max_attempts: Number(data.max_attempts),
+        features,
+      }),
+    });
+    if (data.mode === "standalone_exam" && (sourceFile || questionFile)) {
+      const upload = new FormData();
+      upload.set("title", data.exam_source_title || data.title);
+      upload.set("file", sourceFile || questionFile);
+      const route = questionFile ? "question-bank" : "exam-source";
+      await api(`/api/lecturer/courses/${data.course_id}/tasks/${created.task.id}/${route}`, {
+        method: "POST",
+        body: upload,
+      });
+    }
+    form.reset();
+    $("#exam-source-fields")?.classList.add("hidden");
+    $("#task-feature-options").innerHTML = "<small>Select a course to load administrator-approved features.</small>";
+    setMessage($("#task-create-message"), "Assessment task created. Any selected question source is now being prepared.", "success");
+    await loadCourses();
+  } catch (error) {
+    setMessage($("#task-create-message"), error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+});
 
 
 function renderCourses(courses) {
@@ -2115,6 +2533,10 @@ function renderCourses(courses) {
     if (course.random_moderation_enabled) phase2Labels.push(`${course.moderation_sample_percent}% moderation`);
     if (course.marker_anomaly_detection_enabled) phase2Labels.push("Marker analytics");
     if (phase2Labels.length) process.push(`Phase 2: ${phase2Labels.join(", ")}`);
+    if ((course.assessment_tasks || []).length) {
+      process.push(`${course.assessment_tasks.length} task profile(s)`);
+      process.push(...course.assessment_tasks.map((task) => `${task.title}: ${task.max_attempts || 1} attempt(s), ${Object.values(task.effective_features || {}).filter(Boolean).length} optional feature(s)`));
+    }
     row.children[4].textContent = process.join(" · ");
     row.children[5].textContent = course.lecturers.map((item) => `${item.full_name} (${item.access_level.replaceAll("_", " ")})`).join(", ");
     row.children[6].textContent = String(course.submission_count);
@@ -2134,11 +2556,21 @@ function renderCourses(courses) {
       $("#learning-progress-body").closest("section")?.scrollIntoView({ behavior: "smooth" });
     });
     actions.appendChild(progress);
-    if (course.live_exam_monitoring_enabled) {
+    if (course.live_exam_monitoring_enabled || (course.assessment_tasks || []).some((task) => task.effective_features?.live_exam_monitoring)) {
       const liveMonitor = document.createElement("button");
       liveMonitor.textContent = "Live monitor";
       liveMonitor.addEventListener("click", () => openLiveExamMonitor(course));
       actions.appendChild(liveMonitor);
+    }
+    if (["owner", "co_lecturer", "institution_admin"].includes(course.my_access_level) && (course.assessment_tasks || []).length) {
+      const taskAttempts = document.createElement("button");
+      taskAttempts.textContent = "Attempt limits";
+      taskAttempts.addEventListener("click", () => configureTaskAttemptLimit(course));
+      actions.appendChild(taskAttempts);
+      const resetCandidate = document.createElement("button");
+      resetCandidate.textContent = "Reset candidate";
+      resetCandidate.addEventListener("click", () => resetCandidateTaskAttempts(course));
+      actions.appendChild(resetCandidate);
     }
     if (["owner", "institution_admin"].includes(course.my_access_level)) {
       const questions = document.createElement("button");
@@ -2259,19 +2691,94 @@ $("#close-live-exam-monitor")?.addEventListener("click", () => {
   $("#live-exam-monitor-panel")?.classList.add("hidden");
 });
 
-async function updateCourseLearningSettings(course) {
-  const finalCountInput = prompt(`Final assessment questions for ${course.course_code}, 5 to 20:`, String(course.assessment_question_count || 20));
-  if (finalCountInput == null) return;
-  const finalCount = Number(finalCountInput);
-  if (!Number.isInteger(finalCount) || finalCount < 5 || finalCount > 20) {
-    setMessage($("#lecturer-message"), "Final questions must be a whole number from 5 to 20.", "error");
+function chooseCourseTask(course, actionLabel) {
+  const tasks = course.assessment_tasks || [];
+  if (!tasks.length) return null;
+  if (tasks.length === 1) return tasks[0];
+  const choices = tasks.map((task, index) => `${index + 1}. ${task.title} (${task.mode.replaceAll("_", " ")})`).join("\n");
+  const selected = prompt(`${actionLabel}\n\n${choices}\n\nEnter the task number:`, "1");
+  if (selected == null) return null;
+  const index = Number(selected) - 1;
+  if (!Number.isInteger(index) || index < 0 || index >= tasks.length) {
+    setMessage($("#lecturer-message"), "Select a valid assessment task number.", "error");
+    return null;
+  }
+  return tasks[index];
+}
+
+async function configureTaskAttemptLimit(course) {
+  const task = chooseCourseTask(course, "Choose the task whose attempt limit you want to change.");
+  if (!task) return;
+  const input = prompt(
+    `Maximum starts per student for “${task.title}”:`,
+    String(task.max_attempts || 1)
+  );
+  if (input == null) return;
+  const maxAttempts = Number(input);
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+    setMessage($("#lecturer-message"), "Maximum attempts must be a positive whole number.", "error");
     return;
   }
-  const checkpointInput = prompt("Questions for each milestone checkpoint, 3 to 10:", String(course.checkpoint_question_count || 3));
+  try {
+    await api(`/api/lecturer/courses/${course.id}/tasks/${task.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ max_attempts: maxAttempts }),
+    });
+    setMessage($("#lecturer-message"), `${task.title} now permits ${maxAttempts} attempt(s) per student.`, "success");
+    await loadCourses();
+  } catch (error) {
+    handleLecturerError(error);
+  }
+}
+
+async function resetCandidateTaskAttempts(course) {
+  const task = chooseCourseTask(course, "Choose the task to reset for a candidate.");
+  if (!task) return;
+  const candidateId = prompt(`Candidate/student ID to reset for “${task.title}”:`, "");
+  if (candidateId == null || !candidateId.trim()) return;
+  if (!confirm(
+    `Reset all attempts for ${candidateId.trim()} in “${task.title}”? Answers, monitoring evidence, screen recordings and environment-audio recordings for those attempts will be deleted. This cannot be undone.`
+  )) return;
+  try {
+    const result = await api(
+      `/api/lecturer/courses/${course.id}/tasks/${task.id}/attempts?candidate_id=${encodeURIComponent(candidateId.trim())}`,
+      { method: "DELETE" }
+    );
+    setMessage(
+      $("#lecturer-message"),
+      `${candidateId.trim()} was reset for ${task.title}. ${result.deleted_attempts} prior attempt(s) were removed and the candidate may start afresh.`,
+      "success"
+    );
+    await Promise.all([loadCourses(), loadSubmissions()]);
+  } catch (error) {
+    handleLecturerError(error);
+  }
+}
+
+async function updateCourseLearningSettings(course) {
+  const finalCountInput = prompt(`Final assessment questions for ${course.course_code} (any positive whole number):`, String(course.assessment_question_count || 20));
+  if (finalCountInput == null) return;
+  const finalCount = Number(finalCountInput);
+  if (!Number.isInteger(finalCount) || finalCount < 1) {
+    setMessage($("#lecturer-message"), "Final questions must be a positive whole number.", "error");
+    return;
+  }
+  const maxAttemptsInput = prompt(
+    "Maximum starts per student for legacy assessments without a task profile:",
+    String(course.max_attempts || 1)
+  );
+  if (maxAttemptsInput == null) return;
+  const maxAttempts = Number(maxAttemptsInput);
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+    setMessage($("#lecturer-message"), "Maximum attempts must be a positive whole number.", "error");
+    return;
+  }
+  const checkpointInput = prompt("Questions for each milestone checkpoint (any positive whole number):", String(course.checkpoint_question_count || 3));
   if (checkpointInput == null) return;
   const checkpointCount = Number(checkpointInput);
-  if (!Number.isInteger(checkpointCount) || checkpointCount < 3 || checkpointCount > 10) {
-    setMessage($("#lecturer-message"), "Checkpoint questions must be a whole number from 3 to 10.", "error");
+  if (!Number.isInteger(checkpointCount) || checkpointCount < 1) {
+    setMessage($("#lecturer-message"), "Checkpoint questions must be a positive whole number.", "error");
     return;
   }
   const milestonesEnabled = confirm("Select OK to enable Kanokware learning milestones. Select Cancel for final-submission-only or manually monitored learning process.");
@@ -2302,11 +2809,11 @@ async function updateCourseLearningSettings(course) {
     : (course.live_exam_instructions || "");
   if (liveExamInstructionsInput == null) return;
   const oralDefenceEnabled = confirm("Select OK to enable the optional oral-defence module.");
-  const oralCountInput = oralDefenceEnabled ? prompt("Oral-defence questions, 3 to 10:", String(course.oral_defence_question_count || 5)) : String(course.oral_defence_question_count || 5);
+  const oralCountInput = oralDefenceEnabled ? prompt("Oral-defence questions (any positive whole number):", String(course.oral_defence_question_count || 5)) : String(course.oral_defence_question_count || 5);
   if (oralCountInput == null) return;
   const oralCount = Number(oralCountInput);
-  if (!Number.isInteger(oralCount) || oralCount < 3 || oralCount > 10) {
-    setMessage($("#lecturer-message"), "Oral-defence questions must be a whole number from 3 to 10.", "error");
+  if (!Number.isInteger(oralCount) || oralCount < 1) {
+    setMessage($("#lecturer-message"), "Oral-defence questions must be a positive whole number.", "error");
     return;
   }
   const practicalTasksEnabled = confirm("Select OK to enable optional practical reproduction tasks.");
@@ -2341,6 +2848,7 @@ async function updateCourseLearningSettings(course) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         assessment_question_count: finalCount,
+        max_attempts: maxAttempts,
         checkpoint_question_count: checkpointCount,
         milestones_enabled: milestonesEnabled,
         version_history_enabled: versionHistoryEnabled,
@@ -2371,11 +2879,11 @@ async function updateCourseLearningSettings(course) {
 async function addCourseMilestone(course) {
   const title = prompt(`New milestone title for ${course.course_code}:`, "");
   if (title == null || !title.trim()) return;
-  const countInput = prompt("Checkpoint questions for this milestone, 3 to 10:", String(course.checkpoint_question_count || 3));
+  const countInput = prompt("Checkpoint questions for this milestone (any positive whole number):", String(course.checkpoint_question_count || 3));
   if (countInput == null) return;
   const count = Number(countInput);
-  if (!Number.isInteger(count) || count < 3 || count > 10) {
-    setMessage($("#lecturer-message"), "Enter a whole number from 3 to 10.", "error");
+  if (!Number.isInteger(count) || count < 1) {
+    setMessage($("#lecturer-message"), "Enter a positive whole number.", "error");
     return;
   }
   try {
@@ -2693,7 +3201,8 @@ async function reviewAssessment(assessmentId) {
       block.querySelector("span").textContent = label;
       summary.appendChild(block);
     });
-    renderEvidenceProfile(result.evidence_profile);
+    $("#evidence-profile-panel")?.classList.toggle("hidden", !result.evidence_profile);
+    if (result.evidence_profile) renderEvidenceProfile(result.evidence_profile);
 
     const justification = $("#review-justification");
     justification.replaceChildren();
@@ -2775,6 +3284,23 @@ async function reviewAssessment(assessmentId) {
       status.textContent = event.corrected ? "Corrected" : "Needs review";
       if (event.corrected) status.classList.add("corrected");
       monitoringList.appendChild(card);
+    });
+
+    const recordingPanel = $("#review-recordings");
+    const recordingList = $("#review-recording-list");
+    const recordings = result.recordings || [];
+    recordingList.replaceChildren();
+    recordingPanel.classList.toggle("hidden", recordings.length === 0);
+    recordings.forEach((recording) => {
+      const card = document.createElement("article");
+      card.className = "monitoring-event";
+      card.innerHTML = '<div><strong></strong><small></small></div><a class="secondary-button">Download chunk</a>';
+      card.querySelector("strong").textContent = `${recording.recording_type.replaceAll("_", " ")} · chunk ${recording.sequence + 1}`;
+      card.querySelector("small").textContent = `${(recording.byte_count / 1024 / 1024).toFixed(2)} MB · ${recording.created_at ? new Date(recording.created_at).toLocaleString() : ""}`;
+      const link = card.querySelector("a");
+      link.href = recording.download_url;
+      link.download = "";
+      recordingList.appendChild(card);
     });
 
     const questions = $("#review-questions");
@@ -3436,7 +3962,7 @@ async function unlockPlatform(silent = false) {
     sessionStorage.setItem("kanokware_platform_key", state.platformKey);
     showPlatformDashboard();
     setMessage($("#platform-login-message"));
-    await loadPlatformUsers();
+    await Promise.all([loadPlatformUsers(), loadPlatformFeatures(), loadPlatformTasks()]);
   } catch (error) {
     showPlatformLogin();
     if (!silent) setMessage($("#platform-login-message"), error.message, "error");
@@ -3503,6 +4029,116 @@ $("#copy-setup-details").addEventListener("click", async () => {
 });
 
 $("#refresh-platform-users").addEventListener("click", loadPlatformUsers);
+$("#refresh-platform-features")?.addEventListener("click", loadPlatformFeatures);
+$("#refresh-platform-tasks")?.addEventListener("click", loadPlatformTasks);
+
+async function loadPlatformTasks() {
+  try {
+    const result = await api("/api/platform/assessment-tasks", { headers: platformHeaders() });
+    renderPlatformTasks(result.tasks || []);
+  } catch (error) {
+    setMessage($("#platform-message"), error.message, "error");
+  }
+}
+
+function renderPlatformTasks(tasks) {
+  const body = $("#platform-tasks-body");
+  if (!body) return;
+  body.replaceChildren();
+  if (!tasks.length) {
+    body.innerHTML = '<tr><td colspan="4" class="empty-state">No assessment tasks have been created.</td></tr>';
+    return;
+  }
+  tasks.forEach((task) => {
+    const row = document.createElement("tr");
+    const name = document.createElement("td");
+    name.innerHTML = "<strong></strong><small></small>";
+    name.querySelector("strong").textContent = task.title;
+    name.querySelector("small").textContent = task.course_id;
+    const mode = document.createElement("td");
+    mode.textContent = task.mode.replaceAll("_", " ");
+    const effective = document.createElement("td");
+    effective.textContent = task.features.filter((feature) => feature.effective).map((feature) => feature.label).join(", ") || "Basic workflow only";
+    const controls = document.createElement("td");
+    const group = document.createElement("div");
+    group.className = "action-row";
+    task.features.filter((feature) => feature.activation_mode === "admin_only").forEach((feature) => {
+      const button = document.createElement("button");
+      button.textContent = `${feature.effective ? "Disable" : "Enable"} ${feature.label}`;
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+          await api(`/api/platform/assessment-tasks/${task.id}/features`, {
+            method: "PATCH",
+            headers: platformHeaders({ "Content-Type": "application/json" }),
+            body: JSON.stringify({ features: { [feature.key]: !feature.effective } }),
+          });
+          await loadPlatformTasks();
+        } catch (error) {
+          setMessage($("#platform-message"), error.message, "error");
+          button.disabled = false;
+        }
+      });
+      group.appendChild(button);
+    });
+    if (!group.childElementCount) group.textContent = "No administrator-only controls";
+    controls.appendChild(group);
+    row.append(name, mode, effective, controls);
+    body.appendChild(row);
+  });
+}
+
+async function loadPlatformFeatures() {
+  try {
+    const result = await api("/api/platform/features", { headers: platformHeaders() });
+    renderPlatformFeatures(result.optional_features || []);
+  } catch (error) {
+    setMessage($("#platform-message"), error.message, "error");
+  }
+}
+
+function renderPlatformFeatures(features) {
+  const body = $("#platform-features-body");
+  if (!body) return;
+  body.replaceChildren();
+  features.forEach((feature) => {
+    const row = document.createElement("tr");
+    const name = document.createElement("td");
+    name.innerHTML = "<strong></strong><small></small>";
+    name.querySelector("strong").textContent = feature.label;
+    name.querySelector("small").textContent = feature.group.replaceAll("_", " ");
+    const purpose = document.createElement("td");
+    purpose.textContent = feature.description;
+    const control = document.createElement("td");
+    const select = document.createElement("select");
+    [
+      ["disabled", "Disabled"],
+      ["admin_only", "Administrator only"],
+      ["lecturer_allowed", "Lecturer may activate"],
+      ["always_on", "Always active"],
+    ].forEach(([value, label]) => select.appendChild(new Option(label, value)));
+    select.value = feature.activation_mode;
+    select.addEventListener("change", async () => {
+      select.disabled = true;
+      try {
+        await api(`/api/platform/features/${feature.key}`, {
+          method: "PATCH",
+          headers: platformHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({ activation_mode: select.value }),
+        });
+        setMessage($("#platform-message"), `${feature.label} policy updated.`, "success");
+      } catch (error) {
+        select.value = feature.activation_mode;
+        setMessage($("#platform-message"), error.message, "error");
+      } finally {
+        select.disabled = false;
+      }
+    });
+    control.appendChild(select);
+    row.append(name, purpose, control);
+    body.appendChild(row);
+  });
+}
 
 async function loadPlatformUsers() {
   try {
@@ -3636,7 +4272,9 @@ if (state.assessmentId && state.token) {
 loadLecturerSession(true);
 if (state.platformKey) unlockPlatform(true);
 window.addEventListener("pagehide", () => {
-  reportExplicitInterruption("pagehide");
+  if (state.secureBrowserEnforcement) terminateForSecureBrowser("page_hidden");
+  else reportExplicitInterruption("pagehide");
   clearHeartbeatTimer();
   stopCamera();
+  stopEvidenceRecordings();
 });
