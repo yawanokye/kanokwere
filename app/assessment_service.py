@@ -74,6 +74,13 @@ def _question_total(assessment: Assessment) -> int:
     return len(assessment.items)
 
 
+def _continuity_enabled(assessment: Assessment) -> bool:
+    return bool(
+        assessment_feature_enabled(assessment, "webcam_monitoring")
+        or assessment_feature_enabled(assessment, "live_exam_monitoring")
+    )
+
+
 def _difficulty_targets(total: int) -> dict[str, int]:
     raw = {name: total * weight for name, weight in DIFFICULTY_WEIGHTS.items()}
     targets = {name: math.floor(value) for name, value in raw.items()}
@@ -225,6 +232,73 @@ def _resolve_connection_interruption(
         )
 
 
+def _reshuffle_after_interruption(
+    db: Session,
+    assessment: Assessment,
+    *,
+    interrupted_at: datetime,
+) -> None:
+    """Move the question visible at exit to the end of the unseen sequence."""
+    current_item = next(
+        (
+            item for item in assessment.items
+            if item.position == assessment.current_position
+            and item.answered_at is None
+            and item.presented_at is not None
+        ),
+        None,
+    )
+    if not current_item:
+        return
+    presented_at = _aware(current_item.presented_at)
+    if presented_at:
+        spent_ms = max(0, int((interrupted_at - presented_at).total_seconds() * 1000))
+        current_item.response_ms = min(
+            settings.question_time_seconds * 1000 - 1,
+            int(current_item.response_ms or 0) + spent_ms,
+        )
+    current_item.presented_at = None
+    current_item.adaptive_reason = "reshuffled_after_resume"
+
+    unseen = [
+        item for item in assessment.items
+        if item.position > assessment.current_position
+        and item.answered_at is None
+        and item.presented_at is None
+    ]
+    if unseen:
+        random.SystemRandom().shuffle(unseen)
+        for item in unseen:
+            item.adaptive_reason = "reshuffled_after_resume"
+        for position, item in enumerate(
+            [*unseen, current_item], start=assessment.current_position
+        ):
+            item.position = position
+        event_type = "question_reshuffled_after_resume"
+        message = (
+            "The question visible when the candidate left was moved to the end, "
+            "and the unseen sequence was reshuffled."
+        )
+    else:
+        event_type = "resume_question_no_replacement"
+        message = (
+            "No unseen replacement question remained, so the last visible question "
+            "remained the final question."
+        )
+    db.add(
+        MonitoringEvent(
+            assessment_id=assessment.id,
+            event_type=event_type,
+            severity="warning",
+            duration_ms=0,
+            question_position=assessment.current_position,
+            message=message,
+            corrected=True,
+            resolved_at=utcnow(),
+        )
+    )
+
+
 def _lock_assessment(
     db: Session,
     assessment: Assessment,
@@ -293,7 +367,7 @@ def interrupt_assessment(
     reason: str,
     now: datetime | None = None,
 ) -> Assessment:
-    if not assessment_feature_enabled(assessment, "webcam_monitoring"):
+    if not _continuity_enabled(assessment):
         assessment.last_seen_at = now or utcnow()
         db.commit()
         return assessment
@@ -307,7 +381,9 @@ def interrupt_assessment(
         minutes=settings.assessment_resume_window_minutes
     )
     assessment.last_interruption_reason = reason
-    assessment.camera_reverification_required = True
+    assessment.camera_reverification_required = assessment_feature_enabled(
+        assessment, "webcam_monitoring"
+    )
     _record_connection_interruption(
         db, assessment, reason=reason, started_at=current
     )
@@ -340,7 +416,7 @@ def refresh_interruption_state(
     now: datetime | None = None,
     commit: bool = True,
 ) -> Assessment:
-    if not assessment_feature_enabled(assessment, "webcam_monitoring"):
+    if not _continuity_enabled(assessment):
         return assessment
     current = now or utcnow()
     changed = False
@@ -357,7 +433,9 @@ def refresh_interruption_state(
                     minutes=settings.assessment_resume_window_minutes
                 )
                 assessment.last_interruption_reason = "heartbeat_timeout"
-                assessment.camera_reverification_required = True
+                assessment.camera_reverification_required = assessment_feature_enabled(
+                    assessment, "webcam_monitoring"
+                )
                 _record_connection_interruption(
                     db,
                     assessment,
@@ -378,6 +456,8 @@ def assessment_state_payload(assessment: Assessment) -> dict[str, object]:
     active_features = assessment_features(assessment)
     deadline = _aware(assessment.resume_deadline_at)
     remaining = max(0, int((deadline - now).total_seconds())) if deadline else None
+    exam_deadline = _aware(assessment.exam_deadline_at)
+    exam_remaining = max(0, int((exam_deadline - now).total_seconds())) if exam_deadline else None
     return {
         "assessment_id": assessment.id,
         "status": assessment.status,
@@ -394,6 +474,13 @@ def assessment_state_payload(assessment: Assessment) -> dict[str, object]:
         "resume_count": assessment.resume_count,
         "resume_deadline_at": deadline.isoformat() if deadline else None,
         "resume_seconds_remaining": remaining,
+        "exam_deadline_at": exam_deadline.isoformat() if exam_deadline else None,
+        "exam_seconds_remaining": exam_remaining,
+        "proctor_message": assessment.proctor_message,
+        "proctor_message_at": (
+            assessment.proctor_message_at.isoformat()
+            if assessment.proctor_message_at else None
+        ),
         "last_interruption_reason": assessment.last_interruption_reason,
         "camera_reverification_required": assessment.camera_reverification_required,
         "locked_at": assessment.locked_at.isoformat() if assessment.locked_at else None,
@@ -419,7 +506,8 @@ def heartbeat_assessment(
     reason: str,
 ) -> dict[str, object]:
     now = utcnow()
-    if not assessment_feature_enabled(assessment, "webcam_monitoring"):
+    _expire_exam_if_needed(db, assessment, now=now)
+    if not _continuity_enabled(assessment):
         assessment.last_seen_at = now
         assessment.camera_reverification_required = False
         db.commit()
@@ -457,7 +545,8 @@ def heartbeat_assessment(
         if _lock_if_limits_exceeded(db, assessment, now=now):
             db.commit()
             return assessment_state_payload(assessment)
-        if not camera_verified:
+        camera_required = assessment_feature_enabled(assessment, "webcam_monitoring")
+        if camera_required and not camera_verified:
             assessment.camera_reverification_required = True
             db.commit()
             return assessment_state_payload(assessment)
@@ -472,6 +561,12 @@ def heartbeat_assessment(
             db.commit()
             return assessment_state_payload(assessment)
 
+        interrupted_at = _aware(assessment.interruption_started_at) or now
+        _reshuffle_after_interruption(
+            db,
+            assessment,
+            interrupted_at=interrupted_at,
+        )
         assessment.total_offline_seconds += offline_seconds
         assessment.resume_count += 1
         assessment.last_resumed_at = now
@@ -549,6 +644,11 @@ def start_assessment(
     candidate_name: str | None = None,
     candidate_id: str | None = None,
     standalone: bool = False,
+    exam_duration_minutes: int | None = None,
+    exam_ends_at: datetime | None = None,
+    accommodation_minutes: int = 0,
+    location_distance_meters: float | None = None,
+    location_accuracy_meters: float | None = None,
 ) -> tuple[Assessment, str]:
     document = db.scalar(
         select(Document)
@@ -616,6 +716,14 @@ def start_assessment(
 
     token, token_hash = make_session_token()
     now = utcnow()
+    exam_deadline = None
+    if exam_duration_minutes:
+        exam_deadline = now + timedelta(
+            minutes=exam_duration_minutes + max(0, accommodation_minutes)
+        )
+    scheduled_end = _aware(exam_ends_at)
+    if scheduled_end and (exam_deadline is None or scheduled_end < exam_deadline):
+        exam_deadline = scheduled_end
     assessment = Assessment(
         document_id=document.id,
         course_id=document.course_id,
@@ -625,6 +733,11 @@ def start_assessment(
         features_json=json.dumps(captured_features, sort_keys=True),
         token_hash=token_hash,
         question_count=question_count,
+        exam_deadline_at=exam_deadline,
+        extra_time_minutes=max(0, accommodation_minutes),
+        location_distance_meters=location_distance_meters,
+        location_accuracy_meters=location_accuracy_meters,
+        location_verified_at=now if location_distance_meters is not None else None,
         last_seen_at=now,
         client_instance_id=client_instance_id,
         camera_reverification_required=False,
@@ -698,8 +811,9 @@ def _get_item(assessment: Assessment, position: int) -> AssessmentItem | None:
 def _time_elapsed_ms(item: AssessmentItem) -> int:
     presented_at = _aware(item.presented_at)
     if not presented_at:
-        return 0
-    return max(0, int((utcnow() - presented_at).total_seconds() * 1000))
+        return int(item.response_ms or 0) if item.answered_at is None else 0
+    prior_ms = int(item.response_ms or 0) if item.answered_at is None else 0
+    return prior_ms + max(0, int((utcnow() - presented_at).total_seconds() * 1000))
 
 
 def _mark_timeout(item: AssessmentItem) -> None:
@@ -730,11 +844,134 @@ def _complete(db: Session, assessment: Assessment) -> None:
     db.commit()
 
 
+def _expire_exam_if_needed(
+    db: Session,
+    assessment: Assessment,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    if assessment.status in {"completed", "locked", "proctor_paused"}:
+        return False
+    deadline = _aware(assessment.exam_deadline_at)
+    current = now or utcnow()
+    if not deadline or current < deadline:
+        return False
+    for item in assessment.items:
+        if item.answered_at is None:
+            _mark_timeout(item)
+    assessment.current_position = _question_total(assessment) + 1
+    _complete(db, assessment)
+    assessment.decision = "Examination time expired"
+    db.add(
+        MonitoringEvent(
+            assessment_id=assessment.id,
+            event_type="exam_duration_expired",
+            severity="warning",
+            duration_ms=0,
+            question_position=None,
+            message="The configured examination duration expired.",
+            corrected=True,
+            resolved_at=current,
+        )
+    )
+    db.commit()
+    return True
+
+
+def proctor_control_assessment(
+    db: Session,
+    assessment: Assessment,
+    *,
+    action: str,
+    actor_name: str,
+    message: str | None = None,
+    minutes: int | None = None,
+) -> Assessment:
+    """Apply and record a live invigilator intervention."""
+    now = utcnow()
+    clean_message = (message or "").strip()
+    if assessment.status == "completed":
+        raise HTTPException(status_code=409, detail="A completed examination cannot be changed.")
+
+    if action == "warning":
+        assessment.proctor_message = clean_message
+        assessment.proctor_message_at = now
+        assessment.proctor_message_acknowledged_at = None
+        severity = "warning"
+        event_message = clean_message
+    elif action == "pause":
+        if assessment.status != "in_progress":
+            raise HTTPException(status_code=409, detail="Only an active examination can be paused.")
+        assessment.status = "proctor_paused"
+        assessment.proctor_paused_at = now
+        assessment.proctor_message = clean_message or "The invigilator paused this examination."
+        assessment.proctor_message_at = now
+        assessment.proctor_message_acknowledged_at = None
+        severity = "warning"
+        event_message = assessment.proctor_message
+    elif action == "resume":
+        if assessment.status != "proctor_paused" or not assessment.proctor_paused_at:
+            raise HTTPException(status_code=409, detail="This examination is not paused by an invigilator.")
+        paused_at = _aware(assessment.proctor_paused_at) or now
+        paused_for = max(0, int((now - paused_at).total_seconds()))
+        current_item = _get_item(assessment, assessment.current_position)
+        if current_item and current_item.presented_at and current_item.answered_at is None:
+            current_item.presented_at = _aware(current_item.presented_at) + timedelta(seconds=paused_for)
+        if assessment.exam_deadline_at:
+            assessment.exam_deadline_at = _aware(assessment.exam_deadline_at) + timedelta(seconds=paused_for)
+        assessment.status = "in_progress"
+        assessment.proctor_paused_at = None
+        assessment.last_seen_at = now
+        assessment.proctor_message = clean_message or "The invigilator resumed this examination."
+        assessment.proctor_message_at = now
+        assessment.proctor_message_acknowledged_at = None
+        severity = "info"
+        event_message = f"{assessment.proctor_message} Pause duration: {paused_for} seconds."
+    elif action == "add_time":
+        added = int(minutes or 0)
+        if added < 1:
+            raise HTTPException(status_code=422, detail="Give the number of minutes to add.")
+        if not assessment.exam_deadline_at:
+            raise HTTPException(status_code=409, detail="This task has no overall examination duration.")
+        assessment.exam_deadline_at = _aware(assessment.exam_deadline_at) + timedelta(minutes=added)
+        assessment.extra_time_minutes += added
+        assessment.proctor_message = clean_message or f"The invigilator added {added} minute(s)."
+        assessment.proctor_message_at = now
+        assessment.proctor_message_acknowledged_at = None
+        severity = "info"
+        event_message = assessment.proctor_message
+    elif action == "terminate":
+        _lock_assessment(db, assessment, reason="lecturer_locked", now=now)
+        assessment.proctor_message = clean_message or "The invigilator ended and locked this examination."
+        assessment.proctor_message_at = now
+        assessment.proctor_message_acknowledged_at = None
+        severity = "critical"
+        event_message = assessment.proctor_message
+    else:
+        raise HTTPException(status_code=422, detail="Unsupported invigilator action.")
+
+    db.add(
+        MonitoringEvent(
+            assessment_id=assessment.id,
+            event_type=f"proctor_{action}",
+            severity=severity,
+            duration_ms=0,
+            question_position=assessment.current_position,
+            message=f"{actor_name}: {event_message}",
+            corrected=action != "terminate",
+            resolved_at=now if action != "terminate" else None,
+        )
+    )
+    db.commit()
+    return assessment
+
+
 def current_question(db: Session, assessment: Assessment) -> dict[str, object]:
+    _expire_exam_if_needed(db, assessment)
     refresh_interruption_state(db, assessment)
     if assessment.status == "completed":
         return {"status": "completed"}
-    if assessment.status in {"interrupted", "locked"}:
+    if assessment.status in {"interrupted", "locked", "proctor_paused"}:
         return assessment_state_payload(assessment)
 
     assessment.last_seen_at = utcnow()
@@ -821,6 +1058,7 @@ def _adapt_remaining_sequence(assessment: Assessment, answered_item: AssessmentI
 def submit_answer(
     db: Session, assessment: Assessment, selected_index: int
 ) -> dict[str, object]:
+    _expire_exam_if_needed(db, assessment)
     refresh_interruption_state(db, assessment)
     if assessment.status == "completed":
         raise HTTPException(status_code=409, detail="The assessment is already complete.")
@@ -833,6 +1071,11 @@ def submit_answer(
         raise HTTPException(
             status_code=423,
             detail="The assessment is locked for lecturer review.",
+        )
+    if assessment.status == "proctor_paused":
+        raise HTTPException(
+            status_code=409,
+            detail="The examination is paused by the invigilator.",
         )
 
     assessment.last_seen_at = utcnow()

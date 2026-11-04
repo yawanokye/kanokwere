@@ -208,6 +208,22 @@ class AssessmentTask(Base):
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="active")
     assessment_question_count: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    exam_starts_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    exam_ends_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    duration_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    late_entry_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    roster_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    geofence_label: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    geofence_latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    geofence_longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    geofence_radius_meters: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    geofence_max_accuracy_meters: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=100
+    )
     created_by: Mapped[str] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
     )
@@ -218,6 +234,54 @@ class AssessmentTask(Base):
         back_populates="task", cascade="all, delete-orphan"
     )
     documents: Mapped[list["Document"]] = relationship(back_populates="task")
+    exam_candidates: Mapped[list["ExamCandidate"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
+
+
+class ExamCandidate(Base):
+    """A lecturer-approved candidate and their per-exam accommodation."""
+
+    __tablename__ = "exam_candidates"
+    __table_args__ = (
+        UniqueConstraint("task_id", "candidate_id", name="uq_exam_candidate_task_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    candidate_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    candidate_name: Mapped[str] = mapped_column(String(180), nullable=False)
+    access_pin_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    extra_time_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    monitor_group: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    task: Mapped[AssessmentTask] = relationship(back_populates="exam_candidates")
+
+
+class ExamMonitorAssignment(Base):
+    """Assign one roster group to one authorised course monitor."""
+
+    __tablename__ = "exam_monitor_assignments"
+    __table_args__ = (
+        UniqueConstraint("task_id", "group_label", name="uq_exam_monitor_task_group"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    group_label: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    monitor_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    created_by: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class TaskFeatureActivation(Base):
@@ -408,6 +472,25 @@ class Assessment(Base):
     )
     focus_loss_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     question_count: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
+    exam_deadline_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    proctor_paused_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    proctor_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    proctor_message_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    proctor_message_acknowledged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    extra_time_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    location_distance_meters: Mapped[float | None] = mapped_column(Float, nullable=True)
+    location_accuracy_meters: Mapped[float | None] = mapped_column(Float, nullable=True)
+    location_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # Connection continuity and secure-resume state. Heartbeats are the source
     # of truth when the browser cannot report an abrupt exit or power loss.

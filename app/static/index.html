@@ -85,16 +85,38 @@
               <small>Each task has its own examination and assurance controls.</small>
             </label>
             <section id="standalone-exam-card" class="course-requirements-card full-width hidden">
-              <span class="eyebrow">Standalone examination</span>
-              <strong id="standalone-exam-title">Examination</strong>
-              <p id="standalone-exam-instructions"></p>
-              <div class="form-grid">
-                <label>Candidate name<input id="exam-candidate-name" type="text" maxlength="180" autocomplete="name"></label>
-                <label>Candidate ID<input id="exam-candidate-id" type="text" maxlength="100"></label>
+              <div class="exam-launch-heading">
+                <div><span class="eyebrow">Standalone examination</span><strong id="standalone-exam-title">Examination</strong></div>
+                <span class="exam-launch-badge">Secure start</span>
               </div>
-              <label class="consent-row"><input id="standalone-exam-consent" type="checkbox"><span id="standalone-consent-text">I understand the examination rules and consent to the enabled monitoring and recording controls.</span></label>
-              <button id="start-standalone-exam" class="primary-button" type="button" disabled>Start examination</button>
-              <div id="standalone-exam-message" class="message" role="status"></div>
+              <p id="standalone-exam-instructions" class="exam-instructions"></p>
+              <div class="exam-launch-steps">
+                <section class="exam-launch-step">
+                  <div class="step-number">1</div>
+                  <div class="step-content"><h4>Confirm identity</h4><p>Use the details supplied to the lecturer.</p>
+                    <div class="form-grid">
+                      <label>Candidate name<input id="exam-candidate-name" type="text" maxlength="180" autocomplete="name"></label>
+                      <label>Candidate ID<input id="exam-candidate-id" type="text" maxlength="100"></label>
+                      <label id="exam-access-pin-field" class="hidden">Examination access PIN<input id="exam-access-pin" type="password" minlength="4" maxlength="64" autocomplete="one-time-code"></label>
+                    </div>
+                  </div>
+                </section>
+                <section class="exam-launch-step">
+                  <div class="step-number">2</div>
+                  <div class="step-content"><h4>Check this device</h4><p>Confirm that the browser supports every control enabled for this task.</p>
+                    <button id="run-exam-readiness" class="secondary-button" type="button">Run device-readiness check</button>
+                    <div id="exam-readiness-result" class="message" role="status"></div>
+                  </div>
+                </section>
+                <section class="exam-launch-step">
+                  <div class="step-number">3</div>
+                  <div class="step-content"><h4>Consent and start</h4>
+                    <label class="consent-row"><input id="standalone-exam-consent" type="checkbox"><span id="standalone-consent-text">I understand the examination rules and consent to the enabled monitoring and recording controls.</span></label>
+                    <button id="start-standalone-exam" class="primary-button" type="button" disabled>Start examination</button>
+                    <div id="standalone-exam-message" class="message" role="status"></div>
+                  </div>
+                </section>
+              </div>
             </section>
             <div id="submission-assurance-fields" class="form-grid full-width">
             <label id="submission-stage-field" class="full-width hidden">
@@ -450,25 +472,85 @@ Final preparation"></textarea>
 
             <section class="management-card">
               <div class="table-heading"><div><h2>Create assessment task</h2><small>Basic assessment is always available. Activate only the optional controls needed for this task.</small></div></div>
-              <form id="assessment-task-form" class="stack-form compact-form">
-                <label>Course<select name="course_id" id="task-course" required><option value="">Select course</option></select></label>
-                <label>Task title<input name="title" type="text" minlength="3" maxlength="240" required></label>
-                <label>Mode<select name="mode" id="task-mode"><option value="submission_assurance">Student document ownership</option><option value="standalone_exam">Standalone examination</option></select></label>
-                <label>Questions<input name="assessment_question_count" type="number" min="1" value="20" required></label>
-                <label>Maximum attempts per student<input name="max_attempts" type="number" min="1" value="1" required><small>The lecturer can change this later or reset a candidate to start afresh.</small></label>
-                <label>Instructions<textarea name="instructions" rows="3" maxlength="4000"></textarea></label>
-                <fieldset class="phase2-options">
-                  <legend>Optional task features</legend>
-                  <div id="task-feature-options"><small>Select a course to load administrator-approved features.</small></div>
+              <form id="assessment-task-form" class="task-builder-form">
+                <fieldset class="task-builder-section">
+                  <legend><span>1</span> Task basics</legend>
+                  <div class="task-builder-grid">
+                    <label>Course<select name="course_id" id="task-course" required><option value="">Select course</option></select></label>
+                    <label>Mode<select name="mode" id="task-mode"><option value="submission_assurance">Student document ownership</option><option value="standalone_exam">Standalone examination</option></select></label>
+                    <label class="wide-field">Task title<input name="title" type="text" minlength="3" maxlength="240" required></label>
+                    <label>Questions<input name="assessment_question_count" type="number" min="1" value="20" required><small>No application cap is imposed.</small></label>
+                    <label>Maximum attempts<input name="max_attempts" type="number" min="1" value="1" required><small>Reset an individual candidate when needed.</small></label>
+                    <label class="wide-field">Instructions<textarea name="instructions" rows="3" maxlength="4000"></textarea></label>
+                  </div>
                 </fieldset>
-                <div id="exam-source-fields" class="hidden">
-                  <label>Examination source title<input name="exam_source_title" type="text" maxlength="300"></label>
-                  <label class="file-drop"><input name="exam_source_file" type="file" accept=".pdf,.docx,.txt"><strong>Choose source document</strong><small>Kanokware generates the grounded exam bank from this file.</small></label>
-                  <label class="file-drop"><input name="exam_questions_file" type="file" accept=".json,application/json"><strong>Or choose lecturer question-bank JSON</strong><small>Supply exactly the task's selected number of validated questions. Existing attempts remain unchanged when a new bank is uploaded.</small></label>
+                <div id="exam-source-fields" class="hidden task-builder-exam-sections">
+                  <fieldset class="task-builder-section">
+                    <legend><span>2</span> Timing and admission</legend>
+                    <div class="task-builder-grid">
+                      <label>Exam opens<input name="exam_starts_at" type="datetime-local"><small>Optional. Uses your local time.</small></label>
+                      <label>Exam closes<input name="exam_ends_at" type="datetime-local"></label>
+                      <label>Overall duration in minutes<input name="duration_minutes" type="number" min="1" placeholder="Optional"></label>
+                      <label>Late-entry window in minutes<input name="late_entry_minutes" type="number" min="0" max="1440" value="0"><small>Use 0 when no separate cutoff is needed.</small></label>
+                      <label class="checkbox-setting wide-field"><input name="roster_required" type="checkbox"> <span>Require candidate roster and individual access PIN</span></label>
+                      <label class="file-drop wide-field"><input name="exam_roster_file" type="file" accept=".csv,text/csv"><strong>Candidate roster CSV</strong><small>candidate_id, candidate_name, access_pin, extra_time_minutes, monitor_group. Uploading a roster activates roster admission.</small></label>
+                      <div id="geofence-settings" class="geofence-settings wide-field hidden">
+                        <div class="table-heading"><div><h4>Permitted examination venue</h4><small>Required only when Examination venue geofence is activated below.</small></div><button id="capture-exam-location" class="secondary-button" type="button">Use this device location</button></div>
+                        <div class="task-builder-grid">
+                          <label class="wide-field">Venue name<input name="geofence_label" type="text" maxlength="240" placeholder="e.g. UCC Main Examination Hall"></label>
+                          <label>Latitude<input name="geofence_latitude" type="number" min="-90" max="90" step="any"></label>
+                          <label>Longitude<input name="geofence_longitude" type="number" min="-180" max="180" step="any"></label>
+                          <label>Allowed radius in metres<input name="geofence_radius_meters" type="number" min="25" max="10000" value="250"></label>
+                          <label>Maximum GPS inaccuracy in metres<input name="geofence_max_accuracy_meters" type="number" min="10" max="1000" value="100"></label>
+                        </div>
+                        <div id="geofence-message" class="message" role="status"></div>
+                      </div>
+                    </div>
+                  </fieldset>
+                  <fieldset class="task-builder-section">
+                    <legend><span>3</span> Examination questions</legend>
+                    <div class="task-builder-grid">
+                      <label class="wide-field">Question source title<input name="exam_source_title" type="text" maxlength="300"></label>
+                      <label class="file-drop"><input name="exam_source_file" type="file" accept=".pdf,.docx,.txt"><strong>Generate from a source document</strong><small>Upload PDF, DOCX or TXT.</small></label>
+                      <label class="file-drop"><input name="exam_questions_file" type="file" accept=".json,application/json"><strong>Upload lecturer question-bank JSON</strong><small>Supply exactly the selected number of validated questions.</small></label>
+                    </div>
+                  </fieldset>
                 </div>
-                <button class="primary-button" type="submit">Create task</button>
+                <details class="task-builder-section task-feature-section">
+                  <summary><span class="summary-number">4</span><span><strong>Optional monitoring and assurance controls</strong><small>Open to activate only the controls required for this task.</small></span></summary>
+                  <div id="task-feature-options" class="task-feature-grid"><small>Select a course to load administrator-approved features.</small></div>
+                </details>
+                <div class="task-builder-footer"><small>Review the task settings before creating it. Advanced controls remain optional.</small><button class="primary-button" type="submit">Create assessment task</button></div>
               </form>
               <div id="task-create-message" class="message" role="status"></div>
+            </section>
+
+            <section class="management-card exam-roster-card">
+              <div class="table-heading"><div><h2>Exam eligibility roster</h2><small>Upload students who are permitted to start one particular standalone examination.</small></div></div>
+              <form id="exam-roster-form" class="stack-form compact-form">
+                <label>Course<select name="course_id" id="roster-course" required><option value="">Select course</option></select></label>
+                <label>Standalone examination<select name="task_id" id="roster-task" required><option value="">Select examination</option></select></label>
+                  <label class="file-drop"><input name="roster_file" type="file" accept=".csv,text/csv" required><strong>Choose eligibility roster CSV</strong><small>Required: candidate_id, candidate_name, access_pin. Optional: extra_time_minutes, monitor_group.</small></label>
+                <div class="task-builder-footer"><button id="download-roster-template" class="secondary-button" type="button">Download CSV template</button><button class="primary-button" type="submit">Upload eligible students</button></div>
+              </form>
+              <div id="exam-roster-message" class="message" role="status"></div>
+              <div id="exam-roster-summary" class="roster-summary hidden"></div>
+              <div class="table-scroll roster-table-scroll">
+                <table>
+                  <thead><tr><th>No.</th><th>Candidate ID</th><th>Candidate name</th><th>Monitor group</th><th>Extra time</th><th>Status</th></tr></thead>
+                  <tbody id="exam-roster-body"><tr><td colspan="6" class="empty-state">Select an examination to review eligible students.</td></tr></tbody>
+                </table>
+              </div>
+              <div id="monitor-assignment-panel" class="monitor-assignment-panel hidden">
+                <div class="table-heading"><div><h3>Assign remote monitors</h3><small>Allocate each candidate group to an authorised course lecturer or monitor.</small></div></div>
+                <form id="monitor-assignment-form" class="task-builder-grid">
+                  <label>Candidate group<select id="monitor-group" name="group_label" required><option value="">Select group</option></select></label>
+                  <label>Remote monitor<select id="monitor-user" name="monitor_user_id" required><option value="">Select monitor</option></select></label>
+                  <div class="wide-field task-builder-footer"><span id="monitor-assignment-status" class="muted"></span><button class="secondary-button" type="submit">Assign monitor</button></div>
+                </form>
+                <div id="monitor-assignment-list" class="monitor-assignment-list"></div>
+              </div>
+              <p class="muted">Uploading a new file replaces the active eligibility list for the selected examination. PINs are securely hashed and are never shown here.</p>
             </section>
           </div>
 
@@ -495,12 +577,21 @@ Final preparation"></textarea>
               </div>
             </div>
             <div id="live-exam-summary" class="review-summary"></div>
-            <div class="table-scroll">
-              <table>
-                <thead><tr><th>Candidate</th><th>Connection</th><th>Progress</th><th>Camera</th><th>Indicators</th><th>Interruptions</th><th>Started</th><th>Action</th></tr></thead>
-                <tbody id="live-exam-monitor-body"><tr><td colspan="8" class="empty-state">Open Live monitor from an enabled course.</td></tr></tbody>
-              </table>
+            <div class="live-monitor-toolbar">
+              <label>Find candidate<input id="live-exam-search" type="search" placeholder="Name or candidate ID"></label>
+              <label>Show<select id="live-exam-filter"><option value="active">Active candidates</option><option value="alerts">Movement alerts</option><option value="interrupted">Interrupted or offline</option><option value="paused">Paused by invigilator</option><option value="all">All recent sessions</option></select></label>
             </div>
+            <div class="table-heading"><div><h3>Live candidate wall</h3><small>Numbered tiles show up to 30 active remote candidates on one screen. Select Comment to speak directly to one candidate.</small></div></div>
+            <div id="live-exam-tiles" class="live-exam-tiles" aria-live="polite"></div>
+            <details class="live-monitor-details">
+              <summary><span><strong>Detailed session list</strong><small>Timing, evidence indicators and full intervention controls.</small></span></summary>
+              <div class="table-scroll">
+                <table>
+                  <thead><tr><th>Candidate</th><th>Connection</th><th>Progress</th><th>Camera</th><th>Indicators</th><th>Interruptions</th><th>Started</th><th>Action</th></tr></thead>
+                  <tbody id="live-exam-monitor-body"><tr><td colspan="8" class="empty-state">Open Live monitor from an enabled course.</td></tr></tbody>
+                </table>
+              </div>
+            </details>
             <p id="live-exam-disclaimer" class="muted"></p>
           </section>
 

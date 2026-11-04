@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 
 PASSWORD_PATTERN = re.compile(r"^(?=.*[A-Z])(?=.*[a-z])(?=.*\d).+$")
@@ -59,6 +59,11 @@ class StartStandaloneExamRequest(BaseModel):
     task_id: str
     candidate_name: str = Field(min_length=2, max_length=180)
     candidate_id: str = Field(min_length=2, max_length=100)
+    access_pin: str | None = Field(default=None, min_length=4, max_length=64)
+    readiness_confirmed: bool = False
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
+    location_accuracy_meters: float | None = Field(default=None, gt=0, le=10000)
     client_instance_id: str = Field(min_length=16, max_length=120)
 
 
@@ -232,6 +237,16 @@ class AssessmentTaskCreateRequest(BaseModel):
     mode: Literal["submission_assurance", "standalone_exam"] = "submission_assurance"
     assessment_question_count: int = Field(default=20, ge=1)
     max_attempts: int = Field(default=1, ge=1)
+    exam_starts_at: datetime | None = None
+    exam_ends_at: datetime | None = None
+    duration_minutes: int | None = Field(default=None, ge=1)
+    late_entry_minutes: int = Field(default=0, ge=0, le=1440)
+    roster_required: bool = False
+    geofence_label: str | None = Field(default=None, max_length=240)
+    geofence_latitude: float | None = Field(default=None, ge=-90, le=90)
+    geofence_longitude: float | None = Field(default=None, ge=-180, le=180)
+    geofence_radius_meters: int | None = Field(default=None, ge=25, le=10000)
+    geofence_max_accuracy_meters: int = Field(default=100, ge=10, le=1000)
     features: dict[str, bool] = Field(default_factory=dict)
 
     @field_validator("features")
@@ -241,6 +256,21 @@ class AssessmentTaskCreateRequest(BaseModel):
             raise ValueError("Too many optional feature selections.")
         return value
 
+    @model_validator(mode="after")
+    def valid_exam_window(self) -> "AssessmentTaskCreateRequest":
+        if self.exam_starts_at and self.exam_ends_at and self.exam_ends_at <= self.exam_starts_at:
+            raise ValueError("The examination end time must be after its start time.")
+        if self.features.get("location_geofence", False):
+            if self.mode != "standalone_exam":
+                raise ValueError("Venue geofencing is available only for standalone examinations.")
+            if (
+                self.geofence_latitude is None
+                or self.geofence_longitude is None
+                or self.geofence_radius_meters is None
+            ):
+                raise ValueError("Set the examination latitude, longitude and allowed radius.")
+        return self
+
 
 class AssessmentTaskUpdateRequest(BaseModel):
     title: str | None = Field(default=None, min_length=3, max_length=240)
@@ -248,6 +278,16 @@ class AssessmentTaskUpdateRequest(BaseModel):
     mode: Literal["submission_assurance", "standalone_exam"] | None = None
     assessment_question_count: int | None = Field(default=None, ge=1)
     max_attempts: int | None = Field(default=None, ge=1)
+    exam_starts_at: datetime | None = None
+    exam_ends_at: datetime | None = None
+    duration_minutes: int | None = Field(default=None, ge=1)
+    late_entry_minutes: int | None = Field(default=None, ge=0, le=1440)
+    roster_required: bool | None = None
+    geofence_label: str | None = Field(default=None, max_length=240)
+    geofence_latitude: float | None = Field(default=None, ge=-90, le=90)
+    geofence_longitude: float | None = Field(default=None, ge=-180, le=180)
+    geofence_radius_meters: int | None = Field(default=None, ge=25, le=10000)
+    geofence_max_accuracy_meters: int | None = Field(default=None, ge=10, le=1000)
     status: Literal["draft", "active", "closed"] | None = None
     features: dict[str, bool] | None = None
 
@@ -257,6 +297,25 @@ class AssessmentTaskUpdateRequest(BaseModel):
         if value is not None and len(value) > 30:
             raise ValueError("Too many optional feature selections.")
         return value
+
+
+class ProctorActionRequest(BaseModel):
+    action: Literal["warning", "pause", "resume", "add_time", "terminate"]
+    message: str | None = Field(default=None, max_length=500)
+    minutes: int | None = Field(default=None, ge=1, le=240)
+
+    @model_validator(mode="after")
+    def validate_action_details(self) -> "ProctorActionRequest":
+        if self.action == "warning" and not (self.message or "").strip():
+            raise ValueError("A warning message is required.")
+        if self.action == "add_time" and self.minutes is None:
+            raise ValueError("Give the number of minutes to add.")
+        return self
+
+
+class ExamMonitorAssignmentRequest(BaseModel):
+    group_label: str = Field(min_length=1, max_length=120)
+    monitor_user_id: str
 
 
 class TaskFeatureUpdateRequest(BaseModel):
@@ -336,7 +395,7 @@ class MonitoringEventRequest(BaseModel):
         "assessment_locked",
     ]
     duration_ms: int = Field(default=0, ge=0, le=300000)
-    question_position: int | None = Field(default=None, ge=1, le=50)
+    question_position: int | None = Field(default=None, ge=1)
     severity: Literal["warning", "critical"] = "warning"
     corrected: bool = False
     message: str | None = Field(default=None, max_length=300)

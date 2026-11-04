@@ -155,8 +155,6 @@ def _repair_assessment_columns() -> None:
                 if column.name not in columns:
                     print(f"Prestart: adding missing assessments.{column.name}", flush=True)
                     operations.add_column("assessments", column)
-
-
 def _repair_phase1_columns() -> None:
     """Repair Phase 1 columns if an older database was stamped ahead."""
     with engine.begin() as connection:
@@ -313,6 +311,57 @@ def _repair_phase4_columns() -> None:
                 if column.name not in columns:
                     print(f"Prestart: adding missing assessments.{column.name}", flush=True)
                     operations.add_column("assessments", column)
+def _repair_phase5_columns() -> None:
+    """Repair live-examination columns if a database was stamped ahead."""
+    with engine.begin() as connection:
+        inspector = sa.inspect(connection)
+        tables = set(inspector.get_table_names())
+        operations = Operations(MigrationContext.configure(connection))
+        if "assessment_tasks" in tables:
+            columns = {item["name"] for item in inspector.get_columns("assessment_tasks")}
+            additions = [
+                sa.Column("exam_starts_at", sa.DateTime(timezone=True), nullable=True),
+                sa.Column("exam_ends_at", sa.DateTime(timezone=True), nullable=True),
+                sa.Column("duration_minutes", sa.Integer(), nullable=True),
+                sa.Column("late_entry_minutes", sa.Integer(), nullable=False, server_default="0"),
+                sa.Column("roster_required", sa.Boolean(), nullable=False, server_default=sa.false()),
+                sa.Column("geofence_label", sa.String(length=240), nullable=True),
+                sa.Column("geofence_latitude", sa.Float(), nullable=True),
+                sa.Column("geofence_longitude", sa.Float(), nullable=True),
+                sa.Column("geofence_radius_meters", sa.Integer(), nullable=True),
+                sa.Column("geofence_max_accuracy_meters", sa.Integer(), nullable=False, server_default="100"),
+            ]
+            for column in additions:
+                if column.name not in columns:
+                    print(f"Prestart: adding missing assessment_tasks.{column.name}", flush=True)
+                    operations.add_column("assessment_tasks", column)
+        inspector = sa.inspect(connection)
+        if "assessments" in set(inspector.get_table_names()):
+            columns = {item["name"] for item in inspector.get_columns("assessments")}
+            additions = [
+                sa.Column("exam_deadline_at", sa.DateTime(timezone=True), nullable=True),
+                sa.Column("proctor_paused_at", sa.DateTime(timezone=True), nullable=True),
+                sa.Column("proctor_message", sa.Text(), nullable=True),
+                sa.Column("proctor_message_at", sa.DateTime(timezone=True), nullable=True),
+                sa.Column("proctor_message_acknowledged_at", sa.DateTime(timezone=True), nullable=True),
+                sa.Column("extra_time_minutes", sa.Integer(), nullable=False, server_default="0"),
+                sa.Column("location_distance_meters", sa.Float(), nullable=True),
+                sa.Column("location_accuracy_meters", sa.Float(), nullable=True),
+                sa.Column("location_verified_at", sa.DateTime(timezone=True), nullable=True),
+            ]
+            for column in additions:
+                if column.name not in columns:
+                    print(f"Prestart: adding missing assessments.{column.name}", flush=True)
+                    operations.add_column("assessments", column)
+        inspector = sa.inspect(connection)
+        if "exam_candidates" in set(inspector.get_table_names()):
+            columns = {item["name"] for item in inspector.get_columns("exam_candidates")}
+            if "monitor_group" not in columns:
+                print("Prestart: adding missing exam_candidates.monitor_group", flush=True)
+                operations.add_column(
+                    "exam_candidates",
+                    sa.Column("monitor_group", sa.String(length=120), nullable=True),
+                )
 
 
 def _verify_schema() -> None:
@@ -431,7 +480,34 @@ def _verify_schema() -> None:
     )
     if missing_assessment_phase4:
         raise RuntimeError("Database upgrade incomplete. Missing task assessment columns: " + ", ".join(missing_assessment_phase4))
-    print("Prestart: account, monitoring, continuity, and Phase 1–4 assessment schema verified.", flush=True)
+    required_phase5_tables = {"exam_candidates", "exam_monitor_assignments"}
+    missing_phase5_tables = sorted(required_phase5_tables - tables)
+    if missing_phase5_tables:
+        raise RuntimeError("Database upgrade incomplete. Missing live-exam tables: " + ", ".join(missing_phase5_tables))
+    missing_task_phase5 = sorted(
+        {
+            "exam_starts_at", "exam_ends_at", "duration_minutes", "late_entry_minutes",
+            "roster_required", "geofence_label", "geofence_latitude", "geofence_longitude",
+            "geofence_radius_meters", "geofence_max_accuracy_meters",
+        }
+        - task_columns
+    )
+    if missing_task_phase5:
+        raise RuntimeError("Database upgrade incomplete. Missing live-exam task columns: " + ", ".join(missing_task_phase5))
+    missing_assessment_phase5 = sorted(
+        {
+            "exam_deadline_at", "proctor_paused_at", "proctor_message",
+            "proctor_message_at", "proctor_message_acknowledged_at", "extra_time_minutes",
+            "location_distance_meters", "location_accuracy_meters", "location_verified_at",
+        }
+        - assessment_columns
+    )
+    if missing_assessment_phase5:
+        raise RuntimeError("Database upgrade incomplete. Missing live-exam assessment columns: " + ", ".join(missing_assessment_phase5))
+    candidate_columns = {item["name"] for item in inspector.get_columns("exam_candidates")}
+    if "monitor_group" not in candidate_columns:
+        raise RuntimeError("Database upgrade incomplete: exam_candidates.monitor_group is missing.")
+    print("Prestart: account, monitoring, continuity, and Phase 1–5 assessment schema verified.", flush=True)
 
 
 def _face_model_is_compatible(model_path: Path) -> bool:
@@ -602,6 +678,7 @@ def main() -> None:
     _repair_phase2_columns()
     _repair_phase3_columns()
     _repair_phase4_columns()
+    _repair_phase5_columns()
 
     config = Config(str(BASE_DIR / "alembic.ini"))
     command.upgrade(config, "head")

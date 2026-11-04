@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import hashlib
+import csv
+import io
+import math
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -47,6 +50,7 @@ from .assessment_service import (
     heartbeat_assessment,
     interrupt_assessment,
     refresh_interruption_state,
+    proctor_control_assessment,
     result_payload,
     set_interruption_excused,
     start_assessment,
@@ -108,6 +112,8 @@ from .models import (
     CourseLecturer,
     CourseMilestone,
     Document,
+    ExamCandidate,
+    ExamMonitorAssignment,
     FeatureSetting,
     Institution,
     LearningAlert,
@@ -159,6 +165,8 @@ from .schemas import (
     OralDefenceStartRequest,
     PracticalTaskGenerateRequest,
     PracticalTaskScoreRequest,
+    ProctorActionRequest,
+    ExamMonitorAssignmentRequest,
     RubricMarkRequest,
     LoginRequest,
     SupervisorMeetingRequest,
@@ -184,6 +192,16 @@ from .security import (
 
 
 logger = logging.getLogger("kanokware")
+MAX_REMOTE_MONITOR_SESSIONS = 30
+SUSPECTED_MOVEMENT_EVENTS = {
+    "no_face",
+    "multiple_faces",
+    "looking_away",
+    "excessive_movement",
+    "camera_covered",
+    "camera_frozen",
+    "camera_interrupted",
+}
 
 
 def utcnow() -> datetime:
@@ -194,6 +212,25 @@ def aware(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def distance_meters(
+    latitude_a: float,
+    longitude_a: float,
+    latitude_b: float,
+    longitude_b: float,
+) -> float:
+    """Calculate great-circle distance without sending locations to a third party."""
+    radius = 6_371_000.0
+    phi_a = math.radians(latitude_a)
+    phi_b = math.radians(latitude_b)
+    delta_phi = math.radians(latitude_b - latitude_a)
+    delta_lambda = math.radians(longitude_b - longitude_a)
+    haversine = (
+        math.sin(delta_phi / 2) ** 2
+        + math.cos(phi_a) * math.cos(phi_b) * math.sin(delta_lambda / 2) ** 2
+    )
+    return radius * 2 * math.atan2(math.sqrt(haversine), math.sqrt(1 - haversine))
 
 
 @asynccontextmanager
@@ -223,7 +260,7 @@ async def lifespan(_: FastAPI):
 mimetypes.add_type("text/javascript", ".mjs")
 mimetypes.add_type("application/wasm", ".wasm")
 
-app = FastAPI(title="Kanokware", version="1.2.0", lifespan=lifespan)
+app = FastAPI(title="Kanokware", version="1.3.0", lifespan=lifespan)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 REPOSITORY_MONITORING_ASSET_DIR = STATIC_DIR / "vendor" / "mediapipe-tasks-vision"
 RUNTIME_MONITORING_ASSET_DIR = Path(
@@ -259,7 +296,7 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "same-origin"
     response.headers["Permissions-Policy"] = (
-        "camera=(self), microphone=(self), display-capture=(self), geolocation=()"
+        "camera=(self), microphone=(self), display-capture=(self), geolocation=(self)"
     )
     if request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
@@ -1020,6 +1057,12 @@ def _task_payload(db: Session, task: AssessmentTask) -> dict[str, object]:
         else None
     )
     payload["ready"] = bool(source and source.status == "ready") if task.mode == "standalone_exam" else True
+    payload["roster_count"] = db.scalar(
+        select(func.count(ExamCandidate.id)).where(
+            ExamCandidate.task_id == task.id,
+            ExamCandidate.status == "active",
+        )
+    ) or 0
     return payload
 
 
@@ -1306,6 +1349,16 @@ def create_assessment_task(
         mode=payload.mode,
         assessment_question_count=payload.assessment_question_count,
         max_attempts=payload.max_attempts,
+        exam_starts_at=payload.exam_starts_at,
+        exam_ends_at=payload.exam_ends_at,
+        duration_minutes=payload.duration_minutes,
+        late_entry_minutes=payload.late_entry_minutes,
+        roster_required=payload.roster_required,
+        geofence_label=(payload.geofence_label or "").strip() or None,
+        geofence_latitude=payload.geofence_latitude,
+        geofence_longitude=payload.geofence_longitude,
+        geofence_radius_meters=payload.geofence_radius_meters,
+        geofence_max_accuracy_meters=payload.geofence_max_accuracy_meters,
         created_by=user.id,
         status="active",
     )
@@ -1360,8 +1413,40 @@ def update_assessment_task(
         task.assessment_question_count = payload.assessment_question_count
     if payload.max_attempts is not None:
         task.max_attempts = payload.max_attempts
+    for field_name in (
+        "exam_starts_at",
+        "exam_ends_at",
+        "duration_minutes",
+        "late_entry_minutes",
+        "roster_required",
+        "geofence_label",
+        "geofence_latitude",
+        "geofence_longitude",
+        "geofence_radius_meters",
+        "geofence_max_accuracy_meters",
+    ):
+        value = getattr(payload, field_name)
+        if value is not None:
+            setattr(task, field_name, value)
     if payload.status is not None:
         task.status = payload.status
+    if task.exam_starts_at and task.exam_ends_at and aware(task.exam_ends_at) <= aware(task.exam_starts_at):
+        raise HTTPException(status_code=422, detail="The examination end time must be after its start time.")
+    if payload.features and payload.features.get("location_geofence"):
+        if task.mode != "standalone_exam":
+            raise HTTPException(
+                status_code=422,
+                detail="Venue geofencing is available only for standalone examinations.",
+            )
+        if (
+            task.geofence_latitude is None
+            or task.geofence_longitude is None
+            or task.geofence_radius_meters is None
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Set the examination latitude, longitude and allowed radius.",
+            )
     if payload.features is not None:
         set_task_features(
             db,
@@ -1544,6 +1629,299 @@ async def upload_standalone_question_bank(
     }
 
 
+def _exam_candidate_payload(candidate: ExamCandidate) -> dict[str, object]:
+    return {
+        "id": candidate.id,
+        "candidate_id": candidate.candidate_id,
+        "candidate_name": candidate.candidate_name,
+        "extra_time_minutes": candidate.extra_time_minutes,
+        "monitor_group": candidate.monitor_group,
+        "status": candidate.status,
+        "created_at": candidate.created_at.isoformat() if candidate.created_at else None,
+    }
+
+
+@app.get("/api/lecturer/courses/{course_id}/tasks/{task_id}/candidates")
+def lecturer_exam_candidates(
+    course_id: str,
+    task_id: str,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    course = require_course_access(db, user, course_id)
+    task = db.scalar(
+        select(AssessmentTask).where(
+            AssessmentTask.id == task_id,
+            AssessmentTask.course_id == course.id,
+        )
+    )
+    if not task:
+        raise HTTPException(status_code=404, detail="Assessment task not found.")
+    candidates = db.scalars(
+        select(ExamCandidate)
+        .where(ExamCandidate.task_id == task.id)
+        .order_by(ExamCandidate.candidate_id)
+    ).all()
+    return {"task_id": task.id, "candidates": [_exam_candidate_payload(item) for item in candidates]}
+
+
+@app.post("/api/lecturer/courses/{course_id}/tasks/{task_id}/candidates/import")
+async def import_exam_candidates(
+    course_id: str,
+    task_id: str,
+    request: Request,
+    file: UploadFile = File(...),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    course = _require_grading_access(db, user, course_id)
+    task = db.scalar(
+        select(AssessmentTask).where(
+            AssessmentTask.id == task_id,
+            AssessmentTask.course_id == course.id,
+            AssessmentTask.mode == "standalone_exam",
+        )
+    )
+    if not task:
+        raise HTTPException(status_code=404, detail="Standalone examination task not found.")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="The candidate roster is empty.")
+    if len(raw) > 1024 * 1024:
+        raise HTTPException(status_code=413, detail="The candidate roster exceeds 1 MB.")
+    try:
+        text_value = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=422, detail="Save the candidate roster as UTF-8 CSV.") from exc
+    reader = csv.DictReader(io.StringIO(text_value))
+    required = {"candidate_id", "candidate_name", "access_pin"}
+    if not reader.fieldnames or not required.issubset({item.strip() for item in reader.fieldnames}):
+        raise HTTPException(
+            status_code=422,
+            detail="CSV columns must include candidate_id, candidate_name and access_pin. extra_time_minutes and monitor_group are optional.",
+        )
+    rows = list(reader)
+    if not rows:
+        raise HTTPException(status_code=422, detail="The candidate roster has no data rows.")
+    if len(rows) > 500:
+        raise HTTPException(status_code=422, detail="Import up to 500 candidates in one roster file.")
+
+    seen: set[str] = set()
+    prepared: list[tuple[str, str, str, int, str | None]] = []
+    for number, row in enumerate(rows, start=2):
+        candidate_id = (row.get("candidate_id") or "").strip().lower()
+        candidate_name = (row.get("candidate_name") or "").strip()
+        pin = (row.get("access_pin") or "").strip()
+        if not candidate_id or not candidate_name or len(pin) < 4 or len(pin) > 64:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Roster row {number} requires a candidate ID, name and a 4 to 64 character access PIN.",
+            )
+        if candidate_id in seen:
+            raise HTTPException(status_code=422, detail=f"Candidate ID {candidate_id} is duplicated.")
+        try:
+            extra_time = int((row.get("extra_time_minutes") or "0").strip() or "0")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"Roster row {number} has invalid extra time.") from exc
+        if extra_time < 0 or extra_time > 240:
+            raise HTTPException(status_code=422, detail=f"Roster row {number} extra time must be 0 to 240 minutes.")
+        monitor_group = (row.get("monitor_group") or "").strip() or None
+        if monitor_group and len(monitor_group) > 120:
+            raise HTTPException(status_code=422, detail=f"Roster row {number} monitor group is too long.")
+        seen.add(candidate_id)
+        prepared.append((candidate_id, candidate_name, pin, extra_time, monitor_group))
+
+    existing = {
+        item.candidate_id: item
+        for item in db.scalars(select(ExamCandidate).where(ExamCandidate.task_id == task.id)).all()
+    }
+    for item in existing.values():
+        item.status = "inactive"
+    for candidate_id, candidate_name, pin, extra_time, monitor_group in prepared:
+        candidate = existing.get(candidate_id)
+        if candidate:
+            candidate.candidate_name = candidate_name
+            candidate.access_pin_hash = hash_password(pin)
+            candidate.extra_time_minutes = extra_time
+            candidate.monitor_group = monitor_group
+            candidate.status = "active"
+        else:
+            db.add(
+                ExamCandidate(
+                    task_id=task.id,
+                    candidate_id=candidate_id,
+                    candidate_name=candidate_name,
+                    access_pin_hash=hash_password(pin),
+                    extra_time_minutes=extra_time,
+                    monitor_group=monitor_group,
+                    status="active",
+                )
+            )
+    task.roster_required = True
+    audit(
+        db,
+        request,
+        "exam_candidate_roster_imported",
+        user=user,
+        resource_type="assessment_task",
+        resource_id=task.id,
+        detail={"candidate_count": len(prepared)},
+    )
+    db.commit()
+    return {
+        "task_id": task.id,
+        "candidate_count": len(prepared),
+        "roster_required": True,
+        "message": "Candidate roster imported. Previous roster entries not in this file are inactive.",
+    }
+
+
+def _monitor_assignments_payload(
+    db: Session,
+    course: Course,
+    task: AssessmentTask,
+) -> dict[str, object]:
+    candidates = db.scalars(
+        select(ExamCandidate).where(
+            ExamCandidate.task_id == task.id,
+            ExamCandidate.status == "active",
+        )
+    ).all()
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        label = (candidate.monitor_group or "Unassigned").strip()
+        counts[label] = counts.get(label, 0) + 1
+    monitors = db.execute(
+        select(User.id, User.full_name, User.email, CourseLecturer.access_level)
+        .join(CourseLecturer, CourseLecturer.lecturer_id == User.id)
+        .where(CourseLecturer.course_id == course.id)
+        .order_by(User.full_name)
+    ).all()
+    assignments = db.scalars(
+        select(ExamMonitorAssignment).where(ExamMonitorAssignment.task_id == task.id)
+    ).all()
+    monitor_by_id = {row.id: row for row in monitors}
+    assignment_by_group = {item.group_label: item for item in assignments}
+    return {
+        "task_id": task.id,
+        "groups": [
+            {
+                "group_label": label,
+                "candidate_count": count,
+                "monitor_user_id": (
+                    assignment_by_group[label].monitor_user_id
+                    if label in assignment_by_group else None
+                ),
+                "monitor_name": (
+                    monitor_by_id[assignment_by_group[label].monitor_user_id].full_name
+                    if label in assignment_by_group
+                    and assignment_by_group[label].monitor_user_id in monitor_by_id
+                    else None
+                ),
+            }
+            for label, count in sorted(counts.items())
+        ],
+        "monitors": [
+            {
+                "user_id": row.id,
+                "full_name": row.full_name,
+                "email": row.email,
+                "access_level": row.access_level,
+            }
+            for row in monitors
+        ],
+    }
+
+
+@app.get("/api/lecturer/courses/{course_id}/tasks/{task_id}/monitor-assignments")
+def get_exam_monitor_assignments(
+    course_id: str,
+    task_id: str,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    course = require_course_access(db, user, course_id)
+    task = db.scalar(
+        select(AssessmentTask).where(
+            AssessmentTask.id == task_id,
+            AssessmentTask.course_id == course.id,
+            AssessmentTask.mode == "standalone_exam",
+        )
+    )
+    if not task:
+        raise HTTPException(status_code=404, detail="Standalone examination task not found.")
+    return _monitor_assignments_payload(db, course, task)
+
+
+@app.put("/api/lecturer/courses/{course_id}/tasks/{task_id}/monitor-assignments")
+def assign_exam_monitor_group(
+    course_id: str,
+    task_id: str,
+    payload: ExamMonitorAssignmentRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    course = _require_grading_access(db, user, course_id)
+    task = db.scalar(
+        select(AssessmentTask).where(
+            AssessmentTask.id == task_id,
+            AssessmentTask.course_id == course.id,
+            AssessmentTask.mode == "standalone_exam",
+        )
+    )
+    if not task:
+        raise HTTPException(status_code=404, detail="Standalone examination task not found.")
+    group_label = payload.group_label.strip()
+    group_exists = db.scalar(
+        select(func.count(ExamCandidate.id)).where(
+            ExamCandidate.task_id == task.id,
+            ExamCandidate.status == "active",
+            func.coalesce(ExamCandidate.monitor_group, "Unassigned") == group_label,
+        )
+    ) or 0
+    if not group_exists:
+        raise HTTPException(status_code=404, detail="This monitor group has no active candidates.")
+    monitor_link = db.scalar(
+        select(CourseLecturer).where(
+            CourseLecturer.course_id == course.id,
+            CourseLecturer.lecturer_id == payload.monitor_user_id,
+        )
+    )
+    if not monitor_link:
+        raise HTTPException(status_code=422, detail="Select a lecturer or monitor assigned to this course.")
+    assignment = db.scalar(
+        select(ExamMonitorAssignment).where(
+            ExamMonitorAssignment.task_id == task.id,
+            ExamMonitorAssignment.group_label == group_label,
+        )
+    )
+    if assignment:
+        assignment.monitor_user_id = payload.monitor_user_id
+        assignment.created_by = user.id
+        assignment.created_at = utcnow()
+    else:
+        db.add(
+            ExamMonitorAssignment(
+                task_id=task.id,
+                group_label=group_label,
+                monitor_user_id=payload.monitor_user_id,
+                created_by=user.id,
+            )
+        )
+    audit(
+        db,
+        request,
+        "exam_monitor_group_assigned",
+        user=user,
+        resource_type="assessment_task",
+        resource_id=task.id,
+        detail={"group_label": group_label, "monitor_user_id": payload.monitor_user_id},
+    )
+    db.commit()
+    return _monitor_assignments_payload(db, course, task)
+
+
 @app.post("/api/lecturer/courses/{course_id}/milestones", status_code=201)
 def create_course_milestone(
     course_id: str,
@@ -1642,6 +2020,32 @@ def live_exam_monitor(
             status_code=409,
             detail="Live examination monitoring is not enabled for an active task in this course.",
         )
+    access_level = db.scalar(
+        select(CourseLecturer.access_level).where(
+            CourseLecturer.course_id == course.id,
+            CourseLecturer.lecturer_id == user.id,
+        )
+    )
+    unrestricted_monitor = user.role == "institution_admin" or access_level == "owner"
+    course_task_ids = list(
+        db.scalars(select(AssessmentTask.id).where(AssessmentTask.course_id == course.id)).all()
+    )
+    monitor_assignments = db.scalars(
+        select(ExamMonitorAssignment).where(
+            ExamMonitorAssignment.task_id.in_(course_task_ids)
+        )
+    ).all() if course_task_ids else []
+    tasks_with_assignments = {item.task_id for item in monitor_assignments}
+    my_monitor_groups: dict[str, set[str]] = {}
+    for assignment in monitor_assignments:
+        if assignment.monitor_user_id == user.id:
+            my_monitor_groups.setdefault(assignment.task_id, set()).add(assignment.group_label)
+    candidate_groups = {
+        (item.task_id, item.candidate_id.lower()): item.monitor_group or "Unassigned"
+        for item in db.scalars(
+            select(ExamCandidate).where(ExamCandidate.task_id.in_(course_task_ids))
+        ).all()
+    } if course_task_ids else {}
     cutoff = utcnow() - timedelta(hours=12)
     assessments = db.scalars(
         select(Assessment)
@@ -1656,9 +2060,27 @@ def live_exam_monitor(
         .limit(300)
     ).all()
     now = utcnow()
+    active_statuses = {"in_progress", "interrupted", "proctor_paused"}
+    active_session_count = db.scalar(
+        select(func.count(Assessment.id))
+        .join(Document, Document.id == Assessment.document_id)
+        .where(
+            Document.course_id == course.id,
+            Assessment.status.in_(active_statuses),
+        )
+    ) or 0
     rows: list[dict[str, object]] = []
     for assessment in assessments:
         if not assessment_feature_enabled(assessment, "live_exam_monitoring", course):
+            continue
+        task_id = assessment.document.task_id
+        candidate_key = (task_id, (assessment.candidate_id or "").strip().lower())
+        monitor_group = candidate_groups.get(candidate_key, "Unassigned")
+        if (
+            not unrestricted_monitor
+            and task_id in tasks_with_assignments
+            and monitor_group not in my_monitor_groups.get(task_id, set())
+        ):
             continue
         refresh_interruption_state(db, assessment)
         last_seen = aware(assessment.last_seen_at)
@@ -1668,8 +2090,12 @@ def live_exam_monitor(
         events = list(assessment.monitoring_events or [])
         unresolved = [event for event in events if not event.corrected]
         critical = [event for event in unresolved if event.severity == "critical"]
+        movement_events = [
+            event for event in events if event.event_type in SUSPECTED_MOVEMENT_EVENTS
+        ]
+        latest_movement = max(movement_events, key=lambda event: event.created_at) if movement_events else None
         connected = bool(
-            assessment.status == "in_progress"
+            assessment.status in {"in_progress", "proctor_paused"}
             and seconds_since_last_seen is not None
             and seconds_since_last_seen <= max(settings.heartbeat_stale_seconds, 20)
         )
@@ -1677,6 +2103,7 @@ def live_exam_monitor(
             "assessment_id": assessment.id,
             "student_name": assessment.candidate_name or assessment.document.student_name,
             "student_id": assessment.candidate_id or assessment.document.student_id,
+            "monitor_group": monitor_group,
             "document_title": assessment.document.title,
             "status": assessment.status,
             "connected": connected,
@@ -1692,10 +2119,31 @@ def live_exam_monitor(
             "critical_event_count": len(critical),
             "interruption_count": assessment.interruption_count,
             "total_offline_seconds": assessment.total_offline_seconds,
+            "exam_deadline_at": (
+                assessment.exam_deadline_at.isoformat() if assessment.exam_deadline_at else None
+            ),
+            "extra_time_minutes": assessment.extra_time_minutes,
+            "proctor_message": assessment.proctor_message,
+            "location_verified": bool(assessment.location_verified_at),
+            "suspected_movement": (
+                {
+                    "event_type": latest_movement.event_type,
+                    "message": latest_movement.message,
+                    "severity": latest_movement.severity,
+                    "unresolved": not latest_movement.corrected,
+                    "created_at": latest_movement.created_at.isoformat(),
+                }
+                if latest_movement else None
+            ),
+            "unresolved_movement_count": sum(
+                1 for event in movement_events if not event.corrected
+            ),
             "camera_status": (
                 assessment.webcam_snapshot.status if assessment.webcam_snapshot else "not_captured"
             ),
         })
+    rows.sort(key=lambda item: item["status"] not in active_statuses)
+    rows = rows[:MAX_REMOTE_MONITOR_SESSIONS]
     return {
         "course": _course_payload(db, course, user),
         "exam": {
@@ -1705,6 +2153,11 @@ def live_exam_monitor(
         "server_time": now.isoformat(),
         "refresh_seconds": 5,
         "sessions": rows,
+        "capacity": {
+            "limit": MAX_REMOTE_MONITOR_SESSIONS,
+            "active": int(active_session_count),
+            "available": max(0, MAX_REMOTE_MONITOR_SESSIONS - int(active_session_count)),
+        },
         "disclaimer": (
             "Live monitoring indicators support invigilation and academic judgement. "
             "They do not establish misconduct without contextual human review and due process."
@@ -2139,6 +2592,95 @@ def begin_standalone_examination(
     )
     if not task:
         raise HTTPException(status_code=404, detail="The standalone examination task is unavailable.")
+    if not payload.readiness_confirmed:
+        raise HTTPException(
+            status_code=409,
+            detail="Run and pass the device-readiness check before starting the examination.",
+        )
+    now = utcnow()
+    starts_at = aware(task.exam_starts_at)
+    ends_at = aware(task.exam_ends_at)
+    if starts_at and now < starts_at:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This examination opens at {starts_at.isoformat()}.",
+        )
+    if ends_at and now >= ends_at:
+        raise HTTPException(status_code=409, detail="This examination window has closed.")
+    if starts_at and task.late_entry_minutes and now > starts_at + timedelta(minutes=task.late_entry_minutes):
+        raise HTTPException(
+            status_code=409,
+            detail="The lecturer-set late-entry window has closed.",
+        )
+
+    task_features = effective_task_features(db, task)
+    geofence_distance = None
+    if task_features.get("location_geofence", False):
+        if (
+            task.geofence_latitude is None
+            or task.geofence_longitude is None
+            or task.geofence_radius_meters is None
+        ):
+            raise HTTPException(status_code=409, detail="The lecturer has not completed the examination venue settings.")
+        if (
+            payload.latitude is None
+            or payload.longitude is None
+            or payload.location_accuracy_meters is None
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Location access is required for this examination. Enable precise location and run readiness again.",
+            )
+        if payload.location_accuracy_meters > task.geofence_max_accuracy_meters:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "The reported location is not accurate enough for this examination. "
+                    "Move to an open area, enable precise location and try again."
+                ),
+            )
+        geofence_distance = distance_meters(
+            task.geofence_latitude,
+            task.geofence_longitude,
+            payload.latitude,
+            payload.longitude,
+        )
+        if geofence_distance > task.geofence_radius_meters:
+            raise HTTPException(
+                status_code=403,
+                detail=f"This examination can be started only within the permitted area for {task.geofence_label or 'the examination venue'}.",
+            )
+    if task_features.get("live_exam_monitoring", False):
+        concurrent = db.scalar(
+            select(func.count(Assessment.id))
+            .join(Document, Document.id == Assessment.document_id)
+            .where(
+                Document.task_id == task.id,
+                Assessment.status.in_(["in_progress", "interrupted", "proctor_paused"]),
+            )
+        ) or 0
+        if concurrent >= MAX_REMOTE_MONITOR_SESSIONS:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This remote-proctored examination already has 30 active sessions. "
+                    "Wait for a slot or ask the invigilator to close an inactive session."
+                ),
+            )
+
+    roster_candidate = None
+    if task.roster_required:
+        roster_candidate = db.scalar(
+            select(ExamCandidate).where(
+                ExamCandidate.task_id == task.id,
+                ExamCandidate.candidate_id == payload.candidate_id.strip().lower(),
+                ExamCandidate.status == "active",
+            )
+        )
+        if not roster_candidate:
+            raise HTTPException(status_code=403, detail="This candidate ID is not on the active examination roster.")
+        if not payload.access_pin or not verify_password(payload.access_pin, roster_candidate.access_pin_hash):
+            raise HTTPException(status_code=403, detail="The candidate ID or examination access PIN is incorrect.")
     source = _exam_source_for_task(db, task.id)
     if not source or source.status != "ready":
         raise HTTPException(status_code=409, detail="The examination question bank is not ready.")
@@ -2148,9 +2690,14 @@ def begin_standalone_examination(
         db,
         source.id,
         payload.client_instance_id,
-        candidate_name=payload.candidate_name,
-        candidate_id=payload.candidate_id,
+        candidate_name=roster_candidate.candidate_name if roster_candidate else payload.candidate_name,
+        candidate_id=roster_candidate.candidate_id if roster_candidate else payload.candidate_id,
         standalone=True,
+        exam_duration_minutes=task.duration_minutes,
+        exam_ends_at=task.exam_ends_at,
+        accommodation_minutes=roster_candidate.extra_time_minutes if roster_candidate else 0,
+        location_distance_meters=geofence_distance,
+        location_accuracy_meters=payload.location_accuracy_meters if geofence_distance is not None else None,
     )
     active_features = assessment_features(assessment, course)
     monitoring_enabled = bool(active_features.get("webcam_monitoring", False))
@@ -2163,6 +2710,8 @@ def begin_standalone_examination(
         instructions += " Fullscreen is required; hiding, minimizing or leaving the examination page ends and locks the attempt."
     if monitoring_enabled:
         instructions += " Camera monitoring and connection continuity checks are active."
+    if task_features.get("location_geofence", False):
+        instructions += " Precise device location must verify that you are inside the permitted examination venue."
     return {
         "assessment_id": assessment.id,
         "session_token": token,
@@ -2178,6 +2727,11 @@ def begin_standalone_examination(
         "resume_window_minutes": settings.assessment_resume_window_minutes,
         "max_interruptions": settings.max_assessment_interruptions,
         "max_offline_seconds": settings.max_assessment_offline_seconds,
+        "exam_deadline_at": (
+            assessment.exam_deadline_at.isoformat() if assessment.exam_deadline_at else None
+        ),
+        "extra_time_minutes": assessment.extra_time_minutes,
+        "location_verified": geofence_distance is not None,
         "instructions": instructions,
     }
 
@@ -2640,6 +3194,14 @@ def _assessment_detail(db: Session, assessment: Assessment) -> dict[str, object]
         "camera_reverification_required": assessment.camera_reverification_required,
         "interruption_excused": assessment.interruption_excused,
         "interruption_note": assessment.interruption_note,
+        "exam_deadline_at": assessment.exam_deadline_at.isoformat() if assessment.exam_deadline_at else None,
+        "extra_time_minutes": assessment.extra_time_minutes,
+        "proctor_paused_at": assessment.proctor_paused_at.isoformat() if assessment.proctor_paused_at else None,
+        "proctor_message": assessment.proctor_message,
+        "proctor_message_at": assessment.proctor_message_at.isoformat() if assessment.proctor_message_at else None,
+        "location_verified_at": assessment.location_verified_at.isoformat() if assessment.location_verified_at else None,
+        "location_distance_meters": assessment.location_distance_meters,
+        "location_accuracy_meters": assessment.location_accuracy_meters,
     })
 
     versions = db.scalars(
@@ -2881,6 +3443,44 @@ def lecturer_assessment_detail(
     audit(db, request, "assessment_reviewed", user=user, resource_type="assessment", resource_id=assessment.id)
     db.commit()
     return _assessment_detail(db, assessment)
+
+
+@app.post("/api/lecturer/assessments/{assessment_id}/proctor-action")
+def lecturer_proctor_action(
+    assessment_id: str,
+    payload: ProctorActionRequest,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    assessment = _assessment_for_lecturer(db, user, assessment_id)
+    if not assessment_feature_enabled(assessment, "live_exam_monitoring"):
+        raise HTTPException(
+            status_code=409,
+            detail="Live examination monitoring is not enabled for this assessment task.",
+        )
+    proctor_control_assessment(
+        db,
+        assessment,
+        action=payload.action,
+        actor_name=user.full_name,
+        message=payload.message,
+        minutes=payload.minutes,
+    )
+    audit(
+        db,
+        request,
+        f"live_exam_{payload.action}",
+        user=user,
+        resource_type="assessment",
+        resource_id=assessment.id,
+        detail={"message": payload.message, "minutes": payload.minutes},
+    )
+    db.commit()
+    return {
+        "assessment": assessment_state_payload(assessment),
+        "message": f"Invigilator action '{payload.action}' applied and recorded.",
+    }
 
 
 @app.get("/api/lecturer/recordings/{chunk_id}")

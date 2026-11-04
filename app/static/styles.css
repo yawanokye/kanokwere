@@ -549,6 +549,359 @@ label small { color: var(--muted); font-weight: 500; line-height: 1.4; }
   backdrop-filter: blur(7px);
 }
 .connection-overlay.hidden { display: none; }
+
+#live-exam-monitor-body tr.movement-alert-row td {
+  background: color-mix(in srgb, #f59e0b 13%, white);
+  border-top-color: #f59e0b;
+  border-bottom-color: #f59e0b;
+}
+
+#live-exam-monitor-body tr.movement-alert-row td:first-child {
+  box-shadow: inset 4px 0 0 #d97706;
+}
+
+.live-exam-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 0.75rem;
+  margin: 0.75rem 0 1.5rem;
+}
+
+.live-exam-tiles > .empty-state {
+  grid-column: 1 / -1;
+}
+
+.live-candidate-tile {
+  position: relative;
+  display: grid;
+  gap: 0.45rem;
+  min-width: 0;
+  padding: 0.65rem;
+  border: 1px solid #dbe4ea;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 5px 16px rgba(15, 23, 42, 0.06);
+}
+
+.live-candidate-tile.movement-alert {
+  border: 2px solid #d97706;
+  background: color-mix(in srgb, #f59e0b 10%, white);
+}
+
+.live-candidate-tile.disconnected {
+  border-color: #dc2626;
+}
+
+.live-tile-header,
+.live-tile-progress {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.candidate-tile-number {
+  display: inline-grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  background: #0f172a;
+  color: #fff;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.live-tile-media {
+  display: grid;
+  place-items: center;
+  height: 76px;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #e2e8f0;
+  color: #334155;
+  font-size: 1.5rem;
+  font-weight: 800;
+}
+
+.live-tile-media img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.live-tile-identity {
+  display: grid;
+  min-width: 0;
+}
+
+.live-tile-identity strong,
+.live-tile-identity small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live-tile-warning {
+  display: grid;
+  padding: 0.4rem 0.5rem;
+  border-radius: 8px;
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.live-tile-warning.hidden {
+  display: none;
+}
+
+.live-candidate-tile .action-row {
+  flex-wrap: nowrap;
+}
+
+.live-candidate-tile .action-row button {
+  flex: 1;
+  min-width: 0;
+  padding: 0.4rem 0.5rem;
+  font-size: 0.78rem;
+}
+
+.exam-launch-heading,
+.task-builder-footer,
+.live-monitor-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.exam-launch-heading > div {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.exam-launch-badge {
+  padding: 0.35rem 0.65rem;
+  border-radius: 999px;
+  background: #dcfce7;
+  color: #166534;
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.exam-instructions {
+  padding: 0.75rem;
+  border-left: 4px solid #2563eb;
+  background: #eff6ff;
+  border-radius: 0 10px 10px 0;
+}
+
+.exam-launch-steps {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.exam-launch-step {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.8rem;
+  padding: 0.85rem;
+  border: 1px solid #dbe4ea;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.step-number,
+.task-builder-section legend span,
+.summary-number {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 1.8rem;
+  height: 1.8rem;
+  border-radius: 50%;
+  background: #1d4ed8;
+  color: #fff;
+  font-weight: 800;
+}
+
+.step-content {
+  min-width: 0;
+}
+
+.step-content h4,
+.step-content p {
+  margin-top: 0;
+}
+
+.task-builder-form {
+  display: grid;
+  gap: 1rem;
+}
+
+.task-builder-exam-sections {
+  display: grid;
+  gap: 1rem;
+}
+
+.task-builder-exam-sections.hidden {
+  display: none;
+}
+
+.task-builder-section {
+  margin: 0;
+  padding: 1rem;
+  border: 1px solid #dbe4ea;
+  border-radius: 14px;
+  background: #f8fafc;
+}
+
+.task-builder-section legend {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0 0.35rem;
+  font-weight: 800;
+}
+
+.task-builder-grid,
+.task-feature-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
+.task-builder-grid .wide-field {
+  grid-column: 1 / -1;
+}
+
+.task-feature-section summary,
+.live-monitor-details summary {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.task-feature-section summary::-webkit-details-marker,
+.live-monitor-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.task-feature-section summary > span:last-child,
+.live-monitor-details summary > span {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.task-feature-grid {
+  margin-top: 1rem;
+}
+
+.task-builder-footer {
+  align-items: flex-end;
+}
+
+.live-monitor-toolbar {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  margin: 1rem 0;
+  padding: 0.8rem;
+  border-radius: 12px;
+  background: #f1f5f9;
+}
+
+.live-monitor-toolbar label {
+  min-width: min(100%, 230px);
+}
+
+.live-monitor-details {
+  margin-top: 1rem;
+  padding: 0.85rem;
+  border: 1px solid #dbe4ea;
+  border-radius: 12px;
+}
+
+.live-monitor-details[open] summary {
+  margin-bottom: 0.8rem;
+}
+
+.roster-summary {
+  margin: 0.75rem 0;
+  padding: 0.65rem 0.75rem;
+  border-radius: 10px;
+  background: #ecfdf5;
+  color: #166534;
+  font-weight: 700;
+}
+
+.roster-table-scroll {
+  max-height: 300px;
+}
+
+.geofence-settings,
+.monitor-assignment-panel {
+  padding: 0.9rem;
+  border: 1px solid #bfdbfe;
+  border-radius: 12px;
+  background: #eff6ff;
+}
+
+.monitor-assignment-panel {
+  display: grid;
+  gap: 0.8rem;
+  margin-top: 1rem;
+}
+
+.monitor-assignment-panel.hidden {
+  display: none;
+}
+
+.monitor-assignment-list {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.monitor-assignment-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 9px;
+  background: #fff;
+}
+
+.monitor-assignment-line span {
+  color: var(--muted);
+  text-align: right;
+}
+
+@media (max-width: 720px) {
+  .task-builder-grid,
+  .task-feature-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .task-builder-grid .wide-field {
+    grid-column: auto;
+  }
+
+  .exam-launch-heading,
+  .task-builder-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .monitor-assignment-line {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .monitor-assignment-line span {
+    text-align: left;
+  }
+}
 .connection-card {
   width: min(620px, 100%);
   display: grid;

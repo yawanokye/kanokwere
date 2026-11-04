@@ -173,3 +173,17 @@ No new environment variable is required. Keep the standard start command:
 ```bash
 python prestart.py && uvicorn main:app --host 0.0.0.0 --port $PORT
 ```
+
+## Version 1.3.0: live proctored examination operations
+
+This release adds examination schedules, overall duration, late-entry rules, candidate roster CSV import, hashed candidate access PINs, per-candidate extra-time accommodations, an optional venue geofence, candidate monitor groups, and a device-readiness gate.
+
+The remote live monitor supports up to 30 active candidate sessions in a numbered tile wall. Each tile shows identity, assigned group, connection, progress, camera state and movement warnings. The roster's optional `monitor_group` value can be assigned to an authorised course monitor. Owners and institution administrators retain the full view, while other monitors see only assigned groups when assignments exist. Authorised lecturers can send a targeted comment, pause, resume, add time, or end and lock an attempt. Movement indicators produce on-screen and spoken candidate warnings. Invigilator comments are also shown and spoken when browser speech is available. Candidate heartbeats receive those actions even when webcam monitoring is not enabled.
+
+The optional `location_geofence` task feature uses browser geolocation to check the candidate's reported position, accuracy and distance from a lecturer-set examination venue before the attempt starts. No Google Maps key or new environment variable is required. Treat this as an admission control and review indicator, not definitive evidence, and maintain an institutional accommodation and privacy process.
+
+After a resumable exit, the visible question is moved to the end and unseen questions are reshuffled. A different question appears when one is available. If there is no replacement, the visible question remains the final question. Time already used is retained and the event is recorded.
+
+Database revision: `20261104_11_live_exam_operations.py`.
+
+No new environment variable is required. Deploy with the standard prestart command so the migration is applied before the web service starts.

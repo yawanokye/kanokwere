@@ -1,4 +1,4 @@
-# Kanokware 1.2.0
+# Kanokware 1.3.0
 
 **Verify learning in the age of AI.**
 
@@ -160,3 +160,19 @@ Each task has a lecturer-set positive whole-number attempt limit. Attempts are c
 Screen and audio recordings are uploaded as access-controlled chunks and are indicators for human review, not automatic misconduct findings. Institutions should configure consent, retention, accessibility accommodations, storage capacity, and due-process rules before enabling recording.
 
 Database revision: `20260901_10_task_feature_governance.py`. No new environment variable is required.
+
+## Phase 5 live proctored examination operations
+
+Standalone exams can now use a scheduled opening and closing window, an overall duration, a late-entry window, and a lecturer-uploaded candidate roster. The reorganised lecturer workspace includes a separate Exam Eligibility Roster panel, where the lecturer selects a particular examination, downloads a CSV template, uploads eligible students, and reviews active or inactive records. Roster admission verifies the candidate ID and an individually hashed access PIN. The optional `extra_time_minutes` roster column applies a candidate accommodation without changing the task for everyone else. The optional `monitor_group` column places candidates into named groups that can be assigned to different remote monitors.
+
+Candidates must pass a browser and device-readiness check before starting. The check covers top-level page use, network state, secure browser capabilities, and the APIs required by the task's enabled camera, screen, and audio controls.
+
+The live invigilation dashboard now lets an authorised lecturer warn a candidate, pause and resume the clocks, add time, or end and lock an attempt. The candidate receives interventions through the assessment heartbeat even when webcam monitoring is off. Every action is added to the monitoring and audit trail for later review.
+
+Remote invigilation supports up to 30 active candidate sessions for an examination. The lecturer sees all active candidates in a numbered tile wall, including connection, progress, camera state, monitor group and movement warnings, with direct Comment and Review actions. Course owners and institution administrators can see the full examination. When group assignments exist, other authorised monitors see only their assigned candidate groups. When a candidate leaves a resumable session, the visible question is moved to the end of the remaining sequence and unseen questions are reshuffled. The next question is different when a replacement exists. If no replacement remains, the visible question stays as the final question. Time already spent on it is retained, and the event is written to the monitoring trail.
+
+Candidate-side movement and presence indicators create an on-screen and spoken warning. The same condition is highlighted on the candidate's remote-monitor tile. An invigilator comment is delivered on screen and by browser speech, and retained in the incident record.
+
+An optional examination-venue geofence can require a candidate to be within a lecturer-set radius before starting. It uses the browser's high-accuracy device location, so no Google Maps API key is required. Kanokware checks the reported accuracy and stores the verified distance and accuracy on the attempt, not the candidate's raw live coordinates. Geolocation can be unavailable or spoofed, so use it as an admission control and review indicator, not as sole proof of identity or misconduct. Institutions should provide an alternative process for candidates whose devices, accessibility needs, or privacy rules prevent location use.
+
+Database revision: `20261104_11_live_exam_operations.py`. No new environment variable is required.

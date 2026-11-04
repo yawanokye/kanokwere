@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1051,6 +1052,7 @@ def test_task_governance_standalone_exam_uploaded_bank_and_recordings():
                 "task_id": task["id"],
                 "candidate_name": "Standalone Candidate",
                 "candidate_id": "EXM/001",
+                "readiness_confirmed": True,
                 "client_instance_id": "standalone-browser-instance-0001",
             },
         )
@@ -1099,6 +1101,7 @@ def test_task_governance_standalone_exam_uploaded_bank_and_recordings():
                 "task_id": task["id"],
                 "candidate_name": "Standalone Candidate",
                 "candidate_id": "exm/001",
+                "readiness_confirmed": True,
                 "client_instance_id": "standalone-browser-instance-0002",
             },
         )
@@ -1111,6 +1114,7 @@ def test_task_governance_standalone_exam_uploaded_bank_and_recordings():
                 "task_id": task["id"],
                 "candidate_name": "Standalone Candidate",
                 "candidate_id": "EXM/001",
+                "readiness_confirmed": True,
                 "client_instance_id": "standalone-browser-instance-0003",
             },
         )
@@ -1132,7 +1136,249 @@ def test_task_governance_standalone_exam_uploaded_bank_and_recordings():
                 "task_id": task["id"],
                 "candidate_name": "Standalone Candidate",
                 "candidate_id": "EXM/001",
+                "readiness_confirmed": True,
                 "client_instance_id": "standalone-browser-instance-0004",
             },
         )
         assert restarted.status_code == 200, restarted.text
+
+
+def test_live_exam_roster_readiness_timing_and_proctor_controls():
+    with TestClient(app) as client:
+        owner, setup_code = create_lecturer(client, "live-proctor@test.edu", "Live Proctor")
+        activate_lecturer(client, "live-proctor@test.edu", setup_code)
+        course_response = client.post(
+            "/api/lecturer/courses",
+            json={
+                "course_code": "LVE 910",
+                "title": "Live Proctored Examination",
+                "academic_year": "2026/2027",
+                "semester": "First Semester",
+                "assessment_question_count": 3,
+            },
+        )
+        assert course_response.status_code == 201, course_response.text
+        course = course_response.json()["course"]
+        now = datetime.now(timezone.utc)
+        task_response = client.post(
+            f"/api/lecturer/courses/{course['id']}/tasks",
+            json={
+                "title": "Scheduled proctored final",
+                "mode": "standalone_exam",
+                "assessment_question_count": 3,
+                "max_attempts": 1,
+                "exam_starts_at": (now - timedelta(minutes=5)).isoformat(),
+                "exam_ends_at": (now + timedelta(hours=3)).isoformat(),
+                "duration_minutes": 60,
+                "late_entry_minutes": 30,
+                "roster_required": True,
+                "geofence_label": "UCC Main Examination Hall",
+                "geofence_latitude": 5.115,
+                "geofence_longitude": -1.290,
+                "geofence_radius_meters": 500,
+                "geofence_max_accuracy_meters": 100,
+                "features": {
+                    "live_exam_monitoring": True,
+                    "webcam_monitoring": True,
+                    "location_geofence": True,
+                },
+            },
+        )
+        assert task_response.status_code == 201, task_response.text
+        task = task_response.json()["task"]
+
+        bank = {
+            "questions": [
+                {
+                    "stem": f"Which lecturer-approved answer is correct for live examination item {number}?",
+                    "options": [f"Approved {number}", f"Option B {number}", f"Option C {number}", f"Option D {number}"],
+                    "correct_option_index": 0,
+                    "difficulty": "understanding",
+                    "category": "decision_defence",
+                    "seconds": 30,
+                    "source_quote": f"The lecturer approved the answer for live examination item {number}.",
+                    "source_location": f"Live bank item {number}",
+                    "explanation": f"The first option is the approved answer for item {number}.",
+                }
+                for number in range(1, 4)
+            ]
+        }
+        upload = client.post(
+            f"/api/lecturer/courses/{course['id']}/tasks/{task['id']}/question-bank",
+            data={"title": "Live proctored question bank"},
+            files={"file": ("bank.json", json.dumps(bank).encode(), "application/json")},
+        )
+        assert upload.status_code == 200, upload.text
+        roster = client.post(
+            f"/api/lecturer/courses/{course['id']}/tasks/{task['id']}/candidates/import",
+            files={
+                "file": (
+                    "roster.csv",
+                    b"candidate_id,candidate_name,access_pin,extra_time_minutes,monitor_group\nLVE/001,Approved Candidate,2468,15,Group A\n",
+                    "text/csv",
+                )
+            },
+        )
+        assert roster.status_code == 200, roster.text
+        assert roster.json()["candidate_count"] == 1
+        eligible = client.get(
+            f"/api/lecturer/courses/{course['id']}/tasks/{task['id']}/candidates"
+        )
+        assert eligible.status_code == 200, eligible.text
+        assert eligible.json()["candidates"][0]["candidate_name"] == "Approved Candidate"
+        assert eligible.json()["candidates"][0]["monitor_group"] == "Group A"
+        assert "access_pin" not in eligible.json()["candidates"][0]
+
+        assignments = client.get(
+            f"/api/lecturer/courses/{course['id']}/tasks/{task['id']}/monitor-assignments"
+        )
+        assert assignments.status_code == 200, assignments.text
+        assert assignments.json()["groups"][0]["group_label"] == "Group A"
+        assigned = client.put(
+            f"/api/lecturer/courses/{course['id']}/tasks/{task['id']}/monitor-assignments",
+            json={"group_label": "Group A", "monitor_user_id": owner["id"]},
+        )
+        assert assigned.status_code == 200, assigned.text
+        assert assigned.json()["groups"][0]["monitor_name"] == "Live Proctor"
+
+        base_start = {
+            "course_code": course["enrollment_code"],
+            "task_id": task["id"],
+            "candidate_name": "Unverified Name",
+            "candidate_id": "LVE/001",
+            "access_pin": "2468",
+            "latitude": 5.115,
+            "longitude": -1.290,
+            "location_accuracy_meters": 25,
+            "client_instance_id": "live-proctor-browser-instance-0001",
+        }
+        not_ready = client.post("/api/examinations/start", json=base_start)
+        assert not_ready.status_code == 409, not_ready.text
+        outside_venue = client.post(
+            "/api/examinations/start",
+            json={**base_start, "readiness_confirmed": True, "latitude": 6.115},
+        )
+        assert outside_venue.status_code == 403, outside_venue.text
+        wrong_pin = client.post(
+            "/api/examinations/start",
+            json={**base_start, "readiness_confirmed": True, "access_pin": "9999"},
+        )
+        assert wrong_pin.status_code == 403, wrong_pin.text
+        started = client.post(
+            "/api/examinations/start",
+            json={**base_start, "readiness_confirmed": True},
+        )
+        assert started.status_code == 200, started.text
+        assert started.json()["extra_time_minutes"] == 15
+        assert started.json()["exam_deadline_at"]
+        assert started.json()["location_verified"] is True
+        assessment_id = started.json()["assessment_id"]
+        headers = {"Authorization": f"Bearer {started.json()['session_token']}"}
+
+        first_question = client.get(
+            f"/api/assessments/{assessment_id}/question", headers=headers
+        )
+        assert first_question.status_code == 200, first_question.text
+        first_stem = first_question.json()["stem"]
+        interrupted = client.post(
+            f"/api/assessments/{assessment_id}/interrupt",
+            headers=headers,
+            json={
+                "client_instance_id": "live-proctor-browser-instance-0001",
+                "reason": "pagehide",
+            },
+        )
+        assert interrupted.status_code == 200, interrupted.text
+        resumed_heartbeat = client.post(
+            f"/api/assessments/{assessment_id}/heartbeat",
+            headers=headers,
+            json={
+                "client_instance_id": "live-proctor-browser-instance-0001",
+                "camera_verified": True,
+                "reason": "resume",
+            },
+        )
+        assert resumed_heartbeat.status_code == 200, resumed_heartbeat.text
+        assert resumed_heartbeat.json()["status"] == "in_progress"
+        reshuffled_question = client.get(
+            f"/api/assessments/{assessment_id}/question", headers=headers
+        )
+        assert reshuffled_question.status_code == 200, reshuffled_question.text
+        assert reshuffled_question.json()["stem"] != first_stem
+        assert reshuffled_question.json()["adaptive_reason"] == "reshuffled_after_resume"
+
+        movement = client.post(
+            f"/api/assessments/{assessment_id}/monitoring-event",
+            headers=headers,
+            json={
+                "event_type": "excessive_movement",
+                "duration_ms": 1600,
+                "question_position": reshuffled_question.json()["position"],
+                "severity": "warning",
+                "corrected": False,
+                "message": "Excessive head movement was detected.",
+            },
+        )
+        assert movement.status_code == 200, movement.text
+
+        remote_monitor = client.get(
+            f"/api/lecturer/courses/{course['id']}/live-exam-monitor"
+        )
+        assert remote_monitor.status_code == 200, remote_monitor.text
+        assert remote_monitor.json()["capacity"]["limit"] == 30
+        assert remote_monitor.json()["capacity"]["active"] == 1
+        assert remote_monitor.json()["sessions"][0]["monitor_group"] == "Group A"
+        assert remote_monitor.json()["sessions"][0]["suspected_movement"]["event_type"] == "excessive_movement"
+
+        warning = client.post(
+            f"/api/lecturer/assessments/{assessment_id}/proctor-action",
+            json={"action": "warning", "message": "Keep your face visible."},
+        )
+        assert warning.status_code == 200, warning.text
+        heartbeat = client.post(
+            f"/api/assessments/{assessment_id}/heartbeat",
+            headers=headers,
+            json={
+                "client_instance_id": "live-proctor-browser-instance-0001",
+                "camera_verified": False,
+                "reason": "periodic",
+            },
+        )
+        assert heartbeat.status_code == 200, heartbeat.text
+        assert heartbeat.json()["proctor_message"] == "Keep your face visible."
+
+        paused = client.post(
+            f"/api/lecturer/assessments/{assessment_id}/proctor-action",
+            json={"action": "pause", "message": "Wait for an identity check."},
+        )
+        assert paused.status_code == 200, paused.text
+        assert paused.json()["assessment"]["status"] == "proctor_paused"
+        question_while_paused = client.get(
+            f"/api/assessments/{assessment_id}/question", headers=headers
+        )
+        assert question_while_paused.status_code == 200
+        assert question_while_paused.json()["status"] == "proctor_paused"
+
+        resumed = client.post(
+            f"/api/lecturer/assessments/{assessment_id}/proctor-action",
+            json={"action": "resume"},
+        )
+        assert resumed.status_code == 200, resumed.text
+        assert resumed.json()["assessment"]["status"] == "in_progress"
+        added = client.post(
+            f"/api/lecturer/assessments/{assessment_id}/proctor-action",
+            json={"action": "add_time", "minutes": 5},
+        )
+        assert added.status_code == 200, added.text
+        assert added.json()["assessment"]["exam_seconds_remaining"] > 0
+
+        ended = client.post(
+            f"/api/lecturer/assessments/{assessment_id}/proctor-action",
+            json={"action": "terminate", "message": "Session ended for review."},
+        )
+        assert ended.status_code == 200, ended.text
+        assert ended.json()["assessment"]["status"] == "locked"
+        detail = client.get(f"/api/lecturer/assessments/{assessment_id}")
+        assert detail.status_code == 200, detail.text
+        event_types = {item["event_type"] for item in detail.json()["monitoring_events"]}
+        assert {"proctor_warning", "proctor_pause", "proctor_resume", "proctor_add_time", "proctor_terminate"}.issubset(event_types)

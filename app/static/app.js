@@ -73,6 +73,11 @@ const state = {
   currentAnomalyCourseId: null,
   liveMonitorCourseId: null,
   liveMonitorTimer: null,
+  liveMonitorResult: null,
+  examReadinessTaskId: null,
+  proctorPaused: false,
+  lastProctorMessageAt: null,
+  examLocation: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -239,6 +244,11 @@ function setConnectionOverlay(mode, payload = {}) {
     title.textContent = "Restoring the assessment";
     text.textContent = "Checking the connection and reverifying the camera before continuing.";
     retry.classList.add("hidden");
+  } else if (mode === "proctor_paused") {
+    chip.textContent = "Paused";
+    title.textContent = "Examination paused by invigilator";
+    text.textContent = payload.proctor_message || "Wait for the invigilator to resume this examination. The clocks are paused.";
+    retry.classList.add("hidden");
   } else {
     chip.textContent = "Interrupted";
     title.textContent = "Connection interrupted";
@@ -337,6 +347,14 @@ async function sendHeartbeat({ cameraVerified = false, reason = "periodic" } = {
       }),
     });
     state.connectionStatus = result.status;
+    if (result.proctor_message_at && result.proctor_message_at !== state.lastProctorMessageAt) {
+      state.lastProctorMessageAt = result.proctor_message_at;
+      const warning = $("#monitoring-warning");
+      warning?.classList.remove("hidden");
+      if ($("#monitoring-warning-title")) $("#monitoring-warning-title").textContent = "Invigilator message";
+      if ($("#monitoring-warning-text")) $("#monitoring-warning-text").textContent = result.proctor_message || "The invigilator updated this session.";
+      speakCandidateWarning(`Invigilator message. ${result.proctor_message || "Please check the examination screen."}`);
+    }
     const interval = Number(result.heartbeat_interval_seconds || 5);
     state.heartbeatIntervalMs = Math.max(3000, interval * 1000);
     return result;
@@ -358,6 +376,14 @@ function startHeartbeatLoop() {
       } else if (result.status === "interrupted") {
         disableOptions();
         setConnectionOverlay("interrupted", result);
+      } else if (result.status === "proctor_paused") {
+        state.proctorPaused = true;
+        disableOptions();
+        setConnectionOverlay("proctor_paused", result);
+      } else if (state.proctorPaused && result.status === "in_progress") {
+        state.proctorPaused = false;
+        setConnectionOverlay("online");
+        await loadQuestion();
       }
     } catch (error) {
       if (error.networkError) markConnectionInterrupted("network_failure");
@@ -391,11 +417,19 @@ async function recoverAssessment(reason = "reconnect") {
   state.resumeInProgress = true;
   setConnectionOverlay("reconnecting");
   try {
-    await startCamera();
-    await runMonitoringPreflight();
-    await startSuspiciousMonitoring();
-    const result = await sendHeartbeat({ cameraVerified: true, reason });
+    let result = await sendHeartbeat({ cameraVerified: false, reason });
     if (!result) throw new Error("The assessment state could not be restored.");
+    state.activeFeatures = result.active_features || state.activeFeatures || {};
+    state.monitoringEnabled = Boolean(result.monitoring_enabled);
+    state.secureBrowserEnforcement = Boolean(result.secure_browser_enforcement);
+    if (state.monitoringEnabled && !["locked", "completed"].includes(result.status)) {
+      await startCamera();
+      await runMonitoringPreflight();
+      await startSuspiciousMonitoring();
+      if (result.status === "interrupted" || result.camera_reverification_required) {
+        result = await sendHeartbeat({ cameraVerified: true, reason });
+      }
+    }
     if (result.status === "locked") {
       state.connectionStatus = "locked";
       disableOptions();
@@ -647,6 +681,17 @@ function resetMonitoringStates() {
   hideMonitoringWarning();
 }
 
+function speakCandidateWarning(message) {
+  const text = String(message || "").trim();
+  if (!text || !globalThis.speechSynthesis || !globalThis.SpeechSynthesisUtterance) return;
+  globalThis.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.rate = 0.95;
+  utterance.pitch = 1;
+  utterance.volume = 1;
+  globalThis.speechSynthesis.speak(utterance);
+}
+
 function showMonitoringWarning(rule) {
   const box = $("#monitoring-warning");
   if (!box) return;
@@ -654,6 +699,7 @@ function showMonitoringWarning(rule) {
   $("#monitoring-warning-text").textContent = rule.message;
   box.classList.remove("hidden", "critical");
   if (rule.severity === "critical") box.classList.add("critical");
+  speakCandidateWarning(`${rule.title}. ${rule.message}`);
 }
 
 function hideMonitoringWarning() {
@@ -1441,8 +1487,21 @@ function applySelectedAssessmentTask() {
     input.disabled = standalone;
   });
   if (standalone) {
+    if (state.examReadinessTaskId !== task.id) {
+      state.examReadinessTaskId = null;
+      state.examLocation = null;
+      setMessage($("#exam-readiness-result"));
+    }
     $("#standalone-exam-title").textContent = task.title;
-    $("#standalone-exam-instructions").textContent = `${task.instructions || "Complete the examination in one uninterrupted session."} Maximum starts per candidate: ${task.max_attempts || 1}.${task.ready ? "" : " The lecturer is still preparing the question bank."}`;
+    const schedule = task.exam_starts_at
+      ? ` Opens ${new Date(task.exam_starts_at).toLocaleString()}${task.exam_ends_at ? ` and closes ${new Date(task.exam_ends_at).toLocaleString()}` : ""}.`
+      : "";
+    const duration = task.duration_minutes ? ` Overall duration: ${task.duration_minutes} minutes.` : "";
+    const locationRule = features.location_geofence
+      ? ` You must be within the permitted area for ${task.geofence_label || "the examination venue"} and allow precise device location.`
+      : "";
+    $("#standalone-exam-instructions").textContent = `${task.instructions || "Complete the examination in one uninterrupted session."}${schedule}${duration}${locationRule} Maximum starts per candidate: ${task.max_attempts || 1}.${task.ready ? "" : " The lecturer is still preparing the question bank."}`;
+    $("#exam-access-pin-field")?.classList.toggle("hidden", !task.roster_required);
     const recordingLabels = [];
     if (features.screen_activity_recording) recordingLabels.push("screen activity");
     if (features.environment_audio_recording) recordingLabels.push("environment audio");
@@ -1450,7 +1509,7 @@ function applySelectedAssessmentTask() {
     $("#standalone-consent-text").textContent = recordingLabels.length
       ? `I understand the examination rules and consent to ${recordingLabels.join(", ")} being retained for authorised review.`
       : "I understand the examination rules and the configured browser controls.";
-    $("#start-standalone-exam").disabled = !task.ready || !$("#standalone-exam-consent")?.checked;
+    $("#start-standalone-exam").disabled = !task.ready || !$("#standalone-exam-consent")?.checked || state.examReadinessTaskId !== task.id;
   }
 
   const milestonesEnabled = Boolean(features.learning_milestones) && !standalone;
@@ -1486,6 +1545,62 @@ $("#verify-course-code")?.addEventListener("click", () => resolveStudentCourse(t
 $("#student-course-code")?.addEventListener("change", () => resolveStudentCourse(false));
 $("#student-assessment-task")?.addEventListener("change", applySelectedAssessmentTask);
 $("#standalone-exam-consent")?.addEventListener("change", applySelectedAssessmentTask);
+
+function requestDeviceLocation() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error("This browser does not support device location."));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (position) => resolve({
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+        accuracy: position.coords.accuracy,
+      }),
+      (error) => reject(new Error(error.message || "Device location could not be verified.")),
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+    );
+  });
+}
+
+$("#run-exam-readiness")?.addEventListener("click", async () => {
+  const task = state.selectedTask;
+  if (!task || task.mode !== "standalone_exam") return;
+  const button = $("#run-exam-readiness");
+  button.disabled = true;
+  setMessage($("#exam-readiness-result"), "Checking this device and browser…");
+  try {
+    const failures = [];
+    if (window.self !== window.top) failures.push("Kanokware is open inside another app or frame");
+    if (!navigator.onLine) failures.push("the device is offline");
+    if (!globalThis.crypto?.subtle) failures.push("secure browser cryptography is unavailable");
+    if (state.secureBrowserEnforcement && !document.documentElement.requestFullscreen) failures.push("fullscreen mode is unavailable");
+    if (state.activeFeatures.webcam_monitoring && !navigator.mediaDevices?.getUserMedia) failures.push("camera access is unavailable");
+    if (state.activeFeatures.screen_activity_recording && !navigator.mediaDevices?.getDisplayMedia) failures.push("screen capture is unavailable");
+    if (state.activeFeatures.environment_audio_recording && !navigator.mediaDevices?.getUserMedia) failures.push("microphone access is unavailable");
+    if ((state.activeFeatures.screen_activity_recording || state.activeFeatures.environment_audio_recording) && !globalThis.MediaRecorder) failures.push("evidence recording is unavailable");
+    if (state.activeFeatures.location_geofence && !navigator.geolocation) failures.push("device location is unavailable");
+    if (failures.length) throw new Error(`Readiness failed: ${failures.join(", ")}.`);
+    if (state.activeFeatures.location_geofence) {
+      state.examLocation = await requestDeviceLocation();
+    } else {
+      state.examLocation = null;
+    }
+    state.examReadinessTaskId = task.id;
+    const locationText = state.examLocation
+      ? ` Location captured with approximately ${Math.round(state.examLocation.accuracy)} metre accuracy.`
+      : "";
+    setMessage($("#exam-readiness-result"), `Device ready.${locationText} Permissions for enabled camera, screen and audio controls will be confirmed when you start.`, "success");
+    applySelectedAssessmentTask();
+  } catch (error) {
+    state.examReadinessTaskId = null;
+    state.examLocation = null;
+    setMessage($("#exam-readiness-result"), error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+});
 $("#submission-stage")?.addEventListener("change", (event) => {
   const milestone = event.target.value === "milestone";
   $("#milestone-field")?.classList.toggle("hidden", !milestone);
@@ -1733,10 +1848,11 @@ async function activateStartedAssessment(result, monitoringPrepared = false) {
     }
     await startSuspiciousMonitoring();
     await sendHeartbeat({ cameraVerified: true, reason: "start" });
-    startHeartbeatLoop();
   } else {
     stopCamera();
+    await sendHeartbeat({ cameraVerified: false, reason: "start" });
   }
+  startHeartbeatLoop();
   startEvidenceRecordings(state.activeFeatures);
   await loadQuestion();
 }
@@ -1791,6 +1907,10 @@ $("#start-standalone-exam")?.addEventListener("click", async () => {
     setMessage($("#standalone-exam-message"), "Enter the candidate name and ID.", "warning");
     return;
   }
+  if (state.examReadinessTaskId !== task.id) {
+    setMessage($("#standalone-exam-message"), "Run the device-readiness check before starting.", "warning");
+    return;
+  }
   button.disabled = true;
   setMessage($("#standalone-exam-message"), "Starting examination…");
   try {
@@ -1812,6 +1932,11 @@ $("#start-standalone-exam")?.addEventListener("click", async () => {
         task_id: task.id,
         candidate_name: candidateName,
         candidate_id: candidateId,
+        access_pin: task.roster_required ? $("#exam-access-pin")?.value || null : null,
+        readiness_confirmed: true,
+        latitude: state.examLocation?.latitude ?? null,
+        longitude: state.examLocation?.longitude ?? null,
+        location_accuracy_meters: state.examLocation?.accuracy ?? null,
         client_instance_id: state.clientInstanceId,
       }),
     });
@@ -1825,7 +1950,7 @@ $("#start-standalone-exam")?.addEventListener("click", async () => {
     }
     setMessage($("#standalone-exam-message"), error.message, "error");
   } finally {
-    button.disabled = !task.ready || !$("#standalone-exam-consent")?.checked;
+    button.disabled = !task.ready || !$("#standalone-exam-consent")?.checked || state.examReadinessTaskId !== task.id;
   }
 });
 
@@ -2380,13 +2505,16 @@ function populateCourseSelectors(courses) {
   const filter = $("#submission-course-filter");
   const progress = $("#progress-course-filter");
   const taskCourse = $("#task-course");
+  const rosterCourse = $("#roster-course");
   const selectedFilter = filter.value;
   const selectedProgress = progress?.value || "";
   const selectedTaskCourse = taskCourse?.value || "";
+  const selectedRosterCourse = rosterCourse?.value || "";
   collaborator.replaceChildren(new Option("Select course", ""));
   filter.replaceChildren(new Option("All my courses", ""));
   progress?.replaceChildren(new Option("Select a course", ""));
   taskCourse?.replaceChildren(new Option("Select course", ""));
+  rosterCourse?.replaceChildren(new Option("Select course", ""));
   courses.forEach((course) => {
     const label = `${course.course_code} · ${course.title}`;
     if (["owner", "institution_admin"].includes(course.my_access_level)) {
@@ -2394,6 +2522,9 @@ function populateCourseSelectors(courses) {
     }
     if (["owner", "co_lecturer", "institution_admin"].includes(course.my_access_level)) {
       taskCourse?.appendChild(new Option(label, course.id));
+      if ((course.assessment_tasks || []).some((task) => task.mode === "standalone_exam")) {
+        rosterCourse?.appendChild(new Option(label, course.id));
+      }
     }
     filter.appendChild(new Option(label, course.id));
     progress?.appendChild(new Option(label, course.id));
@@ -2401,6 +2532,25 @@ function populateCourseSelectors(courses) {
   if (courses.some((course) => course.id === selectedFilter)) filter.value = selectedFilter;
   if (progress && courses.some((course) => course.id === selectedProgress)) progress.value = selectedProgress;
   if (taskCourse && courses.some((course) => course.id === selectedTaskCourse)) taskCourse.value = selectedTaskCourse;
+  if (rosterCourse && courses.some((course) => course.id === selectedRosterCourse)) rosterCourse.value = selectedRosterCourse;
+  populateRosterTasks();
+}
+
+function populateRosterTasks() {
+  const courseId = $("#roster-course")?.value || "";
+  const taskSelect = $("#roster-task");
+  if (!taskSelect) return;
+  const selected = taskSelect.value;
+  taskSelect.replaceChildren(new Option("Select examination", ""));
+  const course = state.courses.find((item) => item.id === courseId);
+  (course?.assessment_tasks || [])
+    .filter((task) => task.mode === "standalone_exam")
+    .forEach((task) => taskSelect.appendChild(new Option(
+      `${task.title} · ${task.roster_count || 0} eligible`, task.id
+    )));
+  if ((course?.assessment_tasks || []).some((task) => task.id === selected && task.mode === "standalone_exam")) {
+    taskSelect.value = selected;
+  }
 }
 
 async function loadTaskFeatureOptions() {
@@ -2421,6 +2571,9 @@ async function loadTaskFeatureOptions() {
       input.dataset.featureKey = feature.key;
       input.disabled = feature.activation_mode !== "lecturer_allowed";
       input.checked = feature.activation_mode === "always_on";
+      if (feature.key === "location_geofence") {
+        input.addEventListener("change", toggleGeofenceSettings);
+      }
       const text = document.createElement("span");
       const rule = {
         disabled: "disabled by administrator",
@@ -2433,10 +2586,33 @@ async function loadTaskFeatureOptions() {
       label.append(input, text);
       container.appendChild(label);
     });
+    toggleGeofenceSettings();
   } catch (error) {
     setMessage($("#task-create-message"), error.message, "error");
   }
 }
+
+function toggleGeofenceSettings() {
+  const input = $('#task-feature-options input[data-feature-key="location_geofence"]');
+  $("#geofence-settings")?.classList.toggle("hidden", !input?.checked);
+}
+
+$("#capture-exam-location")?.addEventListener("click", async () => {
+  const form = $("#assessment-task-form");
+  const button = $("#capture-exam-location");
+  button.disabled = true;
+  setMessage($("#geofence-message"), "Requesting this device's precise location…");
+  try {
+    const location = await requestDeviceLocation();
+    form.elements.geofence_latitude.value = location.latitude.toFixed(7);
+    form.elements.geofence_longitude.value = location.longitude.toFixed(7);
+    setMessage($("#geofence-message"), `Venue coordinates captured with approximately ${Math.round(location.accuracy)} metre accuracy.`, "success");
+  } catch (error) {
+    setMessage($("#geofence-message"), error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+});
 
 $("#task-course")?.addEventListener("change", loadTaskFeatureOptions);
 $("#task-mode")?.addEventListener("change", (event) => {
@@ -2454,8 +2630,13 @@ $("#assessment-task-form")?.addEventListener("submit", async (event) => {
   });
   const sourceFile = form.elements.exam_source_file?.files?.[0];
   const questionFile = form.elements.exam_questions_file?.files?.[0];
+  const rosterFile = form.elements.exam_roster_file?.files?.[0];
   if (sourceFile && questionFile) {
     setMessage($("#task-create-message"), "Choose either a source document or a question-bank JSON file, not both.", "warning");
+    return;
+  }
+  if (rosterFile && data.mode !== "standalone_exam") {
+    setMessage($("#task-create-message"), "Candidate rosters are available for standalone examinations.", "warning");
     return;
   }
   button.disabled = true;
@@ -2469,6 +2650,16 @@ $("#assessment-task-form")?.addEventListener("submit", async (event) => {
         mode: data.mode,
         assessment_question_count: Number(data.assessment_question_count),
         max_attempts: Number(data.max_attempts),
+        exam_starts_at: data.exam_starts_at ? new Date(data.exam_starts_at).toISOString() : null,
+        exam_ends_at: data.exam_ends_at ? new Date(data.exam_ends_at).toISOString() : null,
+        duration_minutes: data.duration_minutes ? Number(data.duration_minutes) : null,
+        late_entry_minutes: Number(data.late_entry_minutes || 0),
+        roster_required: Boolean(form.elements.roster_required?.checked || rosterFile),
+        geofence_label: data.geofence_label || null,
+        geofence_latitude: data.geofence_latitude ? Number(data.geofence_latitude) : null,
+        geofence_longitude: data.geofence_longitude ? Number(data.geofence_longitude) : null,
+        geofence_radius_meters: data.geofence_radius_meters ? Number(data.geofence_radius_meters) : null,
+        geofence_max_accuracy_meters: Number(data.geofence_max_accuracy_meters || 100),
         features,
       }),
     });
@@ -2482,16 +2673,174 @@ $("#assessment-task-form")?.addEventListener("submit", async (event) => {
         body: upload,
       });
     }
+    if (data.mode === "standalone_exam" && rosterFile) {
+      const roster = new FormData();
+      roster.set("file", rosterFile);
+      await api(`/api/lecturer/courses/${data.course_id}/tasks/${created.task.id}/candidates/import`, {
+        method: "POST",
+        body: roster,
+      });
+    }
     form.reset();
     $("#exam-source-fields")?.classList.add("hidden");
+    $("#geofence-settings")?.classList.add("hidden");
+    setMessage($("#geofence-message"));
     $("#task-feature-options").innerHTML = "<small>Select a course to load administrator-approved features.</small>";
-    setMessage($("#task-create-message"), "Assessment task created. Any selected question source is now being prepared.", "success");
+    setMessage($("#task-create-message"), "Assessment task created. Selected questions and candidate roster were prepared.", "success");
     await loadCourses();
   } catch (error) {
     setMessage($("#task-create-message"), error.message, "error");
   } finally {
     button.disabled = false;
   }
+});
+
+function renderExamRoster(candidates = []) {
+  const body = $("#exam-roster-body");
+  const summary = $("#exam-roster-summary");
+  if (!body || !summary) return;
+  body.replaceChildren();
+  const active = candidates.filter((item) => item.status === "active");
+  summary.classList.toggle("hidden", candidates.length === 0);
+  summary.textContent = candidates.length
+    ? `${active.length} eligible candidate(s) · ${candidates.length - active.length} inactive record(s)`
+    : "";
+  if (!candidates.length) {
+    body.innerHTML = '<tr><td colspan="6" class="empty-state">No students have been uploaded for this examination.</td></tr>';
+    return;
+  }
+  candidates.forEach((candidate, index) => {
+    const row = document.createElement("tr");
+    row.innerHTML = '<td></td><td><code></code></td><td></td><td></td><td></td><td><span class="status-pill"></span></td>';
+    row.children[0].textContent = String(index + 1);
+    row.children[1].querySelector("code").textContent = candidate.candidate_id;
+    row.children[2].textContent = candidate.candidate_name;
+    row.children[3].textContent = candidate.monitor_group || "Unassigned";
+    row.children[4].textContent = `${candidate.extra_time_minutes || 0} min`;
+    const status = row.children[5].querySelector("span");
+    status.textContent = candidate.status;
+    status.classList.add(candidate.status === "active" ? "active" : "warning");
+    body.appendChild(row);
+  });
+}
+
+function renderMonitorAssignments(result = { groups: [], monitors: [] }) {
+  const panel = $("#monitor-assignment-panel");
+  const groupSelect = $("#monitor-group");
+  const monitorSelect = $("#monitor-user");
+  const list = $("#monitor-assignment-list");
+  if (!panel || !groupSelect || !monitorSelect || !list) return;
+  const groups = result.groups || [];
+  const monitors = result.monitors || [];
+  panel.classList.toggle("hidden", groups.length === 0);
+  groupSelect.replaceChildren(new Option("Select group", ""));
+  monitorSelect.replaceChildren(new Option("Select monitor", ""));
+  groups.forEach((group) => groupSelect.appendChild(new Option(
+    `${group.group_label} · ${group.candidate_count} candidate(s)`, group.group_label
+  )));
+  monitors.forEach((monitor) => monitorSelect.appendChild(new Option(
+    `${monitor.full_name} · ${monitor.access_level.replaceAll("_", " ")}`, monitor.user_id
+  )));
+  list.replaceChildren();
+  groups.forEach((group) => {
+    const line = document.createElement("div");
+    line.className = "monitor-assignment-line";
+    line.innerHTML = "<strong></strong><span></span>";
+    line.querySelector("strong").textContent = `${group.group_label} (${group.candidate_count})`;
+    line.querySelector("span").textContent = group.monitor_name || "No monitor assigned";
+    list.appendChild(line);
+  });
+}
+
+async function loadExamRoster() {
+  const courseId = $("#roster-course")?.value;
+  const taskId = $("#roster-task")?.value;
+  if (!courseId || !taskId) {
+    renderExamRoster([]);
+    renderMonitorAssignments();
+    return;
+  }
+  try {
+    const [roster, assignments] = await Promise.all([
+      api(`/api/lecturer/courses/${courseId}/tasks/${taskId}/candidates`),
+      api(`/api/lecturer/courses/${courseId}/tasks/${taskId}/monitor-assignments`),
+    ]);
+    renderExamRoster(roster.candidates || []);
+    renderMonitorAssignments(assignments);
+  } catch (error) {
+    setMessage($("#exam-roster-message"), error.message, "error");
+  }
+}
+
+$("#roster-course")?.addEventListener("change", () => {
+  populateRosterTasks();
+  renderExamRoster([]);
+  renderMonitorAssignments();
+  setMessage($("#exam-roster-message"));
+});
+
+$("#monitor-assignment-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const courseId = $("#roster-course")?.value;
+  const taskId = $("#roster-task")?.value;
+  const groupLabel = $("#monitor-group")?.value;
+  const monitorUserId = $("#monitor-user")?.value;
+  if (!courseId || !taskId || !groupLabel || !monitorUserId) return;
+  const button = event.submitter;
+  button.disabled = true;
+  try {
+    const result = await api(`/api/lecturer/courses/${courseId}/tasks/${taskId}/monitor-assignments`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ group_label: groupLabel, monitor_user_id: monitorUserId }),
+    });
+    renderMonitorAssignments(result);
+    $("#monitor-assignment-status").textContent = `${groupLabel} assigned successfully.`;
+  } catch (error) {
+    setMessage($("#exam-roster-message"), error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+});
+$("#roster-task")?.addEventListener("change", loadExamRoster);
+
+$("#exam-roster-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const courseId = form.elements.course_id.value;
+  const taskId = form.elements.task_id.value;
+  const file = form.elements.roster_file.files?.[0];
+  if (!courseId || !taskId || !file) {
+    setMessage($("#exam-roster-message"), "Select an examination and choose its eligibility roster CSV.", "warning");
+    return;
+  }
+  const button = event.submitter;
+  button.disabled = true;
+  try {
+    const data = new FormData();
+    data.set("file", file);
+    const result = await api(`/api/lecturer/courses/${courseId}/tasks/${taskId}/candidates/import`, {
+      method: "POST",
+      body: data,
+    });
+    form.elements.roster_file.value = "";
+    setMessage($("#exam-roster-message"), `${result.candidate_count} eligible student(s) uploaded for this examination.`, "success");
+    await Promise.all([loadExamRoster(), loadCourses()]);
+  } catch (error) {
+    setMessage($("#exam-roster-message"), error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("#download-roster-template")?.addEventListener("click", () => {
+  const template = "candidate_id,candidate_name,access_pin,extra_time_minutes,monitor_group\nSTUDENT/001,Student Name,2468,0,Group A\n";
+  const url = URL.createObjectURL(new Blob([template], { type: "text/csv;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "kanokware-exam-eligibility-roster.csv";
+  link.click();
+  URL.revokeObjectURL(url);
 });
 
 
@@ -2609,8 +2958,58 @@ async function openLiveExamMonitor(course) {
   await loadLiveExamMonitor();
 }
 
+async function applyLiveProctorAction(item, action) {
+  let message = null;
+  let minutes = null;
+  if (action === "warning") {
+    message = prompt(`Invigilator comment for ${item.student_name}:`, "Please remain visible, keep movement to a minimum, and follow the examination rules.");
+    if (message == null || !message.trim()) return;
+  }
+  if (action === "pause") {
+    message = prompt(`Reason for pausing ${item.student_name}'s examination:`, "Please wait while the invigilator checks the session.");
+    if (message == null) return;
+  }
+  if (action === "add_time") {
+    const value = prompt(`Minutes to add for ${item.student_name}:`, "5");
+    if (value == null) return;
+    minutes = Number(value);
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 240) {
+      setMessage($("#lecturer-message"), "Enter 1 to 240 whole minutes.", "error");
+      return;
+    }
+  }
+  if (action === "terminate") {
+    if (!confirm(`End and lock ${item.student_name}'s examination now?`)) return;
+    message = prompt("Reason recorded in the incident trail:", "The invigilator ended this examination for review.");
+    if (message == null) return;
+  }
+  try {
+    await api(`/api/lecturer/assessments/${item.assessment_id}/proctor-action`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, message, minutes }),
+    });
+    await loadLiveExamMonitor();
+  } catch (error) {
+    handleLecturerError(error);
+  }
+}
+
 function renderLiveExamMonitor(result) {
   const sessions = result.sessions || [];
+  state.liveMonitorResult = result;
+  const query = ($("#live-exam-search")?.value || "").trim().toLowerCase();
+  const filter = $("#live-exam-filter")?.value || "active";
+  const activeStatuses = ["in_progress", "interrupted", "proctor_paused"];
+  const displaySessions = sessions.filter((item) => {
+    const matchesQuery = !query || `${item.student_name || ""} ${item.student_id || ""} ${item.monitor_group || ""}`.toLowerCase().includes(query);
+    if (!matchesQuery) return false;
+    if (filter === "alerts") return Boolean(item.suspected_movement);
+    if (filter === "interrupted") return !item.connected || ["interrupted", "locked"].includes(item.status);
+    if (filter === "paused") return item.status === "proctor_paused";
+    if (filter === "all") return true;
+    return activeStatuses.includes(item.status);
+  });
   $("#live-exam-monitor-title").textContent = result.exam?.title || "Live examination monitoring";
   $("#live-exam-monitor-instructions").textContent = result.exam?.instructions || "Monitor connection, progress, camera state and review indicators in near real time.";
   $("#live-exam-last-updated").textContent = result.server_time ? `Updated ${new Date(result.server_time).toLocaleTimeString()}` : "";
@@ -2618,10 +3017,11 @@ function renderLiveExamMonitor(result) {
 
   const summary = $("#live-exam-summary");
   summary.replaceChildren();
+  const capacity = result.capacity || { active: sessions.filter((item) => item.connected).length, limit: 30 };
   const metrics = [
-    [sessions.length, "sessions in last 12 hours"],
+    [`${capacity.active || 0}/${capacity.limit || 30}`, "remote monitoring capacity"],
     [sessions.filter((item) => item.connected).length, "connected now"],
-    [sessions.filter((item) => ["interrupted", "locked"].includes(item.status)).length, "require attention"],
+    [sessions.filter((item) => ["interrupted", "locked", "proctor_paused"].includes(item.status)).length, "require attention"],
     [sessions.filter((item) => item.status === "completed").length, "completed"],
   ];
   metrics.forEach(([value, label]) => {
@@ -2632,14 +3032,68 @@ function renderLiveExamMonitor(result) {
     summary.appendChild(block);
   });
 
+  const tiles = $("#live-exam-tiles");
+  tiles.replaceChildren();
+  const liveSessions = displaySessions.filter((item) => activeStatuses.includes(item.status));
+  if (!liveSessions.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "No candidates are currently active.";
+    tiles.appendChild(empty);
+  }
+  liveSessions.forEach((item, index) => {
+    const tile = document.createElement("article");
+    tile.className = "live-candidate-tile";
+    if (item.suspected_movement) tile.classList.add("movement-alert");
+    if (!item.connected) tile.classList.add("disconnected");
+    tile.innerHTML = `
+      <div class="live-tile-header"><span class="candidate-tile-number"></span><span class="status-pill"></span></div>
+      <div class="live-tile-media"></div>
+      <div class="live-tile-identity"><strong></strong><small></small></div>
+      <div class="live-tile-progress"><span></span><strong></strong></div>
+      <div class="live-tile-warning hidden"><strong></strong><small></small></div>
+      <div class="action-row"><button type="button">Comment</button><button type="button" class="secondary-button">Review</button></div>`;
+    tile.querySelector(".candidate-tile-number").textContent = String(index + 1).padStart(2, "0");
+    const status = tile.querySelector(".status-pill");
+    status.textContent = item.connected ? "Live" : String(item.status || "offline").replaceAll("_", " ");
+    status.classList.add(item.connected ? "active" : "warning");
+    const media = tile.querySelector(".live-tile-media");
+    if (item.camera_status === "captured") {
+      const image = document.createElement("img");
+      image.src = `/api/lecturer/assessments/${item.assessment_id}/snapshot?v=${encodeURIComponent(result.server_time || "latest")}`;
+      image.alt = `Captured monitoring image for ${item.student_name}`;
+      image.loading = "lazy";
+      media.appendChild(image);
+    } else {
+      const initials = document.createElement("span");
+      initials.textContent = String(item.student_name || "Candidate").split(/\s+/).slice(0, 2).map((part) => part[0] || "").join("").toUpperCase();
+      media.appendChild(initials);
+    }
+    tile.querySelector(".live-tile-identity strong").textContent = item.student_name || "Candidate";
+    tile.querySelector(".live-tile-identity small").textContent = `${item.student_id || "ID unavailable"} · ${item.monitor_group || "Unassigned"}`;
+    tile.querySelector(".live-tile-progress span").textContent = "Progress";
+    tile.querySelector(".live-tile-progress strong").textContent = `${Math.min(item.current_position || 1, item.question_count || 1)}/${item.question_count || 0}`;
+    if (item.suspected_movement) {
+      const warning = tile.querySelector(".live-tile-warning");
+      warning.classList.remove("hidden");
+      warning.querySelector("strong").textContent = item.suspected_movement.unresolved ? "Movement warning" : "Recent movement";
+      warning.querySelector("small").textContent = String(item.suspected_movement.event_type || "movement").replaceAll("_", " ");
+    }
+    const [comment, review] = tile.querySelectorAll("button");
+    comment.addEventListener("click", () => applyLiveProctorAction(item, "warning"));
+    review.addEventListener("click", () => reviewAssessment(item.assessment_id));
+    tiles.appendChild(tile);
+  });
+
   const body = $("#live-exam-monitor-body");
   body.replaceChildren();
-  if (!sessions.length) {
-    body.innerHTML = '<tr><td colspan="8" class="empty-state">No examination session has started in the last 12 hours.</td></tr>';
+  if (!displaySessions.length) {
+    body.innerHTML = '<tr><td colspan="8" class="empty-state">No sessions match the selected view.</td></tr>';
     return;
   }
-  sessions.forEach((item) => {
+  displaySessions.forEach((item) => {
     const row = document.createElement("tr");
+    if (item.suspected_movement) row.classList.add("movement-alert-row");
     row.innerHTML = `
       <td><strong></strong><small></small></td>
       <td><span class="status-pill"></span><small></small></td>
@@ -2648,9 +3102,9 @@ function renderLiveExamMonitor(result) {
       <td><strong></strong><small></small></td>
       <td><strong></strong><small></small></td>
       <td><span></span></td>
-      <td><button type="button" class="secondary-button">Review</button></td>`;
+      <td><div class="action-row"></div></td>`;
     row.children[0].querySelector("strong").textContent = item.student_name;
-    row.children[0].querySelector("small").textContent = item.student_id;
+    row.children[0].querySelector("small").textContent = `${item.student_id} · ${item.monitor_group || "Unassigned"}`;
     const connection = row.children[1].querySelector("span");
     connection.textContent = item.connected ? "Connected" : String(item.status || "unknown").replaceAll("_", " ");
     connection.classList.add(item.connected ? "active" : item.status || "warning");
@@ -2660,12 +3114,45 @@ function renderLiveExamMonitor(result) {
     const camera = row.children[3].querySelector("span");
     camera.textContent = String(item.camera_status || "not captured").replaceAll("_", " ");
     camera.classList.add(item.camera_status === "captured" ? "active" : "warning");
-    row.children[4].querySelector("strong").textContent = `${item.critical_event_count || 0} critical`;
-    row.children[4].querySelector("small").textContent = `${item.unresolved_event_count || 0} unresolved · ${item.monitoring_event_count || 0} total`;
+    if (item.suspected_movement) {
+      const movement = item.suspected_movement;
+      row.children[4].querySelector("strong").textContent = movement.unresolved ? "Movement warning" : "Recent movement";
+      row.children[4].querySelector("small").textContent = `${String(movement.event_type || "movement").replaceAll("_", " ")} · ${movement.message || "Review this candidate"}`;
+      row.children[4].title = movement.created_at ? `Detected ${new Date(movement.created_at).toLocaleString()}` : "Movement indicator";
+    } else {
+      row.children[4].querySelector("strong").textContent = `${item.critical_event_count || 0} critical`;
+      row.children[4].querySelector("small").textContent = `${item.unresolved_event_count || 0} unresolved · ${item.monitoring_event_count || 0} total`;
+    }
     row.children[5].querySelector("strong").textContent = item.interruption_count || 0;
     row.children[5].querySelector("small").textContent = formatDuration(item.total_offline_seconds || 0);
     row.children[6].querySelector("span").textContent = item.started_at ? new Date(item.started_at).toLocaleTimeString() : "—";
-    row.children[7].querySelector("button").addEventListener("click", () => reviewAssessment(item.assessment_id));
+    const actions = row.children[7].querySelector(".action-row");
+    const review = document.createElement("button");
+    review.type = "button";
+    review.className = "secondary-button";
+    review.textContent = "Review";
+    review.addEventListener("click", () => reviewAssessment(item.assessment_id));
+    actions.appendChild(review);
+    if (!["completed", "locked"].includes(item.status)) {
+      const warning = document.createElement("button");
+      warning.type = "button";
+      warning.textContent = "Comment";
+      warning.addEventListener("click", () => applyLiveProctorAction(item, "warning"));
+      const pause = document.createElement("button");
+      pause.type = "button";
+      pause.textContent = item.status === "proctor_paused" ? "Resume" : "Pause";
+      pause.addEventListener("click", () => applyLiveProctorAction(item, item.status === "proctor_paused" ? "resume" : "pause"));
+      const addTime = document.createElement("button");
+      addTime.type = "button";
+      addTime.textContent = "+ Time";
+      addTime.disabled = !item.exam_deadline_at;
+      addTime.addEventListener("click", () => applyLiveProctorAction(item, "add_time"));
+      const end = document.createElement("button");
+      end.type = "button";
+      end.textContent = "End";
+      end.addEventListener("click", () => applyLiveProctorAction(item, "terminate"));
+      actions.append(warning, pause, addTime, end);
+    }
     body.appendChild(row);
   });
 }
@@ -2685,6 +3172,12 @@ async function loadLiveExamMonitor() {
 }
 
 $("#refresh-live-exam-monitor")?.addEventListener("click", loadLiveExamMonitor);
+$("#live-exam-filter")?.addEventListener("change", () => {
+  if (state.liveMonitorResult) renderLiveExamMonitor(state.liveMonitorResult);
+});
+$("#live-exam-search")?.addEventListener("input", () => {
+  if (state.liveMonitorResult) renderLiveExamMonitor(state.liveMonitorResult);
+});
 $("#close-live-exam-monitor")?.addEventListener("click", () => {
   stopLiveExamMonitor();
   state.liveMonitorCourseId = null;
