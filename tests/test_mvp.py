@@ -101,6 +101,18 @@ def activate_lecturer(
     return response.json()["user"]
 
 
+def test_homepage_has_clear_coursework_and_standalone_exam_entry_paths():
+    with TestClient(app) as client:
+        response = client.get("/")
+        assert response.status_code == 200, response.text
+        html = response.text
+        assert 'data-student-path="coursework"' in html
+        assert 'data-student-path="exam"' in html
+        assert 'id="exam-candidate-id"' in html
+        assert 'id="exam-access-pin"' in html
+        assert "Students cannot add themselves to a secured exam roster" in html
+
+
 def test_admin_created_lecturer_activation_course_and_complete_assessment():
     with TestClient(app) as client:
         user, setup_code = create_lecturer(client, "lecturer@test.edu")

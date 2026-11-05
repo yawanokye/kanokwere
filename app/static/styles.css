@@ -55,6 +55,8 @@ main { width: min(1180px, calc(100% - 32px)); margin: 0 auto; }
 .hero { display: grid; grid-template-columns: 1.35fr .65fr; gap: 36px; padding: 68px 0 38px; align-items: center; }
 .hero h1, .admin-header h1 { font: 700 clamp(38px, 5vw, 66px)/1.04 Georgia, serif; letter-spacing: -.045em; margin: 12px 0 18px; color: #173023; }
 .hero-copy > p { max-width: 720px; color: var(--muted); font-size: 18px; line-height: 1.7; }
+.hero-actions { display: flex; gap: 12px; margin-top: 24px; flex-wrap: wrap; }
+.hero-actions .exam-cta { background: #173f2c; color: white; }
 .eyebrow { color: var(--brand); text-transform: uppercase; letter-spacing: .11em; font-size: 12px; font-weight: 800; }
 .hero-stats { display: flex; gap: 12px; margin-top: 28px; flex-wrap: wrap; }
 .hero-stats div { min-width: 132px; padding: 15px 18px; border: 1px solid var(--line); background: rgba(255,255,255,.72); border-radius: 14px; }
@@ -65,9 +67,56 @@ main { width: min(1180px, calc(100% - 32px)); margin: 0 auto; }
 .principle-card ul { padding-left: 20px; margin: 0; color: #dceae1; line-height: 1.65; }
 .principle-card li + li { margin-top: 10px; }
 
+.student-entry-gateway {
+  display: grid;
+  gap: 22px;
+  margin: 4px 0 34px;
+  padding: clamp(22px, 3vw, 32px);
+  border: 1px solid rgba(220, 229, 223, .95);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, .86);
+  box-shadow: 0 12px 34px rgba(18, 49, 34, .07);
+}
+.gateway-heading h2 { margin: 7px 0 8px; font: 700 clamp(26px, 3vw, 36px) Georgia, serif; color: #173023; }
+.gateway-heading p { margin: 0; color: var(--muted); }
+.student-path-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.student-path-card {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 14px;
+  min-height: 188px;
+  padding: 22px;
+  border: 2px solid var(--line);
+  border-radius: 17px;
+  background: white;
+  color: var(--ink);
+  text-align: left;
+  transition: border-color .15s, transform .15s, box-shadow .15s;
+}
+.student-path-card:hover { transform: translateY(-2px); border-color: #98b9a6; box-shadow: 0 12px 28px rgba(18, 49, 34, .09); }
+.student-path-card.selected { border-color: var(--brand); background: linear-gradient(145deg, #fff, #eef9f3); box-shadow: 0 12px 28px rgba(20, 108, 67, .12); }
+.student-path-card.exam-path-card.selected { border-color: #b7791f; background: linear-gradient(145deg, #fff, #fff8e8); }
+.student-path-card > span:nth-child(2) { display: grid; align-content: start; gap: 8px; }
+.student-path-card strong { font-size: 20px; color: #173023; }
+.student-path-card small { color: var(--muted); font-size: 13px; line-height: 1.55; font-weight: 550; }
+.path-icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: var(--brand-soft);
+  color: var(--brand-dark);
+  font-weight: 850;
+}
+.exam-path-card .path-icon { background: #fff3d6; color: #805500; }
+.path-action { grid-column: 2; align-self: end; color: var(--brand); font-size: 13px; font-weight: 850; }
+.exam-path-card .path-action { color: #805500; }
+
 .workflow-shell { margin: 20px 0 80px; }
 .steps { display: grid; grid-template-columns: repeat(4, 1fr); list-style: none; padding: 0 18px; margin: 0 0 14px; }
 .step { position: relative; display: flex; align-items: center; justify-content: center; gap: 8px; color: #88958e; font-size: 13px; font-weight: 750; }
+.step strong { font-size: inherit; }
 .step:not(:last-child)::after { content: ""; position: absolute; height: 2px; background: #d6dfda; right: -12%; left: 62%; top: 50%; }
 .step span { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: #dce5df; color: #647068; font-size: 12px; z-index: 1; }
 .step.active { color: var(--brand-dark); }
@@ -79,6 +128,7 @@ main { width: min(1180px, calc(100% - 32px)); margin: 0 auto; }
 @keyframes panel-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 .panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 28px; }
 .panel h2 { margin: 7px 0 0; font: 700 clamp(27px, 3vw, 38px) Georgia, serif; color: #173023; }
+.panel-description { margin: 9px 0 0; color: var(--muted); line-height: 1.55; }
 .privacy-chip, .threshold-badge { padding: 8px 12px; border-radius: 999px; background: var(--brand-soft); color: var(--brand-dark); font-size: 12px; font-weight: 800; white-space: nowrap; }
 
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
@@ -216,8 +266,12 @@ footer strong { color: var(--brand-dark); }
   .brand small { display: none; }
   .nav-button { padding: 8px 10px; }
   .hero h1 { font-size: 36px; }
-  .hero-stats { display: grid; grid-template-columns: repeat(3, 1fr); }
+  .hero-stats { display: grid; grid-template-columns: 1fr; }
   .hero-stats div { min-width: 0; padding: 12px; }
+  .hero-actions { display: grid; grid-template-columns: 1fr; }
+  .student-entry-gateway { padding: 18px 14px; }
+  .student-path-card { min-height: 0; padding: 18px 15px; }
+  .exam-access-placeholder { grid-template-columns: 1fr; }
   .steps { padding: 0; }
   .step { font-size: 0; }
   .step span { font-size: 12px; }
@@ -695,6 +749,40 @@ label small { color: var(--muted); font-weight: 500; line-height: 1.4; }
   border-radius: 0 10px 10px 0;
 }
 
+.exam-access-placeholder {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 16px;
+  align-items: center;
+  padding: 22px;
+  border: 1px dashed #d4a84a;
+  border-radius: 14px;
+  background: #fffaf0;
+}
+.exam-access-placeholder h3 { margin: 5px 0; color: #573d0c; font-size: 20px; }
+.exam-access-placeholder p { margin: 0; color: #756442; line-height: 1.55; }
+.registered-candidate-icon {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  background: #805500;
+  color: white;
+  font-weight: 850;
+}
+.eligibility-note {
+  display: grid;
+  gap: 4px;
+  margin: 14px 0;
+  padding: 13px 15px;
+  border: 1px solid #b6ddc7;
+  border-radius: 11px;
+  background: var(--brand-soft);
+  color: var(--brand-dark);
+}
+.eligibility-note span { color: #375b49; line-height: 1.45; }
+
 .exam-launch-steps {
   display: grid;
   gap: 0.8rem;
@@ -878,6 +966,7 @@ label small { color: var(--muted); font-weight: 500; line-height: 1.4; }
 }
 
 @media (max-width: 720px) {
+  .student-path-grid { grid-template-columns: 1fr; }
   .task-builder-grid,
   .task-feature-grid {
     grid-template-columns: 1fr;

@@ -27,38 +27,63 @@
     <section id="view-home" class="view active">
       <div class="hero">
         <div class="hero-copy">
-          <span class="eyebrow">Document ownership assessment</span>
-          <h1>Prove ownership of work submitted under your name through knowledge assessment</h1>
-          <p>Upload a document, explain the work, complete document-specific questions, and build an assessment evidence profile. Optional oral, practical, process and live examination evidence remain under human academic judgement.</p>
+          <span class="eyebrow">Student assessment access</span>
+          <h1>Submit your work or enter a standalone examination</h1>
+          <p>Choose the path given by your lecturer. Coursework students upload and explain their work. Registered examination candidates use their course code, candidate ID and access PIN.</p>
+          <div class="hero-actions" aria-label="Student access choices">
+            <button class="primary-button" type="button" data-student-path="coursework">Submit coursework</button>
+            <button class="secondary-button exam-cta" type="button" data-student-path="exam">Take standalone exam</button>
+          </div>
           <div class="hero-stats" aria-label="Assessment summary">
-            <div><strong>Lecturer-set</strong><span>question count</span></div>
-            <div><strong>30s</strong><span>per question</span></div>
-            <div><strong>80%</strong><span>standard threshold</span></div>
+            <div><strong>No student account</strong><span>use the details from your lecturer</span></div>
+            <div><strong>Roster access</strong><span>lecturer registers exam candidates</span></div>
+            <div><strong>PIN protected</strong><span>for eligible standalone exams</span></div>
           </div>
         </div>
         <aside class="principle-card">
-          <h2>Fair assessment rules</h2>
+          <h2>Before you begin</h2>
           <ul>
-            <li>Questions come from the uploaded document only.</li>
-            <li>Each answer is supported by a retained source passage.</li>
-            <li>A low score triggers further verification, not an automatic misconduct finding.</li>
+            <li>Your lecturer provides the course or examination code.</li>
+            <li>Exam candidates are registered through the lecturer’s eligibility roster.</li>
+            <li>If your examination requires a PIN, enter it exactly as supplied.</li>
           </ul>
         </aside>
       </div>
 
-      <div class="workflow-shell">
+      <section class="student-entry-gateway" aria-labelledby="student-entry-heading">
+        <div class="gateway-heading">
+          <span class="eyebrow">Choose one path</span>
+          <h2 id="student-entry-heading">How are you completing your assessment?</h2>
+          <p>The two paths use different entry details. Select the option stated by your lecturer.</p>
+        </div>
+        <div class="student-path-grid">
+          <button class="student-path-card selected" type="button" data-student-path="coursework" aria-pressed="true">
+            <span class="path-icon" aria-hidden="true">01</span>
+            <span><strong>Submit coursework</strong><small>Upload an assignment, project, dissertation or thesis and complete a document-based ownership assessment.</small></span>
+            <span class="path-action">Open coursework path →</span>
+          </button>
+          <button class="student-path-card exam-path-card" type="button" data-student-path="exam" aria-pressed="false">
+            <span class="path-icon" aria-hidden="true">02</span>
+            <span><strong>Take a standalone exam</strong><small>For registered candidates. Enter the course code, select the examination, then provide your candidate ID and PIN.</small></span>
+            <span class="path-action">Open examination path →</span>
+          </button>
+        </div>
+      </section>
+
+      <div id="student-access-workflow" class="workflow-shell" data-entry-mode="coursework">
         <ol class="steps" aria-label="Progress">
-          <li class="step active" data-step="1"><span>1</span>Upload</li>
-          <li class="step" data-step="2"><span>2</span>Prepare</li>
-          <li class="step" data-step="3"><span>3</span>Assessment</li>
-          <li class="step" data-step="4"><span>4</span>Result</li>
+          <li class="step active" data-step="1"><span>1</span><strong id="student-step-1">Upload</strong></li>
+          <li class="step" data-step="2"><span>2</span><strong id="student-step-2">Prepare</strong></li>
+          <li class="step" data-step="3"><span>3</span><strong id="student-step-3">Assessment</strong></li>
+          <li class="step" data-step="4"><span>4</span><strong id="student-step-4">Result</strong></li>
         </ol>
 
         <section id="panel-upload" class="panel active" aria-labelledby="upload-heading">
           <div class="panel-heading">
             <div>
-              <span class="eyebrow">Step 1</span>
-              <h2 id="upload-heading">Submit the student’s work</h2>
+              <span id="student-access-eyebrow" class="eyebrow">Coursework access</span>
+              <h2 id="upload-heading">Submit coursework for ownership assessment</h2>
+              <p id="student-access-description" class="panel-description">Enter the course code supplied by your lecturer, then complete the submission details.</p>
             </div>
           </div>
           <div class="trial-code-banner" role="note" aria-label="Practice code">
@@ -71,33 +96,48 @@
           </div>
           <form id="upload-form" class="form-grid">
             <label class="full-width">
-              Course enrolment code
+              <span id="student-code-label">Course enrolment code</span>
               <span class="inline-field-action">
                 <input name="course_code" id="student-course-code" type="text" maxlength="24" required autocomplete="off" placeholder="e.g. KANO-3LH9PW">
-                <button id="verify-course-code" class="secondary-button" type="button">Check requirements</button>
+                <button id="verify-course-code" class="secondary-button" type="button">Continue</button>
               </span>
-              <small>Obtain this code from your lecturer or supervisor.</small>
+              <small id="student-code-help">Obtain this code from your lecturer or supervisor.</small>
             </label>
             <div id="course-requirements-card" class="course-requirements-card full-width hidden" aria-live="polite"></div>
             <label id="assessment-task-field" class="full-width hidden">
-              Assessment task
+              <span id="assessment-task-label">Assessment task</span>
               <select name="task_id" id="student-assessment-task"><option value="">Select assessment task</option></select>
-              <small>Each task has its own examination and assurance controls.</small>
+              <small id="assessment-task-help">Each task has its own assessment and assurance controls.</small>
             </label>
+            <section id="exam-access-placeholder" class="exam-access-placeholder full-width hidden" aria-live="polite">
+              <div class="registered-candidate-icon" aria-hidden="true">ID</div>
+              <div>
+                <span class="eyebrow">Registered candidate access</span>
+                <h3 id="exam-access-placeholder-title">Enter your examination code</h3>
+                <p id="exam-access-placeholder-text">Your lecturer registers eligible candidates. Enter the code above to select your examination and display the candidate ID and PIN fields.</p>
+              </div>
+            </section>
             <section id="standalone-exam-card" class="course-requirements-card full-width hidden">
               <div class="exam-launch-heading">
                 <div><span class="eyebrow">Standalone examination</span><strong id="standalone-exam-title">Examination</strong></div>
                 <span class="exam-launch-badge">Secure start</span>
               </div>
               <p id="standalone-exam-instructions" class="exam-instructions"></p>
+              <div class="eligibility-note">
+                <strong>Already registered by your lecturer?</strong>
+                <span>Use the candidate details and PIN supplied for this examination. Students cannot add themselves to a secured exam roster.</span>
+              </div>
               <div class="exam-launch-steps">
                 <section class="exam-launch-step">
                   <div class="step-number">1</div>
-                  <div class="step-content"><h4>Confirm identity</h4><p>Use the details supplied to the lecturer.</p>
+                  <div class="step-content"><h4>Enter registered candidate details</h4><p>Use the name, candidate ID and PIN recorded for this examination.</p>
                     <div class="form-grid">
-                      <label>Candidate name<input id="exam-candidate-name" type="text" maxlength="180" autocomplete="name"></label>
-                      <label>Candidate ID<input id="exam-candidate-id" type="text" maxlength="100"></label>
-                      <label id="exam-access-pin-field" class="hidden">Examination access PIN<input id="exam-access-pin" type="password" minlength="4" maxlength="64" autocomplete="one-time-code"></label>
+                      <label>Registered candidate name<input id="exam-candidate-name" type="text" maxlength="180" autocomplete="name" required></label>
+                      <label>Candidate ID or index number<input id="exam-candidate-id" type="text" maxlength="100" autocomplete="username" required></label>
+                      <label id="exam-access-pin-field" class="full-width">Examination access PIN
+                        <span class="password-field"><input id="exam-access-pin" type="password" minlength="4" maxlength="64" autocomplete="one-time-code"><button class="password-toggle" type="button" data-password-toggle="exam-access-pin">Show</button></span>
+                        <small id="exam-pin-help">Enter the PIN supplied by your lecturer.</small>
+                      </label>
                     </div>
                   </div>
                 </section>

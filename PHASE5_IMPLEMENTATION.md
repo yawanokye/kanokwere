@@ -19,6 +19,8 @@ Kanokware 1.3 adds operational controls for scheduled, live proctored examinatio
 
 ## Candidate controls
 
+- Choose a clear standalone-exam path from the student home page without creating a student account.
+- Enter the lecturer-provided course or exam code before the candidate ID and PIN fields are enabled.
 - Pass a device-readiness check before starting.
 - Enter an approved candidate ID and access PIN when roster admission is active.
 - Share precise browser location during readiness when the optional venue restriction is active.

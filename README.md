@@ -165,6 +165,8 @@ Database revision: `20260901_10_task_feature_governance.py`. No new environment 
 
 Standalone exams can now use a scheduled opening and closing window, an overall duration, a late-entry window, and a lecturer-uploaded candidate roster. The reorganised lecturer workspace includes a separate Exam Eligibility Roster panel, where the lecturer selects a particular examination, downloads a CSV template, uploads eligible students, and reviews active or inactive records. Roster admission verifies the candidate ID and an individually hashed access PIN. The optional `extra_time_minutes` roster column applies a candidate accommodation without changing the task for everyone else. The optional `monitor_group` column places candidates into named groups that can be assigned to different remote monitors.
 
+The student home page now presents two clear entry paths: Submit coursework and Take a standalone exam. Exam candidates enter the lecturer-provided course or exam code, select the available exam, and then supply the candidate ID and PIN from the uploaded roster. Students cannot self-register for a secured examination.
+
 Candidates must pass a browser and device-readiness check before starting. The check covers top-level page use, network state, secure browser capabilities, and the APIs required by the task's enabled camera, screen, and audio controls.
 
 The live invigilation dashboard now lets an authorised lecturer warn a candidate, pause and resume the clocks, add time, or end and lock an attempt. The candidate receives interventions through the assessment heartbeat even when webcam monitoring is off. Every action is added to the monitoring and audit trail for later review.

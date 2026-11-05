@@ -60,6 +60,7 @@ const state = {
   recoveryDbPromise: null,
   resolvedCourse: null,
   selectedTask: null,
+  studentEntryMode: "coursework",
   monitoringEnabled: false,
   secureBrowserEnforcement: false,
   secureBrowserArmed: false,
@@ -1412,24 +1413,89 @@ $$('[data-password-toggle]').forEach((button) => {
   });
 });
 
+function setStudentEntryMode(mode, scrollToAccess = true) {
+  if (state.testActive) {
+    setMessage($("#test-message"), "Finish or exit the active assessment before changing the student access path.", "warning");
+    return;
+  }
+  const examMode = mode === "exam";
+  state.studentEntryMode = examMode ? "exam" : "coursework";
+  const workflow = $("#student-access-workflow");
+  if (workflow) workflow.dataset.entryMode = state.studentEntryMode;
+  $$('[data-student-path]').forEach((button) => {
+    const selected = button.dataset.studentPath === state.studentEntryMode;
+    button.classList.toggle("selected", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
+  $("#student-access-eyebrow").textContent = examMode ? "Standalone examination access" : "Coursework access";
+  $("#upload-heading").textContent = examMode
+    ? "Enter your exam code and candidate PIN"
+    : "Submit coursework for ownership assessment";
+  $("#student-access-description").textContent = examMode
+    ? "Use the code, registered candidate ID and access PIN supplied for this examination."
+    : "Enter the course code supplied by your lecturer, then complete the submission details.";
+  $("#student-code-label").textContent = examMode ? "Course or examination code" : "Course enrolment code";
+  $("#student-code-help").textContent = examMode
+    ? "Enter the code supplied for the examination. This loads only active standalone exams."
+    : "Obtain this code from your lecturer or supervisor.";
+  $("#assessment-task-label").textContent = examMode ? "Standalone examination" : "Assessment task";
+  $("#assessment-task-help").textContent = examMode
+    ? "Select the examination for which your lecturer registered you."
+    : "Each task has its own assessment and assurance controls.";
+  $("#student-step-1").textContent = examMode ? "Exam access" : "Upload";
+  $("#student-step-2").textContent = examMode ? "Device check" : "Prepare";
+  $("#student-step-3").textContent = examMode ? "Examination" : "Assessment";
+  $("#student-step-4").textContent = "Result";
+  $(".trial-code-banner")?.classList.toggle("hidden", examMode);
+  state.selectedTask = null;
+  state.examReadinessTaskId = null;
+  state.examLocation = null;
+  setMessage($("#exam-readiness-result"));
+  setMessage($("#standalone-exam-message"));
+  if (state.resolvedCourse) {
+    renderResolvedCourse(state.resolvedCourse);
+  } else {
+    $("#assessment-task-field")?.classList.add("hidden");
+    $("#course-requirements-card")?.classList.add("hidden");
+    applySelectedAssessmentTask();
+  }
+  showPanel("upload", 1);
+  if (scrollToAccess) {
+    workflow?.scrollIntoView({ behavior: "smooth", block: "start" });
+    $("#student-course-code")?.focus({ preventScroll: true });
+  }
+}
+
+$$('[data-student-path]').forEach((button) => {
+  button.addEventListener("click", () => setStudentEntryMode(button.dataset.studentPath));
+});
+
 function renderResolvedCourse(course) {
   state.resolvedCourse = course;
   const card = $("#course-requirements-card");
   if (!card) return;
   card.classList.remove("hidden");
   const processParts = [];
-  processParts.push((course.assessment_tasks || []).length
-    ? `${course.assessment_tasks.length} assessment task(s)`
-    : `Legacy course workflow · ${course.max_attempts || 1} attempt(s) permitted`);
+  const allTasks = course.assessment_tasks || [];
+  const tasks = allTasks.filter((task) => state.studentEntryMode === "exam"
+    ? task.mode === "standalone_exam"
+    : task.mode !== "standalone_exam");
+  processParts.push(tasks.length
+    ? `${tasks.length} ${state.studentEntryMode === "exam" ? "standalone examination" : "coursework task"}${tasks.length === 1 ? "" : "s"}`
+    : state.studentEntryMode === "exam"
+      ? "No active standalone examination"
+      : `Legacy course workflow · ${course.max_attempts || 1} attempt(s) permitted`);
   const aiPolicy = course.ai_policy || {};
-  processParts.push(aiPolicy.label || "AI permitted with disclosure");
+  if (state.studentEntryMode !== "exam") processParts.push(aiPolicy.label || "AI permitted with disclosure");
   if (course.live_exam_monitoring_enabled) {
     processParts.push(`Live monitoring: ${course.live_exam_title || "enabled"}`);
   }
   card.innerHTML = `<strong></strong><span></span><small></small>`;
   card.querySelector("strong").textContent = course.course;
   card.querySelector("span").textContent = `${course.lecturer || "Assigned lecturer"} · ${course.institution || "Institution"}`;
-  card.querySelector("small").textContent = `${processParts.join(" · ")} · Final justification required${aiPolicy.guidance ? ` · ${aiPolicy.guidance}` : ""}${course.live_exam_instructions ? ` · ${course.live_exam_instructions}` : ""}`;
+  card.querySelector("small").textContent = state.studentEntryMode === "exam"
+    ? `${processParts.join(" · ")} · Registered candidates should continue with their candidate ID and PIN${course.live_exam_instructions ? ` · ${course.live_exam_instructions}` : ""}`
+    : `${processParts.join(" · ")} · Final justification required${aiPolicy.guidance ? ` · ${aiPolicy.guidance}` : ""}`;
 
   const aiSelect = $("#ai-use-level");
   if (aiSelect && aiPolicy.level === "required") aiSelect.value = "required";
@@ -1440,27 +1506,59 @@ function renderResolvedCourse(course) {
   milestoneSelect.replaceChildren(new Option("Select milestone", ""));
   (course.milestones || []).forEach((item) => milestoneSelect.appendChild(new Option(item.title, item.id)));
 
-  const tasks = course.assessment_tasks || [];
   const taskField = $("#assessment-task-field");
   const taskSelect = $("#student-assessment-task");
-  taskSelect.replaceChildren(new Option("Select assessment task", ""));
+  taskSelect.replaceChildren(new Option(
+    state.studentEntryMode === "exam" ? "Select standalone examination" : "Select assessment task",
+    ""
+  ));
   tasks.forEach((task) => taskSelect.appendChild(new Option(
-    `${task.title} · ${task.mode === "standalone_exam" ? "Standalone exam" : "Document ownership"} · ${task.max_attempts || 1} attempt(s)`,
+    `${task.title} · ${task.max_attempts || 1} attempt(s)`,
     task.id
   )));
   taskField?.classList.toggle("hidden", tasks.length === 0);
-  taskSelect.required = tasks.length > 1;
+  taskSelect.required = tasks.length > 1 || state.studentEntryMode === "exam";
   if (tasks.length === 1) taskSelect.value = tasks[0].id;
   applySelectedAssessmentTask();
 }
 
 function applySelectedAssessmentTask() {
   const course = state.resolvedCourse;
-  if (!course) return;
   const selectedId = $("#student-assessment-task")?.value || "";
-  const task = (course.assessment_tasks || []).find((item) => item.id === selectedId) || null;
+  const requestedTask = (course?.assessment_tasks || []).find((item) => item.id === selectedId) || null;
+  const examMode = state.studentEntryMode === "exam";
+  const task = requestedTask && (
+    (examMode && requestedTask.mode === "standalone_exam")
+    || (!examMode && requestedTask.mode !== "standalone_exam")
+  ) ? requestedTask : null;
   state.selectedTask = task;
-  const standalone = task?.mode === "standalone_exam";
+  const standalone = examMode && task?.mode === "standalone_exam";
+  $("#submission-assurance-fields")?.classList.toggle("hidden", examMode);
+  $("#submission-assurance-fields")?.querySelectorAll("input, select, textarea, button").forEach((input) => {
+    input.disabled = examMode;
+  });
+  $("#standalone-exam-card")?.classList.toggle("hidden", !standalone);
+  $("#exam-access-placeholder")?.classList.toggle("hidden", !examMode || standalone);
+  if (examMode && !standalone) {
+    const hasCourse = Boolean(course);
+    const examTasks = (course?.assessment_tasks || []).filter((item) => item.mode === "standalone_exam");
+    $("#exam-access-placeholder-title").textContent = !hasCourse
+      ? "Enter your examination code"
+      : examTasks.length
+        ? "Select your standalone examination"
+        : "No active standalone examination found";
+    $("#exam-access-placeholder-text").textContent = !hasCourse
+      ? "Your lecturer registers eligible candidates. Enter the code above to select your examination and display the candidate ID and PIN fields."
+      : examTasks.length
+        ? "Choose the examination above. Your registered candidate ID and PIN fields will then appear."
+        : "This code has no active standalone examination. Confirm the code and examination availability with your lecturer.";
+  }
+  if (!task) {
+    state.monitoringEnabled = false;
+    state.secureBrowserEnforcement = false;
+    state.activeFeatures = {};
+    return;
+  }
   const features = task?.effective_features || {
     learning_milestones: Boolean(course.milestones_enabled),
     version_history: Boolean(course.version_history_enabled),
@@ -1481,11 +1579,6 @@ function applySelectedAssessmentTask() {
       : "I understand the assessment rules and the configured browser controls.";
   }
 
-  $("#submission-assurance-fields")?.classList.toggle("hidden", standalone);
-  $("#standalone-exam-card")?.classList.toggle("hidden", !standalone);
-  $("#submission-assurance-fields")?.querySelectorAll("input, select, textarea, button").forEach((input) => {
-    input.disabled = standalone;
-  });
   if (standalone) {
     if (state.examReadinessTaskId !== task.id) {
       state.examReadinessTaskId = null;
@@ -1501,7 +1594,11 @@ function applySelectedAssessmentTask() {
       ? ` You must be within the permitted area for ${task.geofence_label || "the examination venue"} and allow precise device location.`
       : "";
     $("#standalone-exam-instructions").textContent = `${task.instructions || "Complete the examination in one uninterrupted session."}${schedule}${duration}${locationRule} Maximum starts per candidate: ${task.max_attempts || 1}.${task.ready ? "" : " The lecturer is still preparing the question bank."}`;
-    $("#exam-access-pin-field")?.classList.toggle("hidden", !task.roster_required);
+    const pinInput = $("#exam-access-pin");
+    if (pinInput) pinInput.required = Boolean(task.roster_required);
+    $("#exam-pin-help").textContent = task.roster_required
+      ? "Required. Enter the PIN supplied by your lecturer."
+      : "This examination does not require a roster PIN. You may leave this field blank.";
     const recordingLabels = [];
     if (features.screen_activity_recording) recordingLabels.push("screen activity");
     if (features.environment_audio_recording) recordingLabels.push("environment audio");
@@ -1524,18 +1621,28 @@ async function resolveStudentCourse(showErrors = true) {
   const code = input?.value.trim();
   if (!code || code.length < 6) {
     state.resolvedCourse = null;
+    state.selectedTask = null;
     $("#course-requirements-card")?.classList.add("hidden");
-    if (showErrors) setMessage($("#upload-message"), "Enter a valid course enrolment code.", "warning");
+    $("#assessment-task-field")?.classList.add("hidden");
+    applySelectedAssessmentTask();
+    if (showErrors) setMessage($("#upload-message"), `Enter a valid ${state.studentEntryMode === "exam" ? "examination" : "course enrolment"} code.`, "warning");
     return null;
   }
   try {
     const result = await api(`/api/courses/resolve?code=${encodeURIComponent(code)}`);
     renderResolvedCourse(result);
-    if (showErrors) setMessage($("#upload-message"), "Course requirements confirmed.", "success");
+    if (showErrors) setMessage(
+      $("#upload-message"),
+      state.studentEntryMode === "exam" ? "Code confirmed. Select your examination and enter your registered candidate details." : "Course requirements confirmed.",
+      "success"
+    );
     return result;
   } catch (error) {
     state.resolvedCourse = null;
+    state.selectedTask = null;
     $("#course-requirements-card")?.classList.add("hidden");
+    $("#assessment-task-field")?.classList.add("hidden");
+    applySelectedAssessmentTask();
     if (showErrors) setMessage($("#upload-message"), error.message, "error");
     return null;
   }
@@ -1904,7 +2011,11 @@ $("#start-standalone-exam")?.addEventListener("click", async () => {
   const candidateId = $("#exam-candidate-id")?.value.trim();
   if (!task || task.mode !== "standalone_exam") return;
   if (!candidateName || !candidateId) {
-    setMessage($("#standalone-exam-message"), "Enter the candidate name and ID.", "warning");
+    setMessage($("#standalone-exam-message"), "Enter the registered candidate name and candidate ID.", "warning");
+    return;
+  }
+  if (task.roster_required && !$("#exam-access-pin")?.value) {
+    setMessage($("#standalone-exam-message"), "Enter the examination access PIN supplied by your lecturer.", "warning");
     return;
   }
   if (state.examReadinessTaskId !== task.id) {
@@ -4735,6 +4846,7 @@ async function deletePlatformUser(user) {
 const trialCodeButton = $("#use-trial-code-button");
 if (trialCodeButton) {
   trialCodeButton.addEventListener("click", () => {
+    setStudentEntryMode("coursework", false);
     const courseCodeInput = document.querySelector('input[name="course_code"]');
     if (!courseCodeInput) return;
     courseCodeInput.value = "KANO-3LH9PW";
@@ -4746,6 +4858,8 @@ if (trialCodeButton) {
     );
   });
 }
+
+setStudentEntryMode("coursework", false);
 
 $$('[data-view-link="lecturer"]').forEach((button) => button.addEventListener("click", () => loadLecturerSession(true)));
 $$('[data-view-link="platform"]').forEach((button) => button.addEventListener("click", () => unlockPlatform(true)));
