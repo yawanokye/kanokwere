@@ -264,7 +264,7 @@ async def lifespan(_: FastAPI):
 mimetypes.add_type("text/javascript", ".mjs")
 mimetypes.add_type("application/wasm", ".wasm")
 
-app = FastAPI(title="Kanokware", version="1.4.0", lifespan=lifespan)
+app = FastAPI(title="Kanokware", version="1.4.1", lifespan=lifespan)
 app.include_router(student_router)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 REPOSITORY_MONITORING_ASSET_DIR = STATIC_DIR / "vendor" / "mediapipe-tasks-vision"

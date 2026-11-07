@@ -212,6 +212,93 @@ def test_cross_origin_student_mutations_are_rejected():
         assert client.post("/api/student/logout", headers={"Origin": "https://untrusted.example"}).status_code == 403
 
 
+def test_private_pin_login_is_independent_of_course_codes():
+    with TestClient(app) as teacher, TestClient(app) as candidate:
+        course, _ = portal_course(teacher, "private-pin")
+        created = teacher.post(f"/api/lecturer/courses/{course['id']}/students", json={
+            "student_number": "PRIVATE/001", "full_name": "Private PIN Test"}).json()
+        response = candidate.post("/api/student/activate", json={"student_number": "PRIVATE/001",
+            "setup_code": created["setup_code"], "pin": "482731"})
+        assert response.status_code == 200, response.text
+        assert response.json()["student"]["portal_id"] == created["portal_id"]
+        candidate.post("/api/student/logout")
+        assert candidate.post("/api/student/login", json={"student_number": "PRIVATE/001", "pin": "891237"}).status_code == 401
+        assert candidate.post("/api/student/login", json={"student_number": "PRIVATE/001", "pin": "482731"}).status_code == 200
+        from app.database import SessionLocal
+        from app.models import Course
+        with SessionLocal() as db:
+            db.get(Course, course["id"]).status = "closed"
+            db.commit()
+        candidate.post("/api/student/logout")
+        response = candidate.post("/api/student/login", json={"student_number": "PRIVATE/001", "pin": "482731"})
+        assert response.status_code == 200, response.text
+        assert candidate.get("/api/student/workspace").json()["courses"] == []
+        form = candidate.get("/").text.split('id="student-login-form"', 1)[1].split("</form>", 1)[0]
+        assert 'name="course_code"' not in form
+        assert 'name="pin"' in form
+
+
+def test_course_enrolment_preserves_exam_eligibility_and_suspended_access():
+    with TestClient(app) as teacher, TestClient(app) as candidate:
+        course, _ = portal_course(teacher, "code-enrol")
+        created = teacher.post(f"/api/lecturer/courses/{course['id']}/students", json={
+            "student_number": "ENROL/001", "full_name": "Enrolment Test"}).json()
+        second = teacher.post("/api/lecturer/courses", json={"course_code": "PIN SECOND",
+            "title": "Second course", "academic_year": "2026/2027", "semester": "First Semester"}).json()["course"]
+        base = f"/api/lecturer/courses/{second['id']}/tasks"
+        work = teacher.post(base, json={"title": "Eligible coursework", "assessment_question_count": 3}).json()["task"]
+        exam = teacher.post(base, json={"title": "Secured examination", "assessment_question_count": 3,
+            "mode": "standalone_exam", "roster_required": True}).json()["task"]
+        response = candidate.post("/api/student/activate", json={"student_number": "ENROL/001",
+            "setup_code": created["setup_code"], "pin": "619472", "course_code": second["enrollment_code"]})
+        assert response.status_code == 200, response.text
+        assert candidate.post("/api/student/enrol", json={"course_code": second["enrollment_code"]}).status_code == 200
+        data = candidate.get("/api/student/workspace").json()
+        assert {row["id"] for row in data["courses"]} == {course["id"], second["id"]}
+        assert work["id"] in {row["id"] for row in data["assessments"]}
+        assert exam["id"] not in {row["id"] for row in data["assessments"]}
+        blocked = candidate.post("/api/examinations/start", json={"course_code": second["enrollment_code"],
+            "task_id": exam["id"], "candidate_name": "Enrolment Test", "candidate_id": "ENROL/001",
+            "readiness_confirmed": True, "client_instance_id": "enrolment-test-browser-001"})
+        assert blocked.status_code == 403, blocked.text
+        from app.database import SessionLocal
+        from app.models import StudentEnrollment, Institution, Course
+        from sqlalchemy import select
+        with SessionLocal() as db:
+            link = db.scalar(select(StudentEnrollment).where(StudentEnrollment.course_id == second["id"],
+                StudentEnrollment.student_id == created["student_id"]))
+            link.status = "suspended"
+            other = Institution(name="Course enrolment boundary test institution")
+            db.add(other); db.flush()
+            db.add(Course(institution_id=other.id, created_by=db.get(Course, course["id"]).created_by,
+                course_code="OTHER PIN", title="Other institution course", academic_year="2026/2027",
+                semester="First Semester", enrollment_code="KANO-PINOTHER"))
+            db.commit()
+        assert candidate.post("/api/student/enrol", json={"course_code": second["enrollment_code"]}).status_code == 403
+        assert candidate.post("/api/student/enrol", json={"course_code": "KANO-PINOTHER"}).status_code == 403
+
+
+def test_reused_student_numbers_require_a_unique_portal_id():
+    from app.database import SessionLocal
+    from app.models import Institution, StudentAccount
+    from app.security import hash_password
+    with TestClient(app) as candidate:
+        with SessionLocal() as db:
+            institutions = [Institution(name=f"Duplicate student login institution {i}") for i in range(2)]
+            db.add_all(institutions); db.flush()
+            accounts = [StudentAccount(institution_id=institution.id, student_number="same/index/01",
+                full_name=f"Synthetic Student {i}", password_hash=hash_password("783419"), status="active")
+                for i, institution in enumerate(institutions)]
+            db.add_all(accounts); db.commit()
+            ids = [account.id for account in accounts]
+        assert candidate.post("/api/student/login", json={"student_number": "same/index/01", "pin": "783419"}).status_code == 401
+        for account_id in ids:
+            response = candidate.post("/api/student/login", json={"student_number": f"KWS-{account_id}", "pin": "783419"})
+            assert response.status_code == 200, response.text
+            assert response.json()["student"]["id"] == account_id
+            candidate.post("/api/student/logout")
+
+
 def test_proctoring_can_be_selected_for_rostered_groups():
     with TestClient(app) as teacher, TestClient(app) as candidate:
         course, task = portal_course(teacher, "groups", {"live_exam_monitoring": True, "webcam_monitoring": True}, "standalone_exam")

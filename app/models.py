@@ -32,7 +32,7 @@ class StudentAccount(Base):
     __table_args__ = (UniqueConstraint("institution_id", "student_number", name="uq_student_institution_number"),)
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     institution_id: Mapped[str] = mapped_column(ForeignKey("institutions.id", ondelete="CASCADE"), index=True)
-    student_number: Mapped[str] = mapped_column(String(100))
+    student_number: Mapped[str] = mapped_column(String(100), index=True)
     full_name: Mapped[str] = mapped_column(String(180))
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     setup_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)

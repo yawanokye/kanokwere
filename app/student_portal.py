@@ -23,7 +23,7 @@ from .assessment_service import get_assessment
 from .config import settings
 from .database import get_db
 from .feature_service import assessment_features
-from .models import (Assessment, AssessmentDistanceEvidence, AssessmentTask, Course,
+from .models import (Assessment, AssessmentDistanceEvidence, AssessmentTask, Course, ExamCandidate,
     Document, StudentAccount, StudentDocumentLink, StudentEnrollment, StudentOralResponse,
     StudentPhoto, StudentSession, TaskDistanceSettings, User)
 from .phase2_service import prepare_oral_defence
@@ -38,10 +38,16 @@ DEFAULT_DISTANCE = {"oral_question_count": 3, "oral_response_seconds": 120,
 
 
 class StudentCredentials(BaseModel):
-    course_code: str = Field(min_length=6, max_length=24)
+    # Course code is optional and used only to enrol during first access.
+    course_code: str | None = Field(default=None, min_length=6, max_length=24)
     student_number: str = Field(min_length=2, max_length=100)
-    password: str = Field(min_length=1, max_length=128)
+    pin: str | None = Field(default=None, pattern=r"^[0-9]{6}$")
+    password: str | None = Field(default=None, min_length=1, max_length=128)
     setup_code: str | None = Field(default=None, max_length=64)
+
+
+class EnrolCourse(BaseModel):
+    course_code: str = Field(min_length=6, max_length=24)
 
 
 class ProvisionStudent(BaseModel):
@@ -81,7 +87,7 @@ def course_from_code(db: Session, code: str) -> Course:
     course = db.scalar(select(Course).where(
         func.upper(Course.enrollment_code) == code.strip().upper(), Course.status == "active"))
     if not course:
-        raise HTTPException(401, "The student credentials or course code are incorrect.")
+        raise HTTPException(404, "The course enrolment code is invalid or inactive.")
     return course
 
 
@@ -156,7 +162,8 @@ def enforce_assessment_student(db: Session, request: Request, assessment_id: str
 def student_payload(db: Session, account: StudentAccount) -> dict:
     photo = latest_photo(db, account.id)
     verified = latest_photo(db, account.id, verified=True)
-    return {"id": account.id, "student_number": account.student_number, "full_name": account.full_name,
+    return {"id": account.id, "student_number": account.student_number,
+        "portal_id": f"KWS-{account.id}", "full_name": account.full_name,
         "status": account.status, "photo_status": photo.status if photo else "not_submitted",
         "verified_reference_available": bool(verified)}
 
@@ -170,12 +177,16 @@ def sign_in(db: Session, response: Response, account: StudentAccount) -> None:
 
 
 def credentials_account(db: Session, payload: StudentCredentials) -> StudentAccount:
-    course = course_from_code(db, payload.course_code)
-    account = db.scalar(select(StudentAccount).where(StudentAccount.institution_id == course.institution_id,
-        StudentAccount.student_number == payload.student_number.strip().casefold()))
+    identifier = payload.student_number.strip().casefold()
+    # A stable account reference disambiguates index numbers reused by different
+    # institutions. Never pick the first account or test a PIN against many users.
+    if identifier.startswith("kws-"):
+        account = db.get(StudentAccount, identifier[4:])
+    else:
+        matches = db.scalars(select(StudentAccount).where(StudentAccount.student_number == identifier).limit(2)).all()
+        account = matches[0] if len(matches) == 1 else None
     if not account:
-        raise HTTPException(401, "The student credentials or course code are incorrect.")
-    enrollment(db, account, course)
+        raise HTTPException(401, "The student sign-in details are incorrect or ambiguous. Use your unique Portal ID if your student ID is shared across institutions.")
     if account.locked_until and _aware(account.locked_until) > utcnow():
         raise HTTPException(429, "Too many failed attempts. Try again after 15 minutes.")
     return account
@@ -192,10 +203,14 @@ def credential_failure(db: Session, account: StudentAccount) -> None:
 
 @router.post("/api/student/activate")
 def activate(payload: StudentCredentials, request: Request, response: Response, db: Session = Depends(get_db)):
+    secret = payload.pin or payload.password
     try:
-        if len(payload.password) < 10:
-            raise ValueError("Password must have at least 10 characters.")
-        validate_password(payload.password)
+        if not secret or (payload.pin and payload.password):
+            raise ValueError("Provide a private six-digit PIN, or your existing password format, not both.")
+        if not payload.pin:
+            if len(secret) < 10:
+                raise ValueError("Password must have at least 10 characters.")
+            validate_password(secret)
     except ValueError as exc:
         raise HTTPException(422, str(exc))
     account = credentials_account(db, payload)
@@ -203,7 +218,9 @@ def activate(payload: StudentCredentials, request: Request, response: Response, 
         raise HTTPException(409, "Ask your course owner for a new student setup code.")
     if not secrets.compare_digest(hash_token((payload.setup_code or "").strip().upper()), account.setup_hash):
         credential_failure(db, account)
-    account.password_hash = hash_password(payload.password)
+    if payload.course_code:
+        _enrol_account(db, account, payload.course_code)
+    account.password_hash = hash_password(secret)
     account.status = "active"
     account.setup_hash = None
     account.setup_expires_at = None
@@ -216,8 +233,11 @@ def activate(payload: StudentCredentials, request: Request, response: Response, 
 
 @router.post("/api/student/login")
 def login(payload: StudentCredentials, response: Response, db: Session = Depends(get_db)):
+    secret = payload.pin or payload.password
+    if not secret or (payload.pin and payload.password):
+        raise HTTPException(422, "Enter your private PIN or existing password.")
     account = credentials_account(db, payload)
-    if account.status != "active" or not account.password_hash or not verify_password(payload.password, account.password_hash):
+    if account.status != "active" or not account.password_hash or not verify_password(secret, account.password_hash):
         credential_failure(db, account)
     account.failed_count = 0
     account.locked_until = None
@@ -254,8 +274,44 @@ def workspace(request: Request, db: Session = Depends(get_db)):
         attempts.append({"assessment_id": assessment.id, "title": assessment.document.title,
             "status": assessment.status, "mcq_score": assessment.score, "identity_status": row.identity_status,
             "oral_enabled": bool(assessment_features(assessment).get("recorded_oral_responses"))})
+    course_by_id = {course.id: course for course in courses}
+    tasks = db.scalars(select(AssessmentTask).where(AssessmentTask.course_id.in_(course_by_id),
+        AssessmentTask.status == "active").order_by(AssessmentTask.created_at.desc()).limit(200)).all() if courses else []
+    eligible_exam_ids = set(db.scalars(select(ExamCandidate.task_id).where(
+        ExamCandidate.candidate_id == account.student_number, ExamCandidate.status == "active",
+        ExamCandidate.task_id.in_([task.id for task in tasks]))).all()) if tasks else set()
+    available = [{"id": task.id, "title": task.title, "mode": task.mode,
+        "course_id": task.course_id, "course_title": course_by_id[task.course_id].title,
+        "course_code": course_by_id[task.course_id].enrollment_code,
+        "requires_exam_pin": bool(task.roster_required),
+        "opens_at": task.exam_starts_at.isoformat() if task.exam_starts_at else None}
+        for task in tasks if task.mode != "standalone_exam" or not task.roster_required or task.id in eligible_exam_ids]
     return {"student": student_payload(db, account), "courses": [
-        {"id": course.id, "title": f"{course.course_code} · {course.title}", "code": course.enrollment_code} for course in courses], "attempts": attempts}
+        {"id": course.id, "title": f"{course.course_code} · {course.title}", "code": course.enrollment_code} for course in courses],
+        "assessments": available, "attempts": attempts}
+
+
+def _enrol_account(db: Session, account: StudentAccount, code: str) -> Course:
+    course = course_from_code(db, code)
+    if course.institution_id != account.institution_id:
+        raise HTTPException(403, "This course belongs to a different institution. Contact the institution to arrange access.")
+    link = db.scalar(select(StudentEnrollment).where(StudentEnrollment.student_id == account.id,
+        StudentEnrollment.course_id == course.id))
+    if link and link.status != "active":
+        raise HTTPException(403, "Your course access requires staff approval. Enrolment codes cannot restore suspended access.")
+    if not link:
+        db.add(StudentEnrollment(student_id=account.id, course_id=course.id))
+    return course
+
+
+@router.post("/api/student/enrol")
+def enrol(payload: EnrolCourse, request: Request, db: Session = Depends(get_db)):
+    account = session_student(db, request)
+    course = _enrol_account(db, account, payload.course_code)
+    audit(db, request, "student_course_enrolled", resource_type="student", resource_id=account.id,
+        detail={"course_id": course.id})
+    db.commit()
+    return {"enrolled": True, "message": "Course enrolled. Secured exam eligibility and exam PINs remain controlled by your lecturer."}
 
 
 async def image_bytes(file: UploadFile) -> tuple[bytes, str]:
@@ -309,7 +365,7 @@ def provision(db: Session, course: Course, number: str, full_name: str) -> dict:
     link = db.scalar(select(StudentEnrollment).where(StudentEnrollment.course_id == course.id, StudentEnrollment.student_id == account.id))
     if not link:
         db.add(StudentEnrollment(course_id=course.id, student_id=account.id))
-    return {"student_id": account.id, "student_number": number, "full_name": account.full_name,
+    return {"student_id": account.id, "student_number": number, "portal_id": f"KWS-{account.id}", "full_name": account.full_name,
         "setup_code": code, "status": account.status}
 
 
@@ -382,7 +438,7 @@ def reset_student(course_id: str, student_id: str, request: Request, user: User 
     db.execute(delete(StudentSession).where(StudentSession.student_id == account.id))
     audit(db, request, "student_setup_reset", user=user, resource_type="student", resource_id=account.id)
     db.commit()
-    return {"setup_code": code, "student_number": account.student_number}
+    return {"setup_code": code, "student_number": account.student_number, "portal_id": f"KWS-{account.id}"}
 
 
 @router.get("/api/lecturer/courses/{course_id}/students/{student_id}/photo/{photo_id}")

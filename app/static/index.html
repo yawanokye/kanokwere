@@ -836,32 +836,34 @@ Final preparation"></textarea>
     </section>
 
     <section id="view-student-portal" class="view">
-      <div class="hero"><div><span class="eyebrow">Distance learning access</span><h1>Your student assessment portal</h1><p>Activate the account provided by your course owner. Review your identity status and return to recorded oral verification. Your exam PIN is separate from your account password.</p></div></div>
+      <div class="hero"><div><span class="eyebrow">Distance learning access</span><h1>Your student assessment portal</h1><p>Sign in with your student ID and private PIN, no course code needed. Use a course code when enrolling, then open your eligible coursework and assessments from your dashboard. An examination PIN is separate from your private sign-in PIN.</p></div></div>
       <div id="student-auth-forms" class="portal-grid">
         <section class="management-card"><h2>Student sign-in</h2><form id="student-login-form" class="stack-form">
-          <label>Course code<input name="course_code" required maxlength="24" autocomplete="off"></label>
-          <label>Student ID / index number<input name="student_number" required maxlength="100" autocomplete="username"></label>
-          <label>Password<input name="password" type="password" required maxlength="128" autocomplete="current-password"></label>
+          <label>Student ID or Portal ID<input name="student_number" required maxlength="100" autocomplete="username"><small>If your student ID is shared across institutions, use the unique Portal ID supplied with your account.</small></label>
+          <label>Private PIN or existing password<input name="pin" type="password" required maxlength="128" autocomplete="current-password"><small>Use your six-digit private PIN. Previously activated passwords still work.</small></label>
           <button class="primary-button">Sign in</button>
-        </form><p>Forgotten your password? Ask your course owner for a new one-time setup code. Existing student sessions will be revoked.</p></section>
-        <section class="management-card"><h2>Activate your student account</h2><p>Your lecturer must add you to the student roster first. Activation codes expire after 48 hours.</p><form id="student-activate-form" class="stack-form">
-          <label>Course code<input name="course_code" required maxlength="24" autocomplete="off"></label>
-          <label>Student ID / index number<input name="student_number" required maxlength="100" autocomplete="username"></label>
+        </form><p>Forgotten your PIN? Ask your course owner for a new one-time setup code. Existing student sessions will be revoked.</p></section>
+        <section class="management-card"><h2>First access and enrolment</h2><p>Your lecturer provides your student account and one-time setup code. Set your private PIN once. Setup codes expire after 48 hours.</p><form id="student-activate-form" class="stack-form">
+          <label>Student ID or Portal ID<input name="student_number" required maxlength="100" autocomplete="username"></label>
           <label>One-time setup code<input name="setup_code" required maxlength="64" autocomplete="one-time-code"></label>
-          <label>Create password<input name="password" type="password" required minlength="10" maxlength="128" autocomplete="new-password"><small>At least 10 characters, including uppercase, lowercase and a number.</small></label>
-          <label>Confirm password<input name="confirm_password" type="password" required minlength="10" maxlength="128" autocomplete="new-password"></label>
-          <button class="primary-button">Activate and sign in</button>
+          <label>Create private PIN<input name="pin" type="password" inputmode="numeric" pattern="[0-9]{6}" required minlength="6" maxlength="6" autocomplete="new-password"><small>Six digits. Keep this separate from any examination access PIN.</small></label>
+          <label>Confirm private PIN<input name="confirm_pin" type="password" inputmode="numeric" pattern="[0-9]{6}" required minlength="6" maxlength="6" autocomplete="new-password"></label>
+          <label>Course code, only if enrolling now<input name="course_code" maxlength="24" autocomplete="off"><small>Optional. Already-rostered students can activate without a course code.</small></label>
+          <button class="primary-button">Set PIN and enter portal</button>
         </form></section>
       </div>
       <div id="student-portal-message" class="message" role="status"></div>
       <section id="student-workspace" class="management-card hidden">
         <div class="table-heading"><div><span class="eyebrow">Signed-in student</span><h2 id="student-account-name"></h2><p id="student-photo-status"></p></div><button id="student-signout" class="secondary-button" type="button">Sign out</button></div>
+        <p id="student-portal-id"></p>
+        <details><summary>Enrol in another course using a course code</summary><form id="student-enrol-form" class="stack-form"><label>Course enrolment code<input name="course_code" required minlength="6" maxlength="24" autocomplete="off"></label><button class="secondary-button">Enrol in course</button><small>Course enrolment does not add you to a secured examination roster or replace its access PIN.</small></form></details>
         <details><summary>Submit a reference photograph for staff verification</summary><p>Use a clear portrait. Staff must check it against the institutional student record or student card before approval. Uploading a photograph does not verify your identity automatically.</p>
           <form id="student-photo-form" class="stack-form"><label>Reference photograph<input name="photo" type="file" accept="image/jpeg,image/png" required><small>JPEG or PNG, maximum 1 MB. Don’t upload a national ID document.</small></label>
             <label class="consent-row"><input name="consent" type="checkbox" required><span>I understand this photo will be stored for authorised identity review under my institution’s retention and privacy policy. No automatic face or voice matching is used.</span></label><button class="secondary-button">Submit photograph for review</button>
           </form>
         </details>
         <h3>Your courses</h3><div id="student-portal-courses" class="portal-grid"></div>
+        <h3>Your available coursework and assessments</h3><div id="student-portal-assessments" class="portal-grid"></div>
         <h3>Your recent assessments</h3><div id="student-portal-attempts" class="portal-list"></div>
       </section>
       <section id="student-oral-panel" class="management-card hidden" aria-labelledby="student-oral-heading">
@@ -983,6 +985,6 @@ Final preparation"></textarea>
     </div>
   </section>
   <script src="/static/app.js?v=20261107-student-portal" defer></script>
-  <script src="/static/student-portal.js?v=20261107-student-portal" defer></script>
+  <script src="/static/student-portal.js?v=20261107-independent-pin" defer></script>
 </body>
 </html>

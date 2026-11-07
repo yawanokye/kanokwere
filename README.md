@@ -1,10 +1,24 @@
-# Kanokware 1.4.0
+# Kanokware 1.4.1
 
 **Verify learning in the age of AI.**
 
 Kanokware retains two assessment entry paths: students submit coursework for a document-grounded understanding check, or take a standalone lecturer-prepared test without uploading coursework. MCQ-only assessment remains available, with optional student authentication, staff-reviewed identity photographs, oral explanations and task-level proctoring.
 
 ## v1.4 distance-learning foundation
+
+Student portal access is independent of course codes. On first access, a
+lecturer-provisioned student uses their one-time setup code to create a private
+six-digit PIN. A course code may be entered once to enrol, or later from the
+dashboard. Subsequent sign-in needs only the student ID and private PIN.
+Existing passwords continue to work. When index numbers are reused across
+institutions, use the unique `KWS-...` Portal ID shown with the account details.
+Course closure or suspended enrolment does not lock a student out of their
+account, but assessment authorisation still checks active enrolment and any
+exam-specific eligibility roster and access PIN. Course enrolment cannot bypass
+a suspended membership, another institution's boundaries or a secured exam roster.
+The dashboard lists eligible coursework and assessments and fills in their course
+code when the student opens one. Revision `20261107_13` indexes independent
+student-number lookup and does not change stored credentials.
 
 - Open **Student portal** to activate a lecturer-provisioned account, sign in, submit a reference photograph for staff approval, and return to recorded oral verification.
 - In the lecturer workspace, choose a course under **Student accounts and identity review**. Add students or import a UTF-8 CSV with `student_number,full_name`. Setup codes expire after 48 hours and must be distributed privately.

@@ -16,8 +16,11 @@ candidate. This target is not a measured or certified capacity of v1.4 or the cu
 ## Delivered in the v1.4 foundation
 
 - Both existing assessment entry paths remain. MCQ-only remains available.
-- Roster-provisioned student activation and password sign-in, separate student
+- Roster-provisioned student activation and course-independent private-PIN sign-in, separate student
   sessions, course eligibility checks and account-recovery setup codes.
+- Course codes are used for enrolment, not repeated portal sign-in. Unique Portal
+  IDs disambiguate student index numbers reused across institutions. Previously
+  activated passwords remain supported. Secured exam rosters and PINs stay separate.
 - Versioned reference photographs, institutional staff approval and an assessment
   capture for side-by-side review. No automated face recognition or voiceprints.
 - Optional question read-aloud and recorded oral responses after MCQs, with a

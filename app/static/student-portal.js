@@ -51,16 +51,24 @@
     const result = await api("/api/student/workspace");
     student = result.student;
     el("student-account-name").textContent = `${student.full_name} · ${student.student_number}`;
+    el("student-portal-id").textContent = `Your unique Portal ID: ${student.portal_id}. You can use this instead of your student ID to sign in.`;
     el("student-photo-status").textContent = `Latest photo: ${student.photo_status.replaceAll("_", " ")}. Approved reference ${student.verified_reference_available ? "available" : "not yet available"}.`;
     const courses = el("student-portal-courses"); courses.replaceChildren();
     result.courses.forEach((course) => {
       const node = card(course.title, "Use this course for coursework or an available standalone examination.");
-      node.append(button("Open course", async () => {
-        if (state.testActive) return;
-        showView("home"); el("student-course-code").value = course.code;
-        await resolveStudentCourse(); syncFields();
-      })); courses.append(node);
+      node.append(button("Open coursework", () => openEligibleAssessment(course.code, "coursework")));
+      node.append(button("Browse standalone assessments", () => openEligibleAssessment(course.code, "exam")));
+      courses.append(node);
     });
+    if (!result.courses.length) courses.textContent = "No active courses yet. Use a course enrolment code above or contact your institution.";
+    const available = el("student-portal-assessments"); available.replaceChildren();
+    (result.assessments || []).forEach((task) => {
+      const mode = task.mode === "standalone_exam" ? "exam" : "coursework";
+      const node = card(task.title, `${task.course_title}. ${mode === "exam" ? "Standalone assessment" : "Coursework submission"}${task.requires_exam_pin ? ", examination access PIN required" : ""}.${task.opens_at ? ` Opens ${new Date(task.opens_at).toLocaleString()}.` : ""}`);
+      node.append(button(mode === "exam" ? "Open assessment" : "Submit coursework", () => openEligibleAssessment(task.course_code, mode, task.id)));
+      available.append(node);
+    });
+    if (!result.assessments?.length) available.textContent = "No eligible active assessment tasks are currently listed. Your lecturer controls exam eligibility.";
     const attempts = el("student-portal-attempts"); attempts.replaceChildren();
     result.attempts.forEach((attempt) => {
       const node = card(attempt.title, `MCQ: ${attempt.mcq_score == null ? attempt.status : `${attempt.mcq_score}%`}. Identity: ${attempt.identity_status.replaceAll("_", " ")}.`);
@@ -70,18 +78,44 @@
     if (!result.attempts.length) attempts.textContent = "Your linked assessments will appear here after you start them while signed in.";
   }
 
+  async function openEligibleAssessment(code, mode, taskId = null) {
+    try {
+      forbidDuringExam(); showView("home"); setStudentEntryMode(mode, false);
+      el("student-course-code").value = code;
+      const course = await resolveStudentCourse(false);
+      if (!course) throw new Error("This course is unavailable. Contact your lecturer.");
+      if (taskId) { el("student-assessment-task").value = taskId; applySelectedAssessmentTask(); }
+      syncFields(); el("student-access-workflow").scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (error) { message("student-portal-message", error.message, "error"); }
+  }
+
   ["login", "activate"].forEach((action) => {
     el(`student-${action}-form`).addEventListener("submit", async (event) => {
       event.preventDefault(); const form = event.currentTarget; const submit = event.submitter;
       submit.disabled = true;
       try {
         forbidDuringExam(); const data = Object.fromEntries(new FormData(form));
-        if (action === "activate" && data.password !== data.confirm_password) throw new Error("The passwords do not match.");
+        if (action === "activate") {
+          if (data.pin !== data.confirm_pin) throw new Error("The private PINs do not match.");
+          delete data.confirm_pin;
+          if (!data.course_code.trim()) delete data.course_code;
+        } else if (!/^[0-9]{6}$/.test(data.pin)) {
+          data.password = data.pin; delete data.pin;
+        }
         await api(`/api/student/${action}`, jsonOptions("POST", data)); form.reset();
-        await workspace(); message("student-portal-message", "Signed in. Choose your course below.", "success");
+        await workspace(); message("student-portal-message", "Signed in. Open your eligible coursework or assessment below.", "success");
       } catch (error) { message("student-portal-message", error.message, "error"); }
       finally { submit.disabled = false; }
     });
+  });
+  el("student-enrol-form").addEventListener("submit", async (event) => {
+    event.preventDefault(); const submit = event.submitter; submit.disabled = true;
+    try {
+      forbidDuringExam();
+      const result = await api("/api/student/enrol", jsonOptions("POST", Object.fromEntries(new FormData(event.currentTarget))));
+      event.currentTarget.reset(); await workspace(); message("student-portal-message", result.message, "success");
+    } catch (error) { message("student-portal-message", error.message, "error"); }
+    finally { submit.disabled = false; }
   });
   el("student-signout").addEventListener("click", async () => {
     try {
@@ -150,7 +184,7 @@
   }
   function showCodes(rows) {
     const output = el("student-provision-codes"); output.classList.remove("hidden");
-    output.textContent = rows.map((row) => `${row.student_number}: ${row.setup_code || "existing account, no new setup code"}`).join("\n");
+    output.textContent = rows.map((row) => `${row.student_number} | Portal ID: ${row.portal_id}\nSetup code: ${row.setup_code || "existing account, no new setup code"}`).join("\n\n");
   }
   function taskOptions() {
     const course = rosterCourses.find((row) => row.id === el("portal-roster-course").value);
