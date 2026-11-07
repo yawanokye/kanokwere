@@ -15,6 +15,7 @@ from .models import (
     Document,
     FeatureSetting,
     TaskFeatureActivation,
+    TaskDistanceSettings,
 )
 
 
@@ -23,6 +24,26 @@ ACTIVATION_MODES = {"disabled", "admin_only", "lecturer_allowed", "always_on"}
 # Basic upload, justification, AI declaration, document-grounded questions and
 # results deliberately do not appear here: they cannot be disabled.
 FEATURE_CATALOG: dict[str, dict[str, str]] = {
+    "student_authentication": {
+        "label": "Verified student sign-in",
+        "description": "Require an activated, institution-rostered student account for this task.",
+        "group": "identity",
+    },
+    "student_identity_verification": {
+        "label": "Staff-reviewed photograph verification",
+        "description": "Require student sign-in, a staff-approved reference photo and an attempt-start capture. No automatic face matching.",
+        "group": "identity",
+    },
+    "audio_questions": {
+        "label": "Read questions aloud",
+        "description": "Offer browser speech alongside the full question text. The MCQ timer remains unchanged.",
+        "group": "assessment",
+    },
+    "recorded_oral_responses": {
+        "label": "Recorded oral verification after MCQs",
+        "description": "Collect question-linked spoken explanations, or permitted typed alternatives, for separate lecturer marking.",
+        "group": "assurance",
+    },
     "learning_milestones": {
         "label": "Learning milestones",
         "description": "Accept checkpoint submissions linked to lecturer-defined milestones.",
@@ -212,6 +233,7 @@ def task_payload(db: Session, task: AssessmentTask) -> dict[str, object]:
     configured = feature_settings_by_key(db)
     activations = _activations(task)
     effective = effective_task_features(db, task)
+    distance = db.get(TaskDistanceSettings, task.id)
     features = []
     for key, metadata in FEATURE_CATALOG.items():
         activation = activations.get(key)
@@ -236,6 +258,13 @@ def task_payload(db: Session, task: AssessmentTask) -> dict[str, object]:
         "status": task.status,
         "assessment_question_count": int(task.assessment_question_count or 20),
         "max_attempts": int(task.max_attempts or 1),
+        "distance_settings": {
+            "oral_question_count": distance.oral_question_count if distance else 3,
+            "oral_response_seconds": distance.oral_response_seconds if distance else 120,
+            "oral_window_hours": distance.oral_window_hours if distance else 48,
+            "typed_alternative": distance.typed_alternative if distance else True,
+            "proctor_groups": json.loads(distance.proctor_groups_json) if distance else [],
+        },
         "exam_starts_at": task.exam_starts_at.isoformat() if task.exam_starts_at else None,
         "exam_ends_at": task.exam_ends_at.isoformat() if task.exam_ends_at else None,
         "duration_minutes": task.duration_minutes,

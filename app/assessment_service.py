@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import math
 import random
+import hashlib
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from .config import settings
@@ -21,6 +23,7 @@ from .models import (
     MonitoringEvent,
     Question,
     WebcamSnapshot,
+    AttemptAdmissionLock,
 )
 from .security import make_session_token, verify_token
 
@@ -649,12 +652,12 @@ def start_assessment(
     accommodation_minutes: int = 0,
     location_distance_meters: float | None = None,
     location_accuracy_meters: float | None = None,
+    features_override: dict[str, bool] | None = None,
 ) -> tuple[Assessment, str]:
     document = db.scalar(
         select(Document)
         .options(selectinload(Document.questions))
         .where(Document.id == document_id)
-        .with_for_update()
     )
     if not document:
         raise HTTPException(status_code=404, detail="Document not found.")
@@ -674,6 +677,17 @@ def start_assessment(
         or 1
     )
     normalized_candidate_id = (candidate_id or document.student_id or "").strip().lower()
+    # Lock only this candidate's admission. Locking the common source document
+    # serialized every candidate in a large standalone examination.
+    lock_key = hashlib.sha256(f"{task.id if task else document.id}:{normalized_candidate_id}".encode()).hexdigest()
+    if not db.get(AttemptAdmissionLock, lock_key):
+        try:
+            with db.begin_nested():
+                db.add(AttemptAdmissionLock(lock_key=lock_key))
+                db.flush()
+        except IntegrityError:
+            pass
+    db.execute(select(AttemptAdmissionLock).where(AttemptAdmissionLock.lock_key == lock_key).with_for_update()).scalar_one()
     if task:
         # A new upload or a replacement exam bank must not bypass the task limit.
         # Count every attempt made by this candidate against the same task.
@@ -701,7 +715,7 @@ def start_assessment(
             ),
         )
 
-    captured_features = document_features(document, course)
+    captured_features = features_override if features_override is not None else document_features(document, course)
     requested_count = int(
         document.assessment_question_count_override
         or getattr(course, "assessment_question_count", 20)
@@ -746,9 +760,6 @@ def start_assessment(
     db.flush()
 
     questions = _select_questions(list(document.questions), question_count)
-    for question in questions:
-        question.time_limit_seconds = settings.question_time_seconds
-    db.flush()
 
     rng = random.SystemRandom()
     for position, question in enumerate(questions, start=1):
@@ -797,6 +808,7 @@ def get_assessment(db: Session, assessment_id: str, token: str) -> Assessment:
             selectinload(Assessment.items).selectinload(AssessmentItem.question),
         )
         .where(Assessment.id == assessment_id)
+        .with_for_update()
     )
     if not assessment:
         raise HTTPException(status_code=404, detail="Assessment not found.")
@@ -1056,8 +1068,14 @@ def _adapt_remaining_sequence(assessment: Assessment, answered_item: AssessmentI
 
 
 def submit_answer(
-    db: Session, assessment: Assessment, selected_index: int
+    db: Session, assessment: Assessment, selected_index: int, question_position: int | None = None
 ) -> dict[str, object]:
+    if question_position is not None and question_position != assessment.current_position:
+        previous = _get_item(assessment, question_position)
+        if previous and previous.answered_at is not None and previous.selected_index == selected_index:
+            return {"status": "completed" if assessment.status == "completed" else "accepted",
+                "next_position": assessment.current_position, "already_received": True}
+        raise HTTPException(status_code=409, detail="This answer belongs to a different question. Refresh the current question.")
     _expire_exam_if_needed(db, assessment)
     refresh_interruption_state(db, assessment)
     if assessment.status == "completed":

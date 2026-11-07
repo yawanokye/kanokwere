@@ -18,6 +18,7 @@
     </a>
     <nav aria-label="Main navigation">
       <button class="nav-button active" data-view-link="home">Student</button>
+      <button class="nav-button" data-view-link="student-portal">Student portal</button>
       <button class="nav-button" data-view-link="lecturer">Lecturer</button>
       <button class="nav-button" data-view-link="platform">Admin</button>
     </nav>
@@ -28,14 +29,14 @@
       <div class="hero">
         <div class="hero-copy">
           <span class="eyebrow">Student assessment access</span>
-          <h1>Submit your work or enter a standalone examination</h1>
+          <h1>Submit coursework or take a standalone assessment</h1>
           <p>Choose the path given by your lecturer. Coursework students upload and explain their work. Registered examination candidates use their course code, candidate ID and access PIN.</p>
           <div class="hero-actions" aria-label="Student access choices">
             <button class="primary-button" type="button" data-student-path="coursework">Submit coursework</button>
-            <button class="secondary-button exam-cta" type="button" data-student-path="exam">Take standalone exam</button>
+            <button class="secondary-button exam-cta" type="button" data-student-path="exam">Take standalone assessment</button>
           </div>
           <div class="hero-stats" aria-label="Assessment summary">
-            <div><strong>No student account</strong><span>use the details from your lecturer</span></div>
+            <div><strong>Student portal</strong><span>sign in when required by your lecturer</span></div>
             <div><strong>Roster access</strong><span>lecturer registers exam candidates</span></div>
             <div><strong>PIN protected</strong><span>for eligible standalone exams</span></div>
           </div>
@@ -46,6 +47,7 @@
             <li>Your lecturer provides the course or examination code.</li>
             <li>Exam candidates are registered through the lecturer’s eligibility roster.</li>
             <li>If your examination requires a PIN, enter it exactly as supplied.</li>
+            <li>For verified tasks, activate your student account and obtain staff approval of your reference photograph.</li>
           </ul>
         </aside>
       </div>
@@ -64,11 +66,13 @@
           </button>
           <button class="student-path-card exam-path-card" type="button" data-student-path="exam" aria-pressed="false">
             <span class="path-icon" aria-hidden="true">02</span>
-            <span><strong>Take a standalone exam</strong><small>For registered candidates. Enter the course code, select the examination, then provide your candidate ID and PIN.</small></span>
+            <span><strong>Take a standalone assessment</strong><small>Take a lecturer-prepared test or examination without uploading coursework. Enter the code and any required candidate ID and PIN.</small></span>
             <span class="path-action">Open examination path →</span>
           </button>
         </div>
       </section>
+
+      <div class="eligibility-note"><strong>Does your task require student sign-in?</strong><span>Use the Student portal to activate your rostered account, submit a reference photo for review and return to recorded oral verification.</span><button type="button" class="secondary-button" data-view-link="student-portal">Open student portal</button></div>
 
       <div id="student-access-workflow" class="workflow-shell" data-entry-mode="coursework">
         <ol class="steps" aria-label="Progress">
@@ -560,9 +564,33 @@ Final preparation"></textarea>
                   <summary><span class="summary-number">4</span><span><strong>Optional monitoring and assurance controls</strong><small>Open to activate only the controls required for this task.</small></span></summary>
                   <div id="task-feature-options" class="task-feature-grid"><small>Select a course to load administrator-approved features.</small></div>
                 </details>
+                <details class="task-builder-section"><summary>Distance-learning oral settings</summary><p>Used only when Recorded oral verification is activated. MCQ-only remains available.</p><div class="task-builder-grid">
+                  <label>Oral questions<input name="oral_question_count" type="number" min="1" value="3" required><small>Any positive whole number, no question-count cap.</small></label>
+                  <label>Recording time per answer, seconds<input name="oral_response_seconds" type="number" min="10" value="120" required></label>
+                  <label>Response window after MCQs, hours<input name="oral_window_hours" type="number" min="1" value="48" required></label>
+                  <label class="checkbox-setting"><input name="typed_alternative" type="checkbox" checked><span>Allow typed alternatives for accessibility or connectivity</span></label>
+                  <label class="wide-field">Proctor only these roster groups<textarea name="proctor_groups" rows="2" placeholder="One monitor_group label per line. Leave blank for all candidates in a proctored task."></textarea><small>Requires an exam roster. Group selection does not override controls made mandatory by the administrator.</small></label>
+                </div></details>
                 <div class="task-builder-footer"><small>Review the task settings before creating it. Advanced controls remain optional.</small><button class="primary-button" type="submit">Create assessment task</button></div>
               </form>
               <div id="task-create-message" class="message" role="status"></div>
+            </section>
+
+            <section class="management-card" id="student-roster-manager">
+              <div class="table-heading"><div><h2>Student accounts and identity review</h2><small>Separate from exam eligibility. Course owners provision accounts, staff verify photographs against institutional records.</small></div><button id="refresh-student-roster" type="button" class="secondary-button">Refresh</button></div>
+              <label>Course<select id="portal-roster-course"><option value="">Select course</option></select></label>
+              <details><summary>Add or import students</summary>
+                <form id="provision-student-form" class="stack-form compact-form"><label>Student ID / index number<input name="student_number" required maxlength="100"></label><label>Full name<input name="full_name" required maxlength="180"></label><button class="secondary-button">Add student account</button></form>
+                <form id="import-students-form" class="stack-form compact-form"><label>Student CSV<input name="file" type="file" accept=".csv,text/csv" required><small>Columns: student_number,full_name. Maximum 1,000 students per batch.</small></label><button class="secondary-button">Import student accounts</button></form>
+              </details>
+              <pre id="student-provision-codes" class="setup-code-output hidden"></pre><p>Copy and distribute setup codes privately. They are not shown again. Existing accounts are not reset by importing them.</p>
+              <div id="student-roster-message" class="message" role="status"></div>
+              <div class="portal-actions"><input id="student-roster-search" type="search" aria-label="Find rostered student" placeholder="Student name or index number"><button id="student-roster-find" type="button" class="secondary-button">Find student</button><button id="student-roster-prev" type="button" class="secondary-button">Previous</button><span id="student-roster-page"></span><button id="student-roster-next" type="button" class="secondary-button">Next</button></div>
+              <div id="student-roster-list" class="portal-list"></div>
+              <details><summary>Configure an existing task’s optional controls</summary><form id="portal-task-controls" class="stack-form compact-form">
+                <label>Task<select id="portal-existing-task" required><option value="">Select task</option></select></label><div id="portal-existing-features" class="task-feature-grid"></div>
+                <label>Oral questions<input name="oral_question_count" type="number" min="1" value="3" required></label><label>Recording guide, seconds<input name="oral_response_seconds" type="number" min="10" value="120" required></label><label>Response window, hours<input name="oral_window_hours" type="number" min="1" value="48" required></label><label class="checkbox-setting"><input name="typed_alternative" type="checkbox" checked><span>Allow typed alternatives</span></label><label>Proctored roster groups<textarea name="proctor_groups" rows="2" placeholder="One group per line, blank for all"></textarea></label><button class="secondary-button">Save task controls for future attempts</button>
+              </form></details>
             </section>
 
             <section class="management-card exam-roster-card">
@@ -618,9 +646,10 @@ Final preparation"></textarea>
             </div>
             <div id="live-exam-summary" class="review-summary"></div>
             <div class="live-monitor-toolbar">
-              <label>Find candidate<input id="live-exam-search" type="search" placeholder="Name or candidate ID"></label>
+              <label>Find on this page<input id="live-exam-search" type="search" placeholder="Name or candidate ID"></label>
               <label>Show<select id="live-exam-filter"><option value="active">Active candidates</option><option value="alerts">Movement alerts</option><option value="interrupted">Interrupted or offline</option><option value="paused">Paused by invigilator</option><option value="all">All recent sessions</option></select></label>
             </div>
+            <div class="portal-actions"><button id="monitor-prev-page" type="button" class="secondary-button">Previous 30</button><span id="monitor-page-label"></span><button id="monitor-next-page" type="button" class="secondary-button">Next 30</button></div>
             <div class="table-heading"><div><h3>Live candidate wall</h3><small>Numbered tiles show up to 30 active remote candidates on one screen. Select Comment to speak directly to one candidate.</small></div></div>
             <div id="live-exam-tiles" class="live-exam-tiles" aria-live="polite"></div>
             <details class="live-monitor-details">
@@ -798,11 +827,47 @@ Final preparation"></textarea>
               <div class="table-heading"><h3>Consented screen and environment recordings</h3></div>
               <div id="review-recording-list" class="monitoring-event-list"></div>
             </div>
+            <section id="distance-evidence-review" class="review-monitoring hidden" aria-label="Student identity and oral evidence"></section>
             <div class="table-heading"><h3>Adaptive question-level evidence</h3></div>
             <div id="review-questions" class="review-questions"></div>
           </section>
         </div>
       </div>
+    </section>
+
+    <section id="view-student-portal" class="view">
+      <div class="hero"><div><span class="eyebrow">Distance learning access</span><h1>Your student assessment portal</h1><p>Activate the account provided by your course owner. Review your identity status and return to recorded oral verification. Your exam PIN is separate from your account password.</p></div></div>
+      <div id="student-auth-forms" class="portal-grid">
+        <section class="management-card"><h2>Student sign-in</h2><form id="student-login-form" class="stack-form">
+          <label>Course code<input name="course_code" required maxlength="24" autocomplete="off"></label>
+          <label>Student ID / index number<input name="student_number" required maxlength="100" autocomplete="username"></label>
+          <label>Password<input name="password" type="password" required maxlength="128" autocomplete="current-password"></label>
+          <button class="primary-button">Sign in</button>
+        </form><p>Forgotten your password? Ask your course owner for a new one-time setup code. Existing student sessions will be revoked.</p></section>
+        <section class="management-card"><h2>Activate your student account</h2><p>Your lecturer must add you to the student roster first. Activation codes expire after 48 hours.</p><form id="student-activate-form" class="stack-form">
+          <label>Course code<input name="course_code" required maxlength="24" autocomplete="off"></label>
+          <label>Student ID / index number<input name="student_number" required maxlength="100" autocomplete="username"></label>
+          <label>One-time setup code<input name="setup_code" required maxlength="64" autocomplete="one-time-code"></label>
+          <label>Create password<input name="password" type="password" required minlength="10" maxlength="128" autocomplete="new-password"><small>At least 10 characters, including uppercase, lowercase and a number.</small></label>
+          <label>Confirm password<input name="confirm_password" type="password" required minlength="10" maxlength="128" autocomplete="new-password"></label>
+          <button class="primary-button">Activate and sign in</button>
+        </form></section>
+      </div>
+      <div id="student-portal-message" class="message" role="status"></div>
+      <section id="student-workspace" class="management-card hidden">
+        <div class="table-heading"><div><span class="eyebrow">Signed-in student</span><h2 id="student-account-name"></h2><p id="student-photo-status"></p></div><button id="student-signout" class="secondary-button" type="button">Sign out</button></div>
+        <details><summary>Submit a reference photograph for staff verification</summary><p>Use a clear portrait. Staff must check it against the institutional student record or student card before approval. Uploading a photograph does not verify your identity automatically.</p>
+          <form id="student-photo-form" class="stack-form"><label>Reference photograph<input name="photo" type="file" accept="image/jpeg,image/png" required><small>JPEG or PNG, maximum 1 MB. Don’t upload a national ID document.</small></label>
+            <label class="consent-row"><input name="consent" type="checkbox" required><span>I understand this photo will be stored for authorised identity review under my institution’s retention and privacy policy. No automatic face or voice matching is used.</span></label><button class="secondary-button">Submit photograph for review</button>
+          </form>
+        </details>
+        <h3>Your courses</h3><div id="student-portal-courses" class="portal-grid"></div>
+        <h3>Your recent assessments</h3><div id="student-portal-attempts" class="portal-list"></div>
+      </section>
+      <section id="student-oral-panel" class="management-card hidden" aria-labelledby="student-oral-heading">
+        <h2 id="student-oral-heading">Recorded oral verification</h2><p>Your MCQ score remains separate. Staff assess the reasoning in your answers, not your accent or confidence. This is an asynchronous response window, not a continuously proctored oral examination.</p>
+        <p id="student-oral-summary"></p><div id="student-oral-questions" class="portal-list"></div><div id="student-oral-message" class="message" role="status"></div>
+      </section>
     </section>
 
     <section id="view-platform" class="view">
@@ -910,6 +975,14 @@ Final preparation"></textarea>
     <strong>Kanokware</strong>
     <span>Ownership confidence supports academic judgement. It does not replace due process.</span>
   </footer>
-  <script src="/static/app.js?v=20260901-attempt-governance" defer></script>
+  <section id="identity-capture-dialog" class="identity-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="identity-capture-heading">
+    <div class="management-card"><h2 id="identity-capture-heading">Assessment identity photograph</h2><p>Your task requires a photograph for staff comparison with your approved reference. No automatic face matching is performed. Questions remain closed until capture is confirmed.</p>
+      <video id="identity-capture-video" autoplay muted playsinline></video>
+      <label class="consent-row"><input id="identity-capture-consent" type="checkbox"><span>I understand this photo will be retained for authorised identity review.</span></label>
+      <button id="identity-capture-confirm" class="primary-button" type="button">Capture photograph and continue</button><div id="identity-capture-message" class="message" role="status"></div>
+    </div>
+  </section>
+  <script src="/static/app.js?v=20261107-student-portal" defer></script>
+  <script src="/static/student-portal.js?v=20261107-student-portal" defer></script>
 </body>
 </html>

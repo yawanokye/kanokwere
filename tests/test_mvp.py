@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import io
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -25,6 +26,241 @@ os.environ["LECTURER_REGISTRATION_ENABLED"] = "false"
 from fastapi.testclient import TestClient
 
 from app.main import app
+
+
+def portal_course(client, suffix, features=None, mode="submission_assurance"):
+    email = f"portal-{suffix}@test.edu"
+    _, code = create_lecturer(client, email)
+    activate_lecturer(client, email, code)
+    response = client.post("/api/lecturer/courses", json={"course_code": f"PORTAL {suffix}",
+        "title": "Distance Assessment", "academic_year": "2026/2027", "semester": "First Semester",
+        "assessment_question_count": 3})
+    assert response.status_code == 201, response.text
+    course = response.json()["course"]
+    response = client.post(f"/api/lecturer/courses/{course['id']}/tasks", json={"title": "Distance learning task",
+        "mode": mode, "assessment_question_count": 3, "features": features or {}})
+    assert response.status_code == 201, response.text
+    return course, response.json()["task"]
+
+
+def portal_bank(client, course, task):
+    questions = [{"stem": f"Which statement is correct for examination item {i}?",
+        "options": [f"Correct {i}", f"Alternative B {i}", f"Alternative C {i}", f"Alternative D {i}"],
+        "correct_option_index": 0, "difficulty": "understanding", "category": "document_knowledge",
+        "seconds": 30, "source_quote": f"The approved source states the correct fact for item {i}.",
+        "source_location": f"Bank item {i}", "explanation": "The approved source establishes the designated correct answer."} for i in range(3)]
+    response = client.post(f"/api/lecturer/courses/{course['id']}/tasks/{task['id']}/question-bank",
+        data={"title": "Approved examination bank"}, files={"file": ("bank.json", json.dumps({"questions": questions}), "application/json")})
+    assert response.status_code == 200, response.text
+
+
+def valid_portrait():
+    from PIL import Image
+    stream = io.BytesIO()
+    Image.new("RGB", (32, 32), (120, 130, 140)).save(stream, "PNG")
+    return stream.getvalue()
+
+
+def test_student_portal_activation_roster_scope_and_reset():
+    with TestClient(app) as teacher, TestClient(app) as candidate:
+        course, _ = portal_course(teacher, "auth")
+        base = f"/api/lecturer/courses/{course['id']}/students"
+        created = teacher.post(base, json={"student_number": "ST/001", "full_name": "Rostered Student"})
+        assert created.status_code == 201, created.text
+        account = created.json()
+        credentials = {"course_code": course["enrollment_code"], "student_number": "ST/001",
+            "setup_code": account["setup_code"], "password": "StudentPass123"}
+        weak = candidate.post("/api/student/activate", json={**credentials, "password": "Ab1"})
+        assert weak.status_code == 422
+        response = candidate.post("/api/student/activate", json=credentials)
+        assert response.status_code == 200, response.text
+        assert response.json()["student"]["student_number"] == "st/001"
+        assert candidate.post(base, json={"student_number": "ST/002", "full_name": "Not permitted"}).status_code == 401
+        assert candidate.post("/api/student/activate", json=credentials).status_code == 409
+        reimport = teacher.post(base + "/import", files={"file": ("students.csv", "student_number,full_name\nst/001,Rostered Student\nst/002,Another Student", "text/csv")})
+        assert reimport.status_code == 200, reimport.text
+        assert reimport.json()["students"][0]["setup_code"] is None
+        assert teacher.get(base + "?search=ST%2F002").json()["pagination"]["total"] == 1
+        reset = teacher.post(base + f"/{account['student_id']}/reset")
+        assert reset.status_code == 200, reset.text
+        assert candidate.get("/api/student/me").json()["student"] is None
+        assert candidate.post("/api/student/login", json=credentials).status_code == 401
+        from app.database import SessionLocal
+        from app.models import StudentAccount
+        with SessionLocal() as db:
+            record = db.get(StudentAccount, account["student_id"])
+            assert record.setup_hash != reset.json()["setup_code"]
+            assert record.password_hash is None
+
+
+def test_verified_student_photo_coursework_and_cross_account_protection():
+    with TestClient(app) as teacher, TestClient(app) as candidate, TestClient(app) as other:
+        course, task = portal_course(teacher, "identity", {"student_identity_verification": True})
+        base = f"/api/lecturer/courses/{course['id']}/students"
+        provisioned = teacher.post(base, json={"student_number": "id/001", "full_name": "Verified Student"}).json()
+        credentials = {"course_code": course["enrollment_code"], "student_number": "id/001",
+            "password": "StudentPass123", "setup_code": provisioned["setup_code"]}
+        assert candidate.post("/api/student/activate", json=credentials).status_code == 200
+        data = {"student_name": "Untrusted supplied name", "student_id": "ID/001", "title": "My submitted coursework",
+            "course_code": course["enrollment_code"], "task_id": task["id"], **understanding_fields()}
+        file = {"file": ("work.txt", sample_document(), "text/plain")}
+        assert other.post("/api/documents", data=data, files=file).status_code == 401
+        assert candidate.post("/api/documents", data=data, files=file).status_code == 409
+        photo = candidate.post("/api/student/reference-photo", data={"consent": "true"}, files={"photo": ("portrait.png", valid_portrait(), "image/png")})
+        assert photo.status_code == 201, photo.text
+        row = teacher.get(base).json()["students"][0]
+        assert row["photo_status"] == "pending_review"
+        assert other.get(row["photo_url"]).status_code == 401
+        assert teacher.get(row["photo_url"]).status_code == 200
+        review = teacher.post(f"{base}/{row['id']}/photo/{row['photo_id']}/review", json={"status": "verified", "note": "Checked against the approved institutional student record."})
+        assert review.status_code == 200, review.text
+        upload = candidate.post("/api/documents", data=data, files=file)
+        assert upload.status_code == 202, upload.text
+        started = candidate.post("/api/assessments/start", json={"document_id": upload.json()["document_id"], "client_instance_id": "identity-client-00001"})
+        assert started.status_code == 200, started.text
+        attempt = started.json(); aid = attempt["assessment_id"]; headers = {"Authorization": f"Bearer {attempt['session_token']}"}
+        assert candidate.get(f"/api/assessments/{aid}/question", headers=headers).status_code == 409
+        assert other.get(f"/api/assessments/{aid}/question", headers=headers).status_code == 401
+        captured = candidate.post(f"/api/assessments/{aid}/identity-photo", headers=headers,
+            data={"consent": "true"}, files={"photo": ("capture.png", valid_portrait(), "image/png")})
+        assert captured.status_code == 201, captured.text
+        assert candidate.get(f"/api/assessments/{aid}/question", headers=headers).status_code == 200
+        evidence = teacher.get(f"/api/lecturer/assessments/{aid}/distance-evidence").json()
+        assert evidence["student"]["full_name"] == "Verified Student"
+        assert evidence["identity_status"] == "pending_review"
+        assert teacher.get(evidence["reference_url"]).status_code == 200
+        assert other.get(evidence["capture_url"]).status_code == 401
+        assert teacher.post(f"/api/lecturer/assessments/{aid}/identity-review", json={"status": "review_required", "note": "Manual follow-up needed. This is not a misconduct finding."}).status_code == 200
+
+
+def test_recorded_oral_answers_preserve_mcq_score_and_unlimited_count():
+    with TestClient(app) as teacher, TestClient(app) as candidate:
+        course, task = portal_course(teacher, "oral", {"recorded_oral_responses": True, "audio_questions": True}, "standalone_exam")
+        config = teacher.put(f"/api/lecturer/courses/{course['id']}/tasks/{task['id']}/distance-settings",
+            json={"oral_question_count": 23, "oral_response_seconds": 90, "oral_window_hours": 24, "typed_alternative": True})
+        assert config.status_code == 200, config.text
+        portal_bank(teacher, course, task)
+        started = candidate.post("/api/examinations/start", json={"course_code": course["enrollment_code"],
+            "task_id": task["id"], "candidate_name": "Oral Candidate", "candidate_id": "ORAL/01", "readiness_confirmed": True,
+            "client_instance_id": "oral-browser-instance-01"})
+        assert started.status_code == 200, started.text
+        aid = started.json()["assessment_id"]; headers = {"Authorization": "Bearer " + started.json()["session_token"]}
+        assert candidate.get(f"/api/assessments/{aid}/oral", headers=headers).status_code == 409
+        for position in range(1, 4):
+            question = candidate.get(f"/api/assessments/{aid}/question", headers=headers)
+            assert question.status_code == 200, question.text
+            answer = candidate.post(f"/api/assessments/{aid}/answer", headers=headers, json={"selected_index": 0, "question_position": position})
+            assert answer.status_code == 200, answer.text
+            if position == 1:
+                retry = candidate.post(f"/api/assessments/{aid}/answer", headers=headers, json={"selected_index": 0, "question_position": position})
+                assert retry.status_code == 200 and retry.json()["already_received"]
+        score = candidate.get(f"/api/assessments/{aid}/result", headers=headers).json()["score"]
+        oral = candidate.get(f"/api/assessments/{aid}/oral", headers=headers)
+        assert oral.status_code == 200, oral.text
+        assert len(oral.json()["questions"]) == 23
+        assert len({q["id"] for q in oral.json()["questions"]}) == 23
+        for q in oral.json()["questions"]:
+            if q["id"] == "oral-1":
+                import wave
+                audio = io.BytesIO()
+                with wave.open(audio, "wb") as wav:
+                    wav.setnchannels(1)
+                    wav.setsampwidth(2)
+                    wav.setframerate(8000)
+                    wav.writeframes(b"\x00\x00" * 800)
+                result = candidate.post(f"/api/assessments/{aid}/oral/{q['id']}", headers=headers,
+                    data={"consent": "true"}, files={"audio": ("response.wav", audio.getvalue(), "audio/wav")})
+            else:
+                result = candidate.post(f"/api/assessments/{aid}/oral/{q['id']}", headers=headers,
+                    data={"consent": "true", "text": "This explanation sets out the reasoning and limitations of the source."})
+            assert result.status_code == 201, result.text
+        retry = candidate.post(f"/api/assessments/{aid}/oral/oral-1", headers=headers,
+            data={"consent": "true", "text": "A changed answer must not replace the original."})
+        assert retry.json()["already_received"] is True
+        evidence = teacher.get(f"/api/lecturer/assessments/{aid}/distance-evidence").json()
+        assert len(evidence["responses"]) == 23
+        assert evidence["responses"][0]["typed_text"] != "A changed answer must not replace the original."
+        audio_row = next(row for row in evidence["responses"] if row["audio_url"])
+        assert teacher.get(audio_row["audio_url"]).content.startswith(b"RIFF")
+        assert candidate.get(audio_row["audio_url"]).status_code == 401
+        marked = teacher.post(f"/api/lecturer/assessments/{aid}/oral-defence/complete", json={"scores": [
+            {"question_id": q["id"], "score": 4} for q in oral.json()["questions"]], "outcome": "satisfactory"})
+        assert marked.status_code == 200, marked.text
+        assert marked.json()["oral_defence"]["total_score"] == 80
+        assert candidate.get(f"/api/assessments/{aid}/result", headers=headers).json()["score"] == score
+
+
+def test_monitor_page_size_does_not_limit_exam_admission():
+    with TestClient(app) as teacher, TestClient(app) as candidate:
+        course, task = portal_course(teacher, "page", {"live_exam_monitoring": True}, "standalone_exam")
+        portal_bank(teacher, course, task)
+        for number in range(31):
+            result = candidate.post("/api/examinations/start", json={"course_code": course["enrollment_code"],
+                "task_id": task["id"], "candidate_name": f"Candidate {number}", "candidate_id": f"PAGE/{number}",
+                "readiness_confirmed": True, "client_instance_id": f"page-browser-{number:016d}"})
+            assert result.status_code == 200, result.text
+        first = teacher.get(f"/api/lecturer/courses/{course['id']}/live-exam-monitor").json()
+        second = teacher.get(f"/api/lecturer/courses/{course['id']}/live-exam-monitor?page=2").json()
+        assert len(first["sessions"]) == 30 and len(second["sessions"]) == 1
+        assert first["pagination"]["total"] == 31
+        assert first["capacity"]["scope"] == "monitor_page_only_not_exam_admission"
+        assert not ({row["assessment_id"] for row in first["sessions"]} & {row["assessment_id"] for row in second["sessions"]})
+
+
+def test_cross_origin_student_mutations_are_rejected():
+    with TestClient(app) as client:
+        assert client.post("/api/student/logout", headers={"Origin": "https://untrusted.example"}).status_code == 403
+
+
+def test_proctoring_can_be_selected_for_rostered_groups():
+    with TestClient(app) as teacher, TestClient(app) as candidate:
+        course, task = portal_course(teacher, "groups", {"live_exam_monitoring": True, "webcam_monitoring": True}, "standalone_exam")
+        task_base = f"/api/lecturer/courses/{course['id']}/tasks/{task['id']}"
+        portal_bank(teacher, course, task)
+        assert teacher.patch(task_base, json={"roster_required": True}).status_code == 200
+        roster = teacher.post(task_base + "/candidates/import", files={"file": ("roster.csv",
+            "candidate_id,candidate_name,access_pin,monitor_group\ngroup/a,Student A,123456,Selected\ngroup/b,Student B,234567,Other", "text/csv")})
+        assert roster.status_code == 200, roster.text
+        config = teacher.put(task_base + "/distance-settings", json={"proctor_groups": ["Selected"]})
+        assert config.status_code == 200, config.text
+        for cid, pin, expected in [("group/a", "123456", True), ("group/b", "234567", False)]:
+            attempt = candidate.post("/api/examinations/start", json={"course_code": course["enrollment_code"],
+                "task_id": task["id"], "candidate_name": "Supplied name", "candidate_id": cid, "access_pin": pin,
+                "readiness_confirmed": True, "client_instance_id": "selected-group-browser-00001"})
+            assert attempt.status_code == 200, attempt.text
+            assert attempt.json()["active_features"]["live_exam_monitoring"] is expected
+            assert attempt.json()["active_features"]["webcam_monitoring"] is expected
+        monitor = teacher.get(f"/api/lecturer/courses/{course['id']}/live-exam-monitor").json()
+        assert [row["student_id"] for row in monitor["sessions"]] == ["group/a"]
+
+
+def test_student_portal_migration_from_existing_schema(tmp_path):
+    import subprocess
+    script = '''
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import inspect
+from app.database import Base, engine
+from app import models
+new = {"student_accounts", "student_enrollments", "student_sessions", "student_photos", "student_document_links", "task_distance_settings", "attempt_admission_locks", "assessment_distance_evidence", "student_oral_responses"}
+Base.metadata.create_all(engine, tables=[table for table in Base.metadata.sorted_tables if table.name not in new])
+config = Config("alembic.ini")
+command.stamp(config, "20261104_11")
+command.upgrade(config, "head")
+for name in new:
+    actual = {column["name"] for column in inspect(engine).get_columns(name)}
+    expected = set(Base.metadata.tables[name].columns.keys())
+    assert actual == expected, (name, actual, expected)
+command.downgrade(config, "20261104_11")
+assert not new.intersection(inspect(engine).get_table_names())
+command.upgrade(config, "head")
+assert new.issubset(inspect(engine).get_table_names())
+print("Upgrade, schema comparison, rollback and re-upgrade passed.")
+'''
+    env = {**os.environ, "DATABASE_URL": f"sqlite:///{tmp_path / 'migration.db'}"}
+    result = subprocess.run([sys.executable, "-c", script], cwd=ROOT, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
 
 
 ADMIN_HEADERS = {"X-Admin-Key": "test-admin-key"}

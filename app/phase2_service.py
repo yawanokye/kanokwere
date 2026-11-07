@@ -167,7 +167,18 @@ def prepare_oral_defence(
     if existing:
         return existing
     count = max(1, int(question_count or course.oral_defence_question_count or 5))
-    questions = _oral_question_bank(assessment)[:count]
+    bank = _oral_question_bank(assessment)
+    items = sorted(assessment.items, key=lambda item: item.position)
+    questions = []
+    for index in range(count):
+        if assessment.document.submission_stage == "exam_source" or index >= len(bank):
+            item = items[index % len(items)] if items else None
+            excerpt = _clean(item.question.source_quote)[:700] if item else _clean(assessment.document.extracted_text)[:700]
+            actions = ["Explain the reasoning behind this passage", "Apply the idea to a different practical case", "State a limitation or assumption and explain its implications", "Describe a plausible incorrect interpretation and correct it"]
+            question = {"id": f"oral-{index + 1}", "prompt": f"Oral question {index + 1}. {actions[(index // max(1, len(items))) % len(actions)]}: {excerpt}", "focus": "document_specific_application", "max_score": 5.0}
+        else:
+            question = dict(bank[index])
+        questions.append(question)
     record = OralDefence(
         assessment_id=assessment.id,
         course_id=course.id,

@@ -73,9 +73,11 @@ const state = {
   currentReviewData: null,
   currentAnomalyCourseId: null,
   liveMonitorCourseId: null,
+  liveMonitorPage: 1,
   liveMonitorTimer: null,
   liveMonitorResult: null,
   examReadinessTaskId: null,
+  candidateTaskFeatures: null,
   proctorPaused: false,
   lastProctorMessageAt: null,
   examLocation: null,
@@ -1559,7 +1561,9 @@ function applySelectedAssessmentTask() {
     state.activeFeatures = {};
     return;
   }
-  const features = task?.effective_features || {
+  const candidateFeatures = state.candidateTaskFeatures;
+  const features = (candidateFeatures?.taskId === task?.id && candidateFeatures?.candidateId === $("#exam-candidate-id")?.value.trim()
+    ? candidateFeatures.features : null) || task?.effective_features || {
     learning_milestones: Boolean(course.milestones_enabled),
     version_history: Boolean(course.version_history_enabled),
     webcam_monitoring: Boolean(course.webcam_monitoring_enabled),
@@ -1652,6 +1656,9 @@ $("#verify-course-code")?.addEventListener("click", () => resolveStudentCourse(t
 $("#student-course-code")?.addEventListener("change", () => resolveStudentCourse(false));
 $("#student-assessment-task")?.addEventListener("change", applySelectedAssessmentTask);
 $("#standalone-exam-consent")?.addEventListener("change", applySelectedAssessmentTask);
+["exam-candidate-id", "exam-access-pin"].forEach((id) => $("#" + id)?.addEventListener("input", () => {
+  state.examReadinessTaskId = null; state.candidateTaskFeatures = null; applySelectedAssessmentTask();
+}));
 
 function requestDeviceLocation() {
   return new Promise((resolve, reject) => {
@@ -1678,6 +1685,16 @@ $("#run-exam-readiness")?.addEventListener("click", async () => {
   button.disabled = true;
   setMessage($("#exam-readiness-result"), "Checking this device and browser…");
   try {
+    const requirements = await api("/api/examinations/requirements", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ course_code: $("#student-course-code").value.trim(), task_id: task.id,
+        candidate_name: $("#exam-candidate-name").value.trim(), candidate_id: $("#exam-candidate-id").value.trim(),
+        access_pin: $("#exam-access-pin").value || null, client_instance_id: state.clientInstanceId }),
+    });
+    state.candidateTaskFeatures = { taskId: task.id, candidateId: $("#exam-candidate-id").value.trim(), features: requirements.active_features };
+    state.activeFeatures = requirements.active_features;
+    state.monitoringEnabled = Boolean(state.activeFeatures.webcam_monitoring);
+    state.secureBrowserEnforcement = Boolean(state.activeFeatures.secure_browser_enforcement);
     const failures = [];
     if (window.self !== window.top) failures.push("Kanokware is open inside another app or frame");
     if (!navigator.onLine) failures.push("the device is offline");
@@ -2106,6 +2123,7 @@ async function loadQuestion() {
   }
   clearSnapshotTimer();
   try {
+    await globalThis.StudentPortal?.ensureIdentity();
     const result = await api(`/api/assessments/${state.assessmentId}/question`, {
       headers: { Authorization: `Bearer ${state.token}` },
     });
@@ -2134,11 +2152,13 @@ async function loadQuestion() {
       return;
     }
     state.currentPosition = result.position;
+    globalThis.speechSynthesis?.cancel();
     setMessage($("#test-message"));
     $("#question-progress-text").textContent = `Question ${result.position} of ${result.total}`;
     $("#question-progress-bar").style.width = `${(result.position / result.total) * 100}%`;
     $("#difficulty-badge").textContent = result.difficulty;
     $("#question-heading").textContent = result.stem;
+    globalThis.StudentPortal?.questionAudio(result, state.activeFeatures);
     const options = $("#options");
     options.replaceChildren();
     result.options.forEach((option, index) => {
@@ -2191,7 +2211,7 @@ async function submitAnswer(index, selectedButton) {
     const result = await api(`/api/assessments/${state.assessmentId}/answer`, {
       method: "POST",
       headers: assessmentHeaders(),
-      body: JSON.stringify({ selected_index: index }),
+      body: JSON.stringify({ selected_index: index, question_position: state.currentPosition }),
     });
     await pendingCapture;
     setMessage($("#test-message"), "Answer received.", "success");
@@ -2238,6 +2258,7 @@ async function loadResult() {
     $("#monitoring-count").textContent = result.monitoring_event_count || 0;
     if ($("#interruption-count")) $("#interruption-count").textContent = result.interruption_count || 0;
     $("#result-disclaimer").textContent = result.disclaimer;
+    globalThis.StudentPortal?.resultActions(state.assessmentId, state.token, state.activeFeatures);
     clearAssessmentSession();
   } catch (error) {
     setMessage($("#test-message"), error.message, "error");
@@ -2604,6 +2625,7 @@ async function loadCourses() {
   try {
     const result = await api("/api/lecturer/courses");
     state.courses = result.courses;
+    globalThis.StudentPortal?.courses(state.courses);
     renderCourses(result.courses);
     populateCourseSelectors(result.courses);
   } catch (error) {
@@ -2773,6 +2795,13 @@ $("#assessment-task-form")?.addEventListener("submit", async (event) => {
         geofence_max_accuracy_meters: Number(data.geofence_max_accuracy_meters || 100),
         features,
       }),
+    });
+    await api(`/api/lecturer/courses/${data.course_id}/tasks/${created.task.id}/distance-settings`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ oral_question_count: Number(data.oral_question_count || 3),
+        oral_response_seconds: Number(data.oral_response_seconds || 120),
+        oral_window_hours: Number(data.oral_window_hours || 48), typed_alternative: Boolean(form.elements.typed_alternative.checked),
+        proctor_groups: (data.proctor_groups || "").split("\n").map((value) => value.trim()).filter(Boolean) }),
     });
     if (data.mode === "standalone_exam" && (sourceFile || questionFile)) {
       const upload = new FormData();
@@ -3064,6 +3093,7 @@ function stopLiveExamMonitor() {
 async function openLiveExamMonitor(course) {
   stopLiveExamMonitor();
   state.liveMonitorCourseId = course.id;
+  state.liveMonitorPage = 1;
   $("#live-exam-monitor-panel").classList.remove("hidden");
   $("#live-exam-monitor-panel").scrollIntoView({ behavior: "smooth" });
   await loadLiveExamMonitor();
@@ -3130,7 +3160,7 @@ function renderLiveExamMonitor(result) {
   summary.replaceChildren();
   const capacity = result.capacity || { active: sessions.filter((item) => item.connected).length, limit: 30 };
   const metrics = [
-    [`${capacity.active || 0}/${capacity.limit || 30}`, "remote monitoring capacity"],
+    [capacity.active || 0, "active monitored candidates, all pages"],
     [sessions.filter((item) => item.connected).length, "connected now"],
     [sessions.filter((item) => ["interrupted", "locked", "proctor_paused"].includes(item.status)).length, "require attention"],
     [sessions.filter((item) => item.status === "completed").length, "completed"],
@@ -3164,7 +3194,7 @@ function renderLiveExamMonitor(result) {
       <div class="live-tile-progress"><span></span><strong></strong></div>
       <div class="live-tile-warning hidden"><strong></strong><small></small></div>
       <div class="action-row"><button type="button">Comment</button><button type="button" class="secondary-button">Review</button></div>`;
-    tile.querySelector(".candidate-tile-number").textContent = String(index + 1).padStart(2, "0");
+    tile.querySelector(".candidate-tile-number").textContent = String((state.liveMonitorPage - 1) * 30 + index + 1).padStart(2, "0");
     const status = tile.querySelector(".status-pill");
     status.textContent = item.connected ? "Live" : String(item.status || "offline").replaceAll("_", " ");
     status.classList.add(item.connected ? "active" : "warning");
@@ -3273,9 +3303,12 @@ async function loadLiveExamMonitor() {
   if (!courseId) return;
   stopLiveExamMonitor();
   try {
-    const result = await api(`/api/lecturer/courses/${courseId}/live-exam-monitor`);
+    const result = await api(`/api/lecturer/courses/${courseId}/live-exam-monitor?page=${state.liveMonitorPage}`);
     if (state.liveMonitorCourseId !== courseId) return;
     renderLiveExamMonitor(result);
+    $("#monitor-page-label").textContent = `Page ${state.liveMonitorPage}, ${result.pagination?.total || 0} visible sessions`;
+    $("#monitor-prev-page").disabled = state.liveMonitorPage <= 1;
+    $("#monitor-next-page").disabled = !result.pagination?.has_next;
     state.liveMonitorTimer = setTimeout(loadLiveExamMonitor, Math.max(3000, Number(result.refresh_seconds || 5) * 1000));
   } catch (error) {
     handleLecturerError(error);
@@ -3283,6 +3316,8 @@ async function loadLiveExamMonitor() {
 }
 
 $("#refresh-live-exam-monitor")?.addEventListener("click", loadLiveExamMonitor);
+$("#monitor-prev-page")?.addEventListener("click", () => { if (state.liveMonitorPage > 1) state.liveMonitorPage -= 1; loadLiveExamMonitor(); });
+$("#monitor-next-page")?.addEventListener("click", () => { if (state.liveMonitorResult?.pagination?.has_next) state.liveMonitorPage += 1; loadLiveExamMonitor(); });
 $("#live-exam-filter")?.addEventListener("change", () => {
   if (state.liveMonitorResult) renderLiveExamMonitor(state.liveMonitorResult);
 });
@@ -3853,6 +3888,7 @@ async function reviewAssessment(assessmentId) {
     renderLearningAlerts(result.learning_alerts || []);
     renderRubric(result.rubric || [], result.rubric_mark, result.mark_audit || []);
     renderPhase2Modules(result);
+    globalThis.StudentPortal?.review(state.currentReviewAssessmentId);
 
     const interruptionPanel = $("#review-interruption");
     const interruptionCount = Number(result.summary.interruption_count || 0);

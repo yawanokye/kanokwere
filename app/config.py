@@ -26,6 +26,9 @@ class Settings:
     database_url: str = os.getenv(
         "DATABASE_URL", f"sqlite:///{(BASE_DIR / 'kanokware.db').as_posix()}"
     )
+    db_pool_size: int = int(os.getenv("DB_POOL_SIZE", "5"))
+    db_max_overflow: int = int(os.getenv("DB_MAX_OVERFLOW", "10"))
+    db_pool_timeout: int = int(os.getenv("DB_POOL_TIMEOUT", "30"))
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-5.5")
     openai_timeout_seconds: int = int(os.getenv("OPENAI_TIMEOUT_SECONDS", "180"))

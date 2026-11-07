@@ -102,6 +102,7 @@ class InterruptionNoteRequest(BaseModel):
 
 class AnswerRequest(BaseModel):
     selected_index: int = Field(ge=0, le=3)
+    question_position: int | None = Field(default=None, ge=1)
 
 
 class FocusEventRequest(BaseModel):
@@ -412,7 +413,7 @@ class OralDefenceQuestionScoreRequest(BaseModel):
 
 
 class OralDefenceCompleteRequest(BaseModel):
-    scores: list[OralDefenceQuestionScoreRequest] = Field(min_length=3, max_length=10)
+    scores: list[OralDefenceQuestionScoreRequest] = Field(min_length=1)
     outcome: Literal["satisfactory", "satisfactory_with_conditions", "further_verification", "unsatisfactory"]
     notes: str | None = Field(default=None, max_length=3000)
 

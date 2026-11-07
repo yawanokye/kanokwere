@@ -27,6 +27,101 @@ def new_id() -> str:
     return str(uuid4())
 
 
+class StudentAccount(Base):
+    __tablename__ = "student_accounts"
+    __table_args__ = (UniqueConstraint("institution_id", "student_number", name="uq_student_institution_number"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    institution_id: Mapped[str] = mapped_column(ForeignKey("institutions.id", ondelete="CASCADE"), index=True)
+    student_number: Mapped[str] = mapped_column(String(100))
+    full_name: Mapped[str] = mapped_column(String(180))
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    setup_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    setup_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="pending_activation")
+    failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class StudentEnrollment(Base):
+    __tablename__ = "student_enrollments"
+    __table_args__ = (UniqueConstraint("course_id", "student_id", name="uq_student_enrollment"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    course_id: Mapped[str] = mapped_column(ForeignKey("courses.id", ondelete="CASCADE"), index=True)
+    student_id: Mapped[str] = mapped_column(ForeignKey("student_accounts.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="active")
+
+
+class StudentSession(Base):
+    __tablename__ = "student_sessions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    student_id: Mapped[str] = mapped_column(ForeignKey("student_accounts.id", ondelete="CASCADE"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class StudentPhoto(Base):
+    __tablename__ = "student_photos"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    student_id: Mapped[str] = mapped_column(ForeignKey("student_accounts.id", ondelete="CASCADE"), index=True)
+    image_data: Mapped[bytes] = mapped_column(LargeBinary)
+    mime_type: Mapped[str] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(30), default="pending_review")
+    reviewer_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class StudentDocumentLink(Base):
+    __tablename__ = "student_document_links"
+    document_id: Mapped[str] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True)
+    student_id: Mapped[str] = mapped_column(ForeignKey("student_accounts.id", ondelete="CASCADE"), index=True)
+
+
+class TaskDistanceSettings(Base):
+    __tablename__ = "task_distance_settings"
+    task_id: Mapped[str] = mapped_column(ForeignKey("assessment_tasks.id", ondelete="CASCADE"), primary_key=True)
+    oral_question_count: Mapped[int] = mapped_column(Integer, default=3)
+    oral_response_seconds: Mapped[int] = mapped_column(Integer, default=120)
+    oral_window_hours: Mapped[int] = mapped_column(Integer, default=48)
+    typed_alternative: Mapped[bool] = mapped_column(Boolean, default=True)
+    proctor_groups_json: Mapped[str] = mapped_column(Text, default="[]")
+
+
+class AttemptAdmissionLock(Base):
+    """One transaction lock per candidate and task, not per shared exam bank."""
+    __tablename__ = "attempt_admission_locks"
+    lock_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+
+class AssessmentDistanceEvidence(Base):
+    __tablename__ = "assessment_distance_evidence"
+    assessment_id: Mapped[str] = mapped_column(ForeignKey("assessments.id", ondelete="CASCADE"), primary_key=True)
+    student_id: Mapped[str | None] = mapped_column(ForeignKey("student_accounts.id", ondelete="SET NULL"), nullable=True, index=True)
+    reference_photo_id: Mapped[str | None] = mapped_column(ForeignKey("student_photos.id", ondelete="SET NULL"), nullable=True)
+    start_photo: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    start_photo_mime: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    identity_status: Mapped[str] = mapped_column(String(40), default="not_required")
+    identity_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    identity_reviewer_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    settings_json: Mapped[str] = mapped_column(Text, default="{}")
+    oral_questions_json: Mapped[str] = mapped_column(Text, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class StudentOralResponse(Base):
+    __tablename__ = "student_oral_responses"
+    __table_args__ = (UniqueConstraint("assessment_id", "question_id", name="uq_student_oral_response"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    assessment_id: Mapped[str] = mapped_column(ForeignKey("assessments.id", ondelete="CASCADE"), index=True)
+    question_id: Mapped[str] = mapped_column(String(80))
+    audio_data: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    typed_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Institution(Base):
     __tablename__ = "institutions"
 

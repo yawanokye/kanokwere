@@ -1,8 +1,23 @@
-# Kanokware 1.3.0
+# Kanokware 1.4.0
 
 **Verify learning in the age of AI.**
 
-Kanokware links student submissions to lecturer-owned courses and tests whether students can explain, defend, apply, and reflect on the work submitted under their names. The platform supports final-only assignments as well as optional learning-process monitoring.
+Kanokware retains two assessment entry paths: students submit coursework for a document-grounded understanding check, or take a standalone lecturer-prepared test without uploading coursework. MCQ-only assessment remains available, with optional student authentication, staff-reviewed identity photographs, oral explanations and task-level proctoring.
+
+## v1.4 distance-learning foundation
+
+- Open **Student portal** to activate a lecturer-provisioned account, sign in, submit a reference photograph for staff approval, and return to recorded oral verification.
+- In the lecturer workspace, choose a course under **Student accounts and identity review**. Add students or import a UTF-8 CSV with `student_number,full_name`. Setup codes expire after 48 hours and must be distributed privately.
+- Enable **Verified student sign-in**, **Staff-reviewed photograph verification**, **Read questions aloud**, or **Recorded oral verification after MCQs** only for tasks that need them. Platform feature policies still control lecturer activation.
+- Reference photographs require a staff check against a trusted institutional record. Assessment captures are compared side by side by authorised staff. No automatic facial identification, voiceprints or automatic misconduct decisions are performed.
+- Oral answers have a lecturer-set question count, recording guide and response window. Permitted typed alternatives and retry-safe submissions support distance learners. Recordings are marked separately from MCQs. No automatic transcription is included.
+- Select proctored roster groups when only part of an examination needs monitoring. Administrator-mandatory controls still apply to everyone.
+- Thirty candidates is a **monitor-page size**, not an examination admission limit. Monitor listings and student rosters are paginated.
+- Existing attempts retain their feature/settings snapshots. MCQ answer retries carry a question position and do not silently answer the next question.
+
+The enterprise design target is **100,000 simultaneous assessment candidates with selective proctoring**, not a tested capacity of this release. The current hosting and database-backed media are for a controlled pilot. Do not schedule a 100,000-candidate high-stakes exam on this deployment. See [the architecture and validation plan](ASSESSMENT_PLATFORM_ROADMAP.md) for the required distributed services, security controls and capacity gates. Native essay, numerical and multiple-answer engines are later work, not features claimed by this release.
+
+Database revision: `20261107_12_student_portal.py`. PostgreSQL pool limits may be set with `DB_POOL_SIZE`, `DB_MAX_OVERFLOW` and `DB_POOL_TIMEOUT`, sized against total database connections across all instances. No infrastructure is provisioned by this source update.
 
 ## Phase 1 learning assurance
 
@@ -171,7 +186,7 @@ Candidates must pass a browser and device-readiness check before starting. The c
 
 The live invigilation dashboard now lets an authorised lecturer warn a candidate, pause and resume the clocks, add time, or end and lock an attempt. The candidate receives interventions through the assessment heartbeat even when webcam monitoring is off. Every action is added to the monitoring and audit trail for later review.
 
-Remote invigilation supports up to 30 active candidate sessions for an examination. The lecturer sees all active candidates in a numbered tile wall, including connection, progress, camera state, monitor group and movement warnings, with direct Comment and Review actions. Course owners and institution administrators can see the full examination. When group assignments exist, other authorised monitors see only their assigned candidate groups. When a candidate leaves a resumable session, the visible question is moved to the end of the remaining sequence and unseen questions are reshuffled. The next question is different when a replacement exists. If no replacement remains, the visible question stays as the final question. Time already spent on it is retained, and the event is written to the monitoring trail.
+Remote invigilation displays up to 30 candidates per monitor page. The lecturer sees numbered tiles including connection, progress, camera state, monitor group and movement warnings, with direct Comment and Review actions. Course owners and institution administrators can page through the full examination. When group assignments exist, other authorised monitors see only their assigned candidate groups. When a candidate leaves a resumable session, the visible question is moved to the end of the remaining sequence and unseen questions are reshuffled. The next question is different when a replacement exists. If no replacement remains, the visible question stays as the final question. Time already spent on it is retained, and the event is written to the monitoring trail.
 
 Candidate-side movement and presence indicators create an on-screen and spoken warning. The same condition is highlighted on the candidate's remote-monitor tile. An invigilator comment is delivered on screen and by browser speech, and retained in the incident record.
 
